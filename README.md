@@ -1,6 +1,6 @@
 # Open-LIFU Verification Tank
 
-A Python-based system for automated acoustic field verification and characterization of focused ultrasound transducers using the OpenLIFU platform.
+A Python-based system for automated acoustic field verification and characterization of focused ultrasound transducers using the Open-LIFU platform.
 
 ## Overview
 
