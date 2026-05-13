@@ -36,7 +36,7 @@ The Open-LIFU Verification Tank provides a comprehensive solution for measuring 
    - Connect QPX600DP power supply via USB and install AIM TTi drivers
    - Set up Open-LIFU system according to the manufacturer's instructions
    - Install a hydrophone in the tank positioning system
-   - Connect Channel A of the Picoscope to the Hydrophone Output, and channel B to the trigger output of the OpenLIFU system (optional)
+   - Connect Channel A of the Picoscope to the Hydrophone Output, and channel B to the trigger output of the Open-LIFU system (optional)
 
 2. **Python Environment**
    ```bash
