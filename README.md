@@ -17,7 +17,7 @@ The Open-LIFU Verification Tank provides a comprehensive solution for measuring 
 ## System Components
 
 ### Hardware
-- **OpenLIFU Transducer System**: Multi-element focused ultrasound transducer with beam steering
+- **Open-LIFU Transducer System**: Multi-element focused ultrasound transducer with beam steering
 - **PicoScope 5000A Series**: High-speed USB oscilloscope for data acquisition
 - **AIM TTi QPX600DP**: Dual-channel programmable power supply for drive voltage control
 - **Calibrated Hydrophone**: Precision pressure sensor with tank positioning system
