@@ -1,12 +1,10 @@
-(docs written by AI - quality not guaranteed)
+# Open-LIFU Verification Tank
 
-# OpenLIFU Verification Tank
-
-A Python-based system for automated acoustic field verification and characterization of focused ultrasound transducers using the OpenLIFU platform.
+A Python-based system for automated acoustic field verification and characterization of focused ultrasound transducers using the Open-LIFU platform.
 
 ## Overview
 
-The OpenLIFU Verification Tank provides a comprehensive solution for measuring and characterizing focused ultrasound acoustic fields. It integrates multiple instruments and provides high-level automation for common verification tasks including beam profiling, frequency response measurement, and focus optimization.
+The Open-LIFU Verification Tank provides a comprehensive solution for measuring and characterizing focused ultrasound acoustic fields. It integrates multiple instruments and provides high-level automation for common verification tasks, including beam profiling, frequency response measurement, and focus optimization.
 
 ### Key Features
 
@@ -19,7 +17,7 @@ The OpenLIFU Verification Tank provides a comprehensive solution for measuring a
 ## System Components
 
 ### Hardware
-- **OpenLIFU Transducer System**: Multi-element focused ultrasound transducer with beam steering
+- **Open-LIFU Transducer System**: Multi-element focused ultrasound transducer with beam steering
 - **PicoScope 5000A Series**: High-speed USB oscilloscope for data acquisition
 - **AIM TTi QPX600DP**: Dual-channel programmable power supply for drive voltage control
 - **Calibrated Hydrophone**: Precision pressure sensor with tank positioning system
@@ -36,9 +34,9 @@ The OpenLIFU Verification Tank provides a comprehensive solution for measuring a
 1. **Hardware Setup**
    - Connect PicoScope via USB and install drivers from Pico Technology
    - Connect QPX600DP power supply via USB and install AIM TTi drivers
-   - Set up OpenLIFU system according to manufacturer instructions
-   - Install hydrophone in tank positioning system
-   - Connect Channel A of the Picoscope to the Hydrophone Output, and channel B to the trigger output of the OpenLIFU system (optional)
+   - Set up Open-LIFU system according to the manufacturer's instructions
+   - Install a hydrophone in the tank positioning system
+   - Connect Channel A of the Picoscope to the Hydrophone Output, and channel B to the trigger output of the Open-LIFU system (optional)
 
 2. **Python Environment**
    ```bash
@@ -165,7 +163,7 @@ Place hydrophone calibration files in `hydrophone_calibrations/` directory. Supp
 ### Measurement Best Practices
 - Allow adequate settling time between measurements
 - Use appropriate sampling rates for your frequency range
-- Calibrate positioning system regularly
+- Calibrate the positioning system regularly
 - Account for temperature effects on sound speed and sensitivity
 - Implement error handling for robust automated measurements
 
