@@ -17,11 +17,11 @@ if not logger.hasHandlers():
 def main():
     # Parameters
     zInput = 50
-    xfoci = np.linspace(-10, 10, 41)
+    xfoci =  np.linspace(-10, 10, 41)
     yfoci = [0]
 
     frequency_kHz = 400
-    voltage = 10.0
+    voltage = 20.0
     duration_msec = 20 / 400
     interval_msec = 20
     num_modules = 1
@@ -71,6 +71,19 @@ def main():
         out_path = Path(__file__).parent.resolve() / 'data'
         np.savez(out_path / "scan_lat_data.npz", **savedata)
         logger.info("Data saved to scan_lat_data.npz")
+
+        voltages_vpp = [np.ptp(outputs["A"]) for outputs in outputs]
+        positions = [(xfocus, yfocus) for yfocus in yfoci for xfocus in xfoci]
+        positions = np.array(positions, dtype=float)
+        txt_path = out_path / "Scan_lat_voltage.txt"
+
+
+
+        data_txt = np.column_stack((np.array(positions), np.array(voltages_vpp)))
+        header = "x_focus(mm)\tyfocus(mm)\tVpp(mV)"
+        np.savetxt(txt_path, data_txt, header = header, fmt="%.6e", delimiter="\t")
+        logger.info(f"Peak-to_peak voltage data saved to {txt_path}")
+
     else:
         logger.warning("No data was collected.")
 

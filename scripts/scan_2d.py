@@ -17,7 +17,7 @@ if not logger.hasHandlers():
 def main():
     # Parameters
     zInput = 50
-    xfoci = np.linspace(-5, 3, 9)
+    xfoci = np.linspace(-20, 3, 9)
     yfoci = np.linspace(-4, 4, 9)
 
     frequency_kHz = 400

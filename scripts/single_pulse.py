@@ -1,3 +1,4 @@
+import argparse
 import logging
 from pathlib import Path
 import numpy as np
@@ -16,50 +17,80 @@ if not logger.hasHandlers():
     logger.propagate = False
 
 def main():
+    parser = argparse.ArgumentParser(description="Fire a single TX pulse.")
+    parser.add_argument(
+        "--no-scope",
+        action="store_true",
+        help="Do not open the Picoscope. Fire the TX pulse only so an "
+             "external scope application can capture it.",
+    )
+    args = parser.parse_args()
+
     # Parameters
     xInput = 0
     yInput = 0
     zInput = 50
 
     frequency_kHz = 400
-    voltage = 10.0
-    duration_msec = 20 / frequency_kHz
+    voltage = 12.0
+    duration_msec = 10 / frequency_kHz
     interval_msec = 10
     num_modules = 1
 
+    result = None
+
     logger.info("Starting Single Pulse Script...")
     try:
-        with VerificationTank(frequency=frequency_kHz, num_modules=num_modules) as ver:
+        with VerificationTank(frequency=frequency_kHz,
+                              num_modules=num_modules,
+                              use_picoscope=not args.no_scope,
+                              ext_power_supply=False) as ver:
             # Configure LIFU and HVPS
             ver.configure_lifu(
                 frequency_kHz=frequency_kHz,
                 voltage=voltage,
                 duration_msec=duration_msec,
-                interval_msec=interval_msec
+                interval_msec=interval_msec,
+                pulse_count=1,
+                trigger_mode="single",
             )
             ver.set_focus(xInput, yInput, zInput)
 
-            # Configure Picoscope
-            ver.scope.set_channel('A', range_mv=100, coupling='DC')
-            ver.scope.set_channel('B', range_mv=5000, coupling='DC')
-            ver.scope.set_trigger(channel='A', threshold_mv=-4, direction='falling')
+            if not args.no_scope:
+                # Configure Picoscope. auto_trigger_ms=0 disables the scope's
+                # own auto-trigger fallback so wait_ready only returns when the
+                # TX pulse actually arrives (or on our timeout).
+                ver.scope.set_channel('A', range_mv=100, coupling='DC')
+                ver.scope.set_channel('B', range_mv=5000, coupling='DC')
+                ver.scope.set_trigger(channel='B', threshold_mv=1000, direction='rising', auto_trigger_ms=0)
 
             # Enable power supply
-            ver.hv.set_all_outputs(True)
-            ver.hv.wait_ready(target=voltage)
+            ver.enable_hv_output(wait=True)
 
-            s = input("Press any key to start")
+            input("Press Enter to start")
 
-            result = ver.run_capture(pre_trigger_samples=100, post_trigger_samples=1500)
-
-            # Stop the trigger manually after the capture is complete
-            ver.lifu.txdevice.stop_trigger()
+            if args.no_scope:
+                ver.lifu.start_sonication()
+            else:
+                result = ver.run_capture_timed(
+                    sampling_interval_ns=100,
+                    pre_trigger_s=10e-6,
+                    post_trigger_s=200e-6,
+                    timeout_s=3.0
+                )
 
     except (ConnectionError, ValueError, Exception) as e:
         logger.error(f"An error occurred: {e}")
-        return # Exit gracefully
+        return  # Exit gracefully
 
     logger.info("Finished Single Pulse.")
+
+    if args.no_scope:
+        return
+
+    if result is None:
+        logger.warning("No pulse captured within the timeout window.")
+        return
     if result:
         # Plot data
         plt.plot(result["time"], result["A"])

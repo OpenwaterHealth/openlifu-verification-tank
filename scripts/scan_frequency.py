@@ -19,8 +19,8 @@ def main():
     xInput = 0
     yInput = 0
     zInput = 50
-    voltage = 10
-    frequencies = np.arange(350, 451, 5)
+    voltage = 20
+    frequencies = np.arange(370, 431, 5)
     frequency_kHz = 400
     initial_voltage = 10.0
     duration_msec = 20 / 400
@@ -72,10 +72,15 @@ def main():
         # Process and save data
         t = outputs[0]["time"]
         a_channel_outputs = np.array([output["A"] for output in outputs]).reshape([len(frequencies), -1])
+        voltages_vpp = np.ptp(a_channel_outputs, axis=1)
         out_path = Path(__file__).parent.resolve() / 'data'
         savedata = {'t': t, "outputs": a_channel_outputs, "freq": frequencies}
         np.savez(out_path / "scan_freq_data.npz", **savedata)
         logger.info("Data saved to scan_freq_data.npz")
+
+        txt_path = out_path / "Scsn_freq_voltsge.txt"
+        np.savetxt(txt_path, np.column_stack((frequencies, voltages_vpp)), header="Frequency_kHz\tVpp_mV", fmt="%.3f")
+        logger.info(f"Raw frequency-Vpp data saved to {txt_path}")
     else:
         logger.warning("No data was collected.")
 

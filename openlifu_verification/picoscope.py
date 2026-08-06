@@ -18,6 +18,7 @@ Example usage:
 
 import ctypes
 import logging
+import time
 from typing import Dict, Optional, Tuple, Union, Literal
 import numpy as np
 
@@ -74,6 +75,7 @@ RESOLUTION_MAP = {
         "15BIT": ps.PS5000A_DEVICE_RESOLUTION["PS5000A_DR_15BIT"],
         "16BIT": ps.PS5000A_DEVICE_RESOLUTION["PS5000A_DR_16BIT"],
     }
+
 class Picoscope:
     """
     A context manager wrapper for PicoScope 5000A series oscilloscopes.
@@ -321,7 +323,123 @@ class Picoscope:
             
         except Exception as e:
             raise PicoscopeError(f"Failed to get timebase info: {e}")
-            
+
+    def find_timebase(self,
+                      sampling_interval_ns: float,
+                      max_timebase: int = 40) -> Tuple[int, float]:
+        """Find the timebase whose actual sampling interval is closest to
+        the requested value.
+
+        Queries the device via ``ps5000aGetTimebase2`` so the returned
+        interval is what the scope will actually deliver at the current
+        resolution / channel configuration. Not every timebase index is
+        valid for every configuration, so invalid entries are skipped.
+
+        Args:
+            sampling_interval_ns: Desired interval between samples in ns.
+            max_timebase: Upper bound of the search. Default 40 covers
+                the range from a few ns up to ~milliseconds.
+
+        Returns:
+            ``(timebase, actual_interval_ns)`` — the timebase index to
+            pass to ``run_block`` / ``get_data`` and the actual sampling
+            interval the scope will use for it.
+
+        Raises:
+            PicoscopeError: If no valid timebase can be found.
+        """
+        if sampling_interval_ns <= 0:
+            raise ValueError("sampling_interval_ns must be positive")
+
+        best_tb: Optional[int] = None
+        best_interval: Optional[float] = None
+        best_error = float("inf")
+        prev_interval = -1.0
+
+        for tb in range(max_timebase + 1):
+            try:
+                interval, _ = self.get_timebase_info(tb, max_samples=1)
+            except PicoscopeError:
+                continue
+            if interval <= 0:
+                continue
+            err = abs(interval - sampling_interval_ns)
+            if err < best_error:
+                best_error = err
+                best_tb = tb
+                best_interval = interval
+            # Intervals grow monotonically with timebase; once we're past
+            # the target and moving further away, further indices can't
+            # improve the fit.
+            if interval > sampling_interval_ns and interval > prev_interval and err >= best_error:
+                # We overshot and the error is no longer improving.
+                break
+            prev_interval = interval
+
+        if best_tb is None or best_interval is None:
+            raise PicoscopeError(
+                f"No valid timebase found for {sampling_interval_ns} ns "
+                f"(searched 0..{max_timebase})"
+            )
+
+        logger.info(
+            "Timebase %d selected for %.3f ns request "
+            "(actual: %.3f ns, error: %.3f ns)",
+            best_tb, sampling_interval_ns, best_interval,
+            abs(best_interval - sampling_interval_ns),
+        )
+        return best_tb, best_interval
+
+    def plan_capture(self,
+                     sampling_interval_ns: float,
+                     pre_trigger_s: float,
+                     post_trigger_s: float,
+                     max_timebase: int = 40) -> Dict[str, Union[int, float]]:
+        """Resolve a time-based capture request to concrete scope settings.
+
+        Requests are specified as *time intervals in seconds*; the scope
+        can only deliver a discrete set of sampling intervals, so this
+        method picks the closest available timebase (via ``find_timebase``)
+        and converts the pre/post-trigger durations to sample counts using
+        the *actual* interval the scope will use.
+
+        Args:
+            sampling_interval_ns: Desired time between samples in ns.
+            pre_trigger_s: Requested capture window before the trigger, seconds.
+            post_trigger_s: Requested capture window after the trigger, seconds.
+            max_timebase: Search bound forwarded to ``find_timebase``.
+
+        Returns:
+            Dict with keys:
+              - ``timebase`` (int): index to pass to ``run_block``.
+              - ``pre_trigger_samples`` (int): sample count before trigger.
+              - ``post_trigger_samples`` (int): sample count after trigger.
+              - ``sampling_interval_ns`` (float): actual scope interval.
+              - ``pre_trigger_s`` (float): actual pre-trigger window.
+              - ``post_trigger_s`` (float): actual post-trigger window.
+        """
+        if pre_trigger_s < 0 or post_trigger_s < 0:
+            raise ValueError("pre_trigger_s and post_trigger_s must be >= 0")
+
+        timebase, actual_interval_ns = self.find_timebase(
+            sampling_interval_ns, max_timebase=max_timebase
+        )
+        interval_s = actual_interval_ns * 1e-9
+        pre_samples = int(round(pre_trigger_s / interval_s))
+        post_samples = int(round(post_trigger_s / interval_s))
+        # ps5000aRunBlock requires at least 1 sample total.
+        if pre_samples + post_samples < 1:
+            post_samples = 1
+
+        return {
+            "timebase": timebase,
+            "pre_trigger_samples": pre_samples,
+            "post_trigger_samples": post_samples,
+            "sampling_interval_ns": actual_interval_ns,
+            "pre_trigger_s": pre_samples * interval_s,
+            "post_trigger_s": post_samples * interval_s,
+        }
+
     def run_block(self, 
                  pre_trigger_samples: int, 
                  post_trigger_samples: int, 
@@ -358,30 +476,46 @@ class Picoscope:
         except Exception as e:
             raise PicoscopeError(f"Failed to start block capture: {e}")
             
-    def wait_ready(self) -> bool:
+    def wait_ready(self, timeout_s: Optional[float] = None, poll_interval_s: float = 0.005) -> bool:
         """
         Wait for data capture to complete.
-        
+
+        Args:
+            timeout_s: Maximum time to wait for the capture to complete, in
+                seconds. If ``None``, wait indefinitely. If the scope was set
+                up with a non-zero ``auto_trigger_ms`` value, the scope will
+                auto-trigger before this timeout expires, and this method
+                will return True on the auto-triggered capture.
+            poll_interval_s: Delay between ``ps5000aIsReady`` polls.
+
         Returns:
-            True when ready
-            
+            True if the capture completed before the timeout, False if
+            *timeout_s* elapsed first.
+
         Raises:
-            PicoscopeError: If ready check fails
+            PicoscopeError: If ready check fails.
         """
         if not self._is_open:
             raise PicoscopeError("Device not open. Use within a context manager or call open_unit() first.")
-            
+
         ready = ctypes.c_int16(0)
         check = ctypes.c_int16(0)
-        
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
+
         try:
             while ready.value == check.value:
                 self.status["isReady"] = ps.ps5000aIsReady(self.chandle, ctypes.byref(ready))
                 assert_pico_ok(self.status["isReady"])
-                
+                if ready.value != check.value:
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    logger.warning("Picoscope wait_ready timed out after %.3f s", timeout_s)
+                    return False
+                time.sleep(poll_interval_s)
+
             logger.info("Data capture completed")
             return True
-            
+
         except Exception as e:
             raise PicoscopeError(f"Error waiting for ready: {e}")
             
@@ -524,130 +658,4 @@ class Picoscope:
             
         except Exception as e:
             raise PicoscopeError(f"Failed to stop capture: {e}")
-        
-def timebase_to_sampling_interval(timebase: int, resolution: int):
-        """
-        Convert a Picoscope timebase integer to a sampling interval in nanoseconds.
-        
-        Based on the Picoscope documentation, the relationship between timebase (n) and 
-        sampling interval depends on the bit depth resolution:
-        
-        8-bit:  0-2: 2^n / 1,000,000,000 ns
-                3+:  (n-2) / 125,000,000 ns
-        12-bit: 1-3: 2^(n-1) / 500,000,000 ns  
-                4+:  (n-3) / 62,500,000 ns
-        14-bit: 3:   1 / 125,000,000 = 8 ns
-                4+:  (n-2) / 125,000,000 ns
-        15-bit: 3:   1 / 125,000,000 = 8 ns
-                4+:  (n-2) / 125,000,000 ns
-        16-bit: 4:   1 / 62,500,000 = 16 ns
-                5+:  (n-3) / 62,500,000 ns
-        
-        Args:
-            timebase: The timebase integer
-            resolution: Bit depth resolution (8, 12, 14, 15, or 16)
-            
-        Returns:
-            sampling_interval_ns: The sampling interval in nanoseconds
-            
-        Raises:
-            ValueError: If the timebase is invalid for the given resolution
-        """
-        if resolution == 8:
-            if timebase <= 2:
-                return (2 ** timebase) * 1e9
-            else:
-                return ((timebase - 2) / 125_000_000) * 1e9
-        elif resolution == 12:
-            if timebase <= 3:
-                return (2 ** (timebase - 1)) * 2e9
-            else:
-                return ((timebase - 3) / 62_500_000) * 1e9
-        elif resolution in [14, 15]:
-            if timebase == 3:
-                return 8.0
-            else:
-                return ((timebase - 2) / 125_000_000) * 1e9
-        elif resolution == 16:
-            if timebase == 4:
-                return 16.0
-            else:
-                return ((timebase - 3) / 62_500_000) * 1e9
-    
-def sampling_interval_to_timebase(sampling_interval_ns, resolution:int):
-    """
-    Convert a sampling interval in nanoseconds to a Picoscope timebase integer.
-    
-    Based on the Picoscope documentation, the relationship between timebase (n) and 
-    sampling interval depends on the bit depth resolution:
-    
-    8-bit:  0-2: 2^n / 1,000,000,000 ns
-            3+:  (n-2) / 125,000,000 ns
-    12-bit: 1-3: 2^(n-1) / 500,000,000 ns  
-            4+:  (n-3) / 62,500,000 ns
-    14-bit: 3:   1 / 125,000,000 = 8 ns
-            4+:  (n-2) / 125,000,000 ns
-    15-bit: 3:   1 / 125,000,000 = 8 ns
-            4+:  (n-2) / 125,000,000 ns
-    16-bit: 4:   1 / 62,500,000 = 16 ns
-            5+:  (n-3) / 62,500,000 ns
-    
-    Args:
-        sampling_interval_ns: Target sampling interval in nanoseconds
-        
-    Returns:
-        timebase: The timebase integer to use
-        
-    Raises:
-        ValueError: If no valid timebase can be found for the given interval
-    """
-    # Map resolution strings to bit depths
-    resolutions = ("8BIT", "12BIT", "14BIT", "15BIT", "16BIT")
-    
-    if resolution not in resolutions:
-        raise ValueError(f"Unsupported resolution: {resolution}")
-    
-    # Convert nanoseconds to seconds for calculation
-    target_interval_s = sampling_interval_ns * 1e-9
-    
-    # Find the best timebase by checking valid ranges
-    best_timebase = None
-    best_error = float('inf')
-
-    # Define search ranges based on resolution
-    if resolution == RESOLUTION_MAP["8BIT"]:
-        search_range = list(range(0, 3)) + list(range(3, 100))  # Check reasonable range
-    elif resolution == RESOLUTION_MAP["12BIT"]:
-        search_range = list(range(1, 4)) + list(range(4, 100))
-    elif resolution in [RESOLUTION_MAP["14BIT"], RESOLUTION_MAP["15BIT"]]:
-        search_range = [3] + list(range(4, 100))
-    elif resolution == RESOLUTION_MAP["16BIT"]:
-        search_range = [4] + list(range(5, 100))
-    else:
-        raise ValueError(f"Unsupported resolution: {resolution}")
-    
-    for timebase in search_range:
-        try:
-            calculated_interval = timebase_to_sampling_interval(timebase, resolution)
-            error = abs(calculated_interval - target_interval_s)
-            
-            if error < best_error:
-                best_error = error
-                best_timebase = timebase
-                
-            # If we find an exact match, stop searching
-            if error < 1e-12:  # Very small tolerance for floating point comparison
-                break
-                
-        except (ValueError, ZeroDivisionError):
-            continue
-    
-    if best_timebase is None:
-        raise ValueError(f"No valid timebase found for sampling interval {sampling_interval_ns} ns at {bit_depth}-bit resolution")
-    
-    # Log the result for verification
-    actual_interval = timebase_to_sampling_interval(best_timebase, resolution) * 1e9  # Convert back to ns
-    logger.info(f"Timebase {best_timebase} selected for {sampling_interval_ns} ns target "
-                f"(actual: {actual_interval:.3f} ns, error: {abs(actual_interval - sampling_interval_ns):.3f} ns)")
-    
-    return best_timebase
+        

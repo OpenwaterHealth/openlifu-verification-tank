@@ -19,7 +19,7 @@ def main():
     xInput = 0
     yInput = 0
     zInput = 50
-    voltages = np.arange(5, 20, 0.5)
+    voltages = np.arange(5, 65, 5)
 
     frequency_kHz = 400
     initial_voltage = 10.0
@@ -40,7 +40,7 @@ def main():
             ver.set_focus(xInput, yInput, zInput)
 
             # Configure Picoscope
-            ver.scope.set_channel('A', range_mv=100, coupling='DC')
+            ver.scope.set_channel('A', range_mv=5000, coupling='DC')
             ver.scope.set_channel('B', range_mv=5000, coupling='DC')
             ver.scope.set_trigger(channel='A', threshold_mv=-2, direction='falling')
 
@@ -72,6 +72,11 @@ def main():
         out_path = Path(__file__).parent.resolve() / 'data'
         np.savez(out_path / "scan_voltage_data.npz", **savedata)
         logger.info("Data saved to scan_voltage_data.npz")
+
+        hydro_voltages = np.array([np.ptp(output["A"]) for output in outputs])
+        txt_data = np.column_stack((voltages, hydro_voltages))
+        np.savetxt(out_path / "voltage_vs_hydrophone.txt", txt_data, header="Input_Voltage(V)\tHydrophone_Vpp(V)", fmt="%.6e")
+        logger.info("Saved voltage_vs_hydrophone.txt")
     else:
         logger.warning("No data was collected.")
 
