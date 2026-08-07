@@ -1,215 +1,117 @@
-"""Lateral (x) scan using PicoScope rapid-block mode.
+"""CLI wrapper: lateral (x) focus scan.
 
-Sweeps focus x across ``xfoci`` at each y in ``yfoci`` (default 1D
-line at y=0). Uses ``VerificationTank.run_rapid_sweep`` so all
-captures in each chunk go over USB in a single bulk transfer.
+Delegates all the heavy lifting to
+:meth:`openlifu_verification.VerificationTank.scan_lateral`. Use
+``--num-y`` and ``--y-range`` to promote it to a 2-D grid; if you know
+you want a 2-D grid, prefer ``scan_2d.py`` for the more natural
+defaults.
+
+Examples::
+
+    python scripts/scan_lat.py --num-x 41
+    python scripts/scan_lat.py --num-x 41 --save-plot lat.png
+    python scripts/scan_lat.py --no-plot            # data-only headless run
 """
 import argparse
 import logging
-import time
 from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
-from openlifu_verification import VerificationTank
+
+from openlifu_verification import VerificationTank, set_log_level
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-if not logger.hasHandlers():
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-    logger.addHandler(handler)
-    logger.propagate = False
+
+
+def _configure_root_logger():
+    root = logging.getLogger()
+    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        root.addHandler(h)
+    root.setLevel(logging.INFO)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--voltage", type=float, default=20.0)
-    parser.add_argument("--num-x", type=int, default=41,
-                        help="Number of x points across the -10..10 mm sweep.")
+    parser.add_argument("--num-x", type=int, default=41)
+    parser.add_argument("--x-range", type=float, nargs=2, default=[-10.0, 10.0])
+    parser.add_argument("--num-y", type=int, default=1)
+    parser.add_argument("--y-range", type=float, nargs=2, default=None,
+                        help="y range in mm; required if num-y > 1.")
+    parser.add_argument("--y", type=float, default=0.0,
+                        help="y coordinate when num-y == 1.")
+    parser.add_argument("--z", type=float, default=50.0)
     parser.add_argument("--chunk-size", type=int, default=0,
-                        help="Rapid-block segments per chunk (0 = whole sweep in one chunk).")
-    parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True,
-                        help="Show the resulting Vpp-vs-x plot interactively (default: on).")
-    parser.add_argument("--save-data", action=argparse.BooleanOptionalAction, default=True,
-                        help="Save NPZ + TXT data to scripts/data/ (default: on).")
-    parser.add_argument("--save-plot", type=str, default="",
-                        help="If set, save the plot image to this path (e.g. scan_lat.png).")
+                        help="Rapid-block chunk size (0 = whole sweep).")
+    parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save-data", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save-plot", type=str, default="")
+    parser.add_argument("--log-file", type=str, default="",
+                        help="Optional path for a copy of the log.")
+    parser.add_argument("--progress", type=str, default="bar",
+                        choices=["bar", "log", "both", "none"])
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument("--verbose", "-v", action="store_true",
+                           help="Enable DEBUG logging from openlifu_verification and openlifu_sdk.")
+    verbosity.add_argument("--quiet", "-q", action="store_true",
+                           help="Suppress INFO logging (WARNING and above only).")
     args = parser.parse_args()
 
+    _configure_root_logger()
+    if args.verbose:
+        set_log_level("DEBUG", sdk_level="DEBUG")
+    elif args.quiet:
+        set_log_level("WARNING")
+
     if not args.plot and not args.save_plot and not args.save_data:
-        resp = input("Nothing will be plotted or saved (--no-plot, no --save-plot, --no-save-data). "
-                     "Continue anyway? [y/N] ")
+        resp = input("Nothing will be plotted or saved. Continue anyway? [y/N] ")
         if resp.strip().lower() not in ("y", "yes"):
             logger.info("Aborted.")
             return
 
-    zInput = 50
-    xfoci = np.linspace(-10, 10, args.num_x)
-    yfoci = [0]
-
     frequency_kHz = 400
-    voltage = args.voltage
     duration_msec = 20 / 400
     interval_msec = 20
-    num_modules = 1
 
-    sampling_interval_ns = 100
-    time_start_s = 100e-6
-    time_stop_s = 200e-6
-    timeout_s = None  # rapid-block: wait indefinitely
-
-    focus_points = [(float(x), float(y), zInput) for y in yfoci for x in xfoci]
-    chunk_size = args.chunk_size if args.chunk_size > 0 else len(focus_points)
-
-    logger.info("Starting Lateral Scan (%d points, chunk_size=%d)",
-                len(focus_points), chunk_size)
-
-    outputs = []
-    timings = []
-    hydro = "A"
-    t_wall_start = time.perf_counter()
-    t_setup_end = None
-    t_teardown_start = None
-    t_teardown_end = None
+    progress = None if args.progress == "none" else args.progress
 
     try:
-        t_setup_start = time.perf_counter()
         with VerificationTank(frequency=frequency_kHz,
-                              num_modules=num_modules,
+                              num_modules=1,
                               ext_power_supply=False) as ver:
+            if args.log_file:
+                ver.add_log_file(args.log_file)
             ver.configure_lifu(
                 frequency_kHz=frequency_kHz,
-                voltage=voltage,
+                voltage=args.voltage,
                 duration_msec=duration_msec,
                 interval_msec=interval_msec,
                 pulse_count=1,
                 trigger_mode="single",
             )
             ver.enable_hv_output(wait=True)
-            hydro = ver.hydrophone_channel
-            t_setup_end = time.perf_counter()
-
             input("Press Enter to start")
 
-            def apply_point(point):
-                x, y, z = point
-                ver.set_focus(x, y, z)
-
-            def on_progress(point, pt):
-                x, y, _ = point
-                logger.info(
-                    "x=%+6.2f y=%+6.2f  apply=%.4fs  trigger=%.4fs  total=%.4fs",
-                    x, y, pt["apply_s"], pt["trigger_s"], pt["iter_total_s"],
-                )
-
-            outputs, timings = ver.run_rapid_sweep(
-                points=focus_points,
-                apply_point=apply_point,
-                time_start_s=time_start_s,
-                time_stop_s=time_stop_s,
-                sampling_interval_ns=sampling_interval_ns,
-                chunk_size=chunk_size,
-                timeout_s=timeout_s,
-                progress=on_progress,
+            result = ver.scan_lateral(
+                x_range=tuple(args.x_range),
+                num_x=args.num_x,
+                y_range=tuple(args.y_range) if args.y_range is not None else None,
+                num_y=args.num_y,
+                y=args.y,
+                z=args.z,
+                chunk_size=args.chunk_size,
+                progress=progress,
             )
-
-            t_teardown_start = time.perf_counter()
-        t_teardown_end = time.perf_counter()
-
     except (ConnectionError, ValueError, Exception) as e:
-        logger.error(f"An error occurred: {e}")
-        return
-
-    t_wall_end = time.perf_counter()
-
-    if timings:
-        apply_arr = np.array([t["apply_s"] for t in timings])
-        trigger_arr = np.array([t["trigger_s"] for t in timings])
-        arm_arr = np.array([t["arm_s"] for t in timings])
-        xfer_arr = np.array([t["xfer_s"] for t in timings])
-        iter_arr = np.array([t["iter_total_s"] for t in timings])
-        n_captured = sum(1 for t in timings if t["captured"])
-        n_chunks = 1 + max((t["chunk_index"] for t in timings), default=0)
-
-        logger.info("--- Timing summary ---")
-        logger.info("Wall time:                %.3f s", t_wall_end - t_wall_start)
-        logger.info("Setup (open + configure): %.3f s", t_setup_end - t_setup_start)
-        if t_teardown_end is not None:
-            logger.info("Teardown (__exit__):      %.3f s",
-                        t_teardown_end - t_teardown_start)
-        logger.info("Iterations:               %d (captured %d)  chunks=%d",
-                    len(timings), n_captured, n_chunks)
-        logger.info("apply:       mean=%.4fs  total=%.3fs",
-                    apply_arr.mean(), apply_arr.sum())
-        logger.info("trigger:     mean=%.4fs  total=%.3fs",
-                    trigger_arr.mean(), trigger_arr.sum())
-        logger.info("arm/point:   mean=%.4fs  total=%.3fs",
-                    arm_arr.mean(), arm_arr.sum())
-        logger.info("xfer/point:  mean=%.4fs  total=%.3fs",
-                    xfer_arr.mean(), xfer_arr.sum())
-        logger.info("iter total:  mean=%.4fs  total=%.3fs",
-                    iter_arr.mean(), iter_arr.sum())
-
-    logger.info("Finished Lateral Scan.")
-
-    good = [(t, o, p) for t, o, p in zip(timings, outputs, focus_points) if o is not None]
-    if not good:
-        logger.warning("No data was collected.")
-        return
-    good_timings, good_outputs, good_points = zip(*good)
-    t_axis = good_outputs[0]["time"]
-    a_channel_outputs = np.array(
-        [o[hydro] for o in good_outputs]
-    ).reshape([len(yfoci), len(xfoci), -1])
-    positions = np.array([(p[0], p[1]) for p in good_points], dtype=float)
-    voltages_vpp = np.array([np.ptp(o[hydro]) for o in good_outputs])
-    savedata = {
-        "t": t_axis,
-        "outputs": a_channel_outputs,
-        "xfoci": xfoci,
-        "yfoci": yfoci,
-        "chunk_size": chunk_size,
-        "apply_s": np.array([t["apply_s"] for t in good_timings]),
-        "trigger_s": np.array([t["trigger_s"] for t in good_timings]),
-        "arm_s": np.array([t["arm_s"] for t in good_timings]),
-        "xfer_s": np.array([t["xfer_s"] for t in good_timings]),
-        "iter_total_s": np.array([t["iter_total_s"] for t in good_timings]),
-    }
+        logger.error("Scan aborted: %s", e)
+        raise
 
     if args.save_data:
-        out_path = Path(__file__).parent.resolve() / 'data'
-        out_path.mkdir(exist_ok=True)
-        np.savez(out_path / "scan_lat_data.npz", **savedata)
-        logger.info("Data saved to scan_lat_data.npz")
-        txt_path = out_path / "Scan_lat_voltage.txt"
-        data_txt = np.column_stack((positions, voltages_vpp))
-        np.savetxt(txt_path, data_txt,
-                   header="x_focus(mm)\tyfocus(mm)\tVpp(mV)",
-                   fmt="%.6e", delimiter="\t")
-        logger.info(f"Peak-to-peak voltage data saved to {txt_path}")
+        out = Path(__file__).parent.resolve() / "data" / "scan_lat_data.npz"
+        result.save(out)
 
     if args.plot or args.save_plot:
-        vpp_grid = np.ptp(a_channel_outputs, axis=-1)  # (Y, X)
-        fig, ax = plt.subplots()
-        if vpp_grid.shape[0] == 1:
-            ax.plot(xfoci, vpp_grid[0], ".-")
-            ax.set_xlabel("x focus (mm)")
-            ax.set_ylabel("Vpp (mV)")
-            ax.set_title(f"Lateral scan @ y=0, z={zInput} mm, V={voltage} V")
-            ax.grid(True)
-        else:
-            im = ax.imshow(vpp_grid, aspect="auto", origin="lower",
-                           extent=[xfoci[0], xfoci[-1], yfoci[0], yfoci[-1]])
-            ax.set_xlabel("x focus (mm)")
-            ax.set_ylabel("y focus (mm)")
-            ax.set_title(f"Lateral scan Vpp (mV) @ z={zInput} mm, V={voltage} V")
-            fig.colorbar(im, ax=ax, label="Vpp (mV)")
-        fig.tight_layout()
-        if args.save_plot:
-            fig.savefig(args.save_plot)
-            logger.info("Figure saved to %s", args.save_plot)
-        if args.plot:
-            plt.show()
+        result.plot(show=args.plot, save_as=args.save_plot)
 
 
 if __name__ == "__main__":

@@ -146,8 +146,9 @@ class Picoscope:
         if self._is_open:
             logger.warning("Device already open")
             return
-            
+
         try:
+            logger.info("Connecting to PicoScope (driver splash may appear)...")
             self.status["openunit"] = ps.ps5000aOpenUnit(
                 ctypes.byref(self.chandle), None, self.resolution
             )
@@ -252,7 +253,7 @@ class Picoscope:
                 self.enabled_channels.discard(channel)
                 self.channel_ranges.pop(channel, None)
                 
-            logger.info(f"Channel {channel} configured: {range_mv}mV, {coupling}, enabled={enabled}")
+            logger.debug(f"Channel {channel} configured: {range_mv}mV, {coupling}, enabled={enabled}")
             
         except Exception as e:
             raise PicoscopeError(f"Failed to configure channel {channel}: {e}")
@@ -318,7 +319,7 @@ class Picoscope:
                 "auto_trigger_ms": auto_trigger_ms,
             }
 
-            logger.info(f"Trigger configured: Channel {channel}, {threshold_mv}mV, {direction}")
+            logger.debug(f"Trigger configured: Channel {channel}, {threshold_mv}mV, {direction}")
             
         except Exception as e:
             raise PicoscopeError(f"Failed to configure trigger: {e}")
@@ -437,7 +438,7 @@ class Picoscope:
                 f"(searched 0..{max_timebase})"
             )
 
-        logger.info(
+        logger.debug(
             "Timebase %d selected for %.3f ns request "
             "(actual: %.3f ns, error: %.3f ns)",
             best_tb, sampling_interval_ns, best_interval,
@@ -557,7 +558,7 @@ class Picoscope:
             )
             assert_pico_ok(self.status["runBlock"])
             
-            logger.info(f"Block capture started: {pre_trigger_samples + post_trigger_samples} samples")
+            logger.debug(f"Block capture started: {pre_trigger_samples + post_trigger_samples} samples")
             
         except Exception as e:
             raise PicoscopeError(f"Failed to start block capture: {e}")
@@ -599,7 +600,7 @@ class Picoscope:
                     return False
                 time.sleep(poll_interval_s)
 
-            logger.info("Data capture completed")
+            logger.debug("Data capture completed")
             return True
 
         except Exception as e:
@@ -694,7 +695,7 @@ class Picoscope:
         time_array = np.linspace(0, (c_max_samples.value - 1) * time_interval_ns, c_max_samples.value)
         result['time'] = time_array
         
-        logger.info(f"Retrieved {c_max_samples.value} samples from {len(self.enabled_channels)} channels")
+        logger.debug(f"Retrieved {c_max_samples.value} samples from {len(self.enabled_channels)} channels")
         
         return result
         
@@ -797,7 +798,7 @@ class Picoscope:
 
         self._rapid_n_captures = n_captures
         self._rapid_max_samples_per_segment = max_samples.value
-        logger.info(
+        logger.debug(
             "Rapid-block mode: %d segments, max %d samples/segment",
             n_captures, max_samples.value,
         )
@@ -933,7 +934,7 @@ class Picoscope:
         result["time"] = np.linspace(0, (actual_samples - 1) * time_interval_ns, actual_samples)
         result["overflow"] = np.frombuffer(overflow_arr, dtype=np.int16).copy()
 
-        logger.info(
+        logger.debug(
             "Rapid-block retrieved %d segments x %d samples from %d channels",
             n_seg, actual_samples, len(self.enabled_channels),
         )
@@ -952,7 +953,7 @@ class Picoscope:
         try:
             self.status["stop"] = ps.ps5000aStop(self.chandle)
             assert_pico_ok(self.status["stop"])
-            logger.info("Data capture stopped")
+            logger.debug("Data capture stopped")
             
         except Exception as e:
             raise PicoscopeError(f"Failed to stop capture: {e}")

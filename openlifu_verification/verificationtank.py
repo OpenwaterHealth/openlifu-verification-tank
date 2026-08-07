@@ -8,11 +8,13 @@ import numpy as np
 
 from .picoscope import Picoscope
 from .qpx600dp import QPX600DP
+from .scan_results import ScanResult
 
 from openlifu_sdk.io import LIFUInterface
 from openlifu_sdk.io.LIFUTXDevice import Tx7332DelayProfile, Tx7332PulseProfile
 
 logger = logging.getLogger(__name__)
+_PACKAGE_LOGGER = logging.getLogger("openlifu_verification")
 PICOSCOPE_RESOLUTION = "15BIT"
 SPEED_OF_SOUND = 1500  # m/s in water
 HYDROPHONE_CHANNEL = 'A'
@@ -240,19 +242,19 @@ class VerificationTank:
 
         # Log the pieces being sent so we can diff against a known-good
         # solution.json from the test app.
-        logger.info("configure_lifu pulse=%s", pulse)
-        logger.info("configure_lifu sequence=%s", sequence)
-        logger.info(
+        logger.debug("configure_lifu pulse=%s", pulse)
+        logger.debug("configure_lifu sequence=%s", sequence)
+        logger.debug(
             "configure_lifu voltage=%s trigger_mode=%s profile_index=%s profile_increment=%s",
             voltage, trigger_mode, profile_index, profile_increment,
         )
-        logger.info(
+        logger.debug(
             "configure_lifu transducer id=%s num_elements=%s module_invert=%s",
             solution["transducer"].get("id"),
             len(solution["transducer"].get("elements", [])),
             solution["transducer"].get("module_invert"),
         )
-        logger.info(
+        logger.debug(
             "configure_lifu delays.shape=%s apodizations.shape=%s",
             solution["delays"].shape, solution["apodizations"].shape,
         )
@@ -296,7 +298,7 @@ class VerificationTank:
             raise Exception("Transducer array not loaded. Please provide db_path during initialization.")
 
         focus = np.array([x, y, z])
-        logger.info(f"calculating delays for {focus=}")
+        logger.debug(f"calculating delays for {focus=}")
         distances = np.sqrt(np.sum((focus - self.arr.get_positions(units="mm"))**2, 1)).reshape(-1)
         tof = distances*1e-3 / SPEED_OF_SOUND
         delays = tof.max() - tof
@@ -310,7 +312,7 @@ class VerificationTank:
                     apodizations=apodizations
                 )
         self.lifu.txdevice.tx_registers.add_delay_profile(delay_profile)
-        logger.info("writing registers...")
+        logger.debug("writing delay registers...")
         control_registers = self.lifu.txdevice.tx_registers.get_delay_control_registers()
         data_registers = self.lifu.txdevice.tx_registers.get_delay_data_registers(pack=True, pack_single=True)
 
@@ -330,7 +332,7 @@ class VerificationTank:
             cycles=int(duration_msec * frequency_kHz)
         )
         self.lifu.txdevice.tx_registers.add_pulse_profile(pulse_profile)
-        logger.info("writing registers...")
+        logger.debug("writing pulse registers...")
         control_registers = self.lifu.txdevice.tx_registers.get_pulse_control_registers()
         data_registers = self.lifu.txdevice.tx_registers.get_pulse_data_registers(pack=True, pack_single=True)
 
@@ -361,7 +363,7 @@ class VerificationTank:
         name for scripts that just want to fire without any scope
         involvement.
         """
-        logger.info("Sending Single Trigger (no scope)...")
+        logger.debug("Sending Single Trigger (no scope)...")
         self.lifu.txdevice.start_trigger()
 
     def set_hydrophone_range(self, range_mv, coupling="DC"):
@@ -464,7 +466,7 @@ class VerificationTank:
             time_start_s=time_start_s,
             time_stop_s=time_stop_s,
         )
-        logger.info(
+        logger.debug(
             "run_capture: requested %.1f ns / start %.3f us / stop %.3f us; "
             "actual %.3f ns / start %.3f us / stop %.3f us "
             "(timebase=%d, pre=%d, post=%d, delay=%d)",
@@ -543,7 +545,7 @@ class VerificationTank:
             )
         plan["n_captures"] = n_captures
         plan["samples_per_segment"] = samples_per_segment
-        logger.info(
+        logger.debug(
             "configure_rapid_capture: n_captures=%d samples/segment=%d "
             "(max %d) window=[%.3f, %.3f] us dt=%.3f ns",
             n_captures, samples_per_segment, max_per_seg,
@@ -643,7 +645,8 @@ class VerificationTank:
                         sampling_interval_ns,
                         chunk_size=None,
                         timeout_s=None,
-                        progress=None):
+                        progress="bar",
+                        progress_label=None):
         """Run a rapid-block sweep over ``points``.
 
         Splits ``points`` into chunks of size ``chunk_size``. For each
@@ -674,9 +677,18 @@ class VerificationTank:
                 ``scope.get_max_segments()``.
             timeout_s: Max time to wait for each chunk to finish.
                 ``None`` waits indefinitely.
-            progress: Optional callable ``progress(point, timing) ->
-                None`` invoked after every trigger. ``timing`` is the
-                per-point dict described below.
+            progress: How to report per-point progress. One of:
+
+                - ``"bar"`` (default): tqdm progress bar with rolling
+                  apply/trigger times in the description.
+                - ``"log"``: emit one INFO log line per point.
+                - ``"both"``: bar + log lines.
+                - ``None`` / ``""``: silent.
+                - a callable ``fn(point, timing) -> None``: your own
+                  callback, invoked after every trigger.
+
+            progress_label: Optional short label shown in the tqdm bar
+                (e.g. ``"scan_lat"``). Ignored for other modes.
 
         Returns:
             ``(outputs, timings)``:
@@ -703,74 +715,142 @@ class VerificationTank:
         outputs = [None] * n_points
         timings = []
 
-        for chunk_index, chunk_start in enumerate(range(0, n_points, chunk_size)):
-            chunk = points[chunk_start:chunk_start + chunk_size]
-            n_captures = len(chunk)
+        progress_cb, bar, close_bar = self._make_progress(
+            progress, n_points, progress_label,
+        )
 
-            t_arm_start = time.perf_counter()
-            plan = self.configure_rapid_capture(
-                n_captures=n_captures,
-                time_start_s=time_start_s,
-                time_stop_s=time_stop_s,
-                sampling_interval_ns=sampling_interval_ns,
-            )
-            self.arm_rapid_capture(plan)
-            t_arm = time.perf_counter() - t_arm_start
+        try:
+            for chunk_index, chunk_start in enumerate(range(0, n_points, chunk_size)):
+                chunk = points[chunk_start:chunk_start + chunk_size]
+                n_captures = len(chunk)
 
-            per_point_timings = []
-            for point in chunk:
-                t_iter_start = time.perf_counter()
+                t_arm_start = time.perf_counter()
+                plan = self.configure_rapid_capture(
+                    n_captures=n_captures,
+                    time_start_s=time_start_s,
+                    time_stop_s=time_stop_s,
+                    sampling_interval_ns=sampling_interval_ns,
+                )
+                self.arm_rapid_capture(plan)
+                t_arm = time.perf_counter() - t_arm_start
 
-                t0 = time.perf_counter()
-                apply_point(point)
-                t_apply = time.perf_counter() - t0
+                per_point_timings = []
+                for point in chunk:
+                    t_iter_start = time.perf_counter()
 
-                t0 = time.perf_counter()
-                self.trigger_once()
-                t_trigger = time.perf_counter() - t0
+                    t0 = time.perf_counter()
+                    apply_point(point)
+                    t_apply = time.perf_counter() - t0
 
-                t_iter_total = time.perf_counter() - t_iter_start
-                per_point_timings.append({
-                    "apply_s": t_apply,
-                    "trigger_s": t_trigger,
-                    "iter_total_s": t_iter_total,
-                })
+                    t0 = time.perf_counter()
+                    self.trigger_once()
+                    t_trigger = time.perf_counter() - t0
 
-            t_xfer_start = time.perf_counter()
-            bulk = self.finish_rapid_capture(plan, timeout_s=timeout_s)
-            t_xfer = time.perf_counter() - t_xfer_start
+                    t_iter_total = time.perf_counter() - t_iter_start
+                    per_point_timings.append({
+                        "apply_s": t_apply,
+                        "trigger_s": t_trigger,
+                        "iter_total_s": t_iter_total,
+                    })
+                    # Tick the bar as each trigger fires so the user sees
+                    # real-time progress. Doing this after finish_rapid_capture
+                    # would make the bar sit at 0 for the whole chunk and
+                    # then zip to 100 % during the fast output-unpack loop.
+                    if bar is not None:
+                        bar.set_postfix_str(
+                            f"apply={t_apply:.3f}s trigger={t_trigger:.3f}s",
+                            refresh=False,
+                        )
+                        bar.update(1)
 
-            arm_per_pt = t_arm / n_captures
-            xfer_per_pt = t_xfer / n_captures
-            logger.info(
-                "chunk %d [%d:%d] arm=%.4fs xfer=%.4fs captured=%s",
-                chunk_index, chunk_start, chunk_start + n_captures,
-                t_arm, t_xfer, bulk is not None,
-            )
+                t_xfer_start = time.perf_counter()
+                bulk = self.finish_rapid_capture(plan, timeout_s=timeout_s)
+                t_xfer = time.perf_counter() - t_xfer_start
 
-            for i, (point, pt) in enumerate(zip(chunk, per_point_timings)):
-                pt.update({
-                    "chunk_index": chunk_index,
-                    "arm_s": arm_per_pt,
-                    "xfer_s": xfer_per_pt,
-                    "captured": bulk is not None,
-                })
-                if bulk is not None:
-                    per_point_data = {
-                        "time": bulk["time"],
-                        "sampling_interval_ns": bulk["sampling_interval_ns"],
-                        "time_start_s": bulk["time_start_s"],
-                        "time_stop_s": bulk["time_stop_s"],
-                        "overflow": bulk["overflow"][i],
-                    }
-                    for ch in self.scope.enabled_channels:
-                        per_point_data[ch] = bulk[ch][i]
-                    outputs[chunk_start + i] = per_point_data
-                timings.append(pt)
-                if progress is not None:
-                    progress(point, pt)
+                arm_per_pt = t_arm / n_captures
+                xfer_per_pt = t_xfer / n_captures
+                logger.debug(
+                    "chunk %d [%d:%d] arm=%.4fs xfer=%.4fs captured=%s",
+                    chunk_index, chunk_start, chunk_start + n_captures,
+                    t_arm, t_xfer, bulk is not None,
+                )
+
+                for i, (point, pt) in enumerate(zip(chunk, per_point_timings)):
+                    pt.update({
+                        "chunk_index": chunk_index,
+                        "arm_s": arm_per_pt,
+                        "xfer_s": xfer_per_pt,
+                        "captured": bulk is not None,
+                    })
+                    if bulk is not None:
+                        per_point_data = {
+                            "time": bulk["time"],
+                            "sampling_interval_ns": bulk["sampling_interval_ns"],
+                            "time_start_s": bulk["time_start_s"],
+                            "time_stop_s": bulk["time_stop_s"],
+                            "overflow": bulk["overflow"][i],
+                        }
+                        for ch in self.scope.enabled_channels:
+                            per_point_data[ch] = bulk[ch][i]
+                        outputs[chunk_start + i] = per_point_data
+                    timings.append(pt)
+                    if progress_cb is not None:
+                        progress_cb(point, pt)
+        finally:
+            if close_bar:
+                bar.close()
 
         return outputs, timings
+
+    def _make_progress(self, progress, n_points, label):
+        """Turn the ``progress`` arg into (callback, tqdm_bar, close_bar).
+
+        Returns:
+            Tuple of ``(callback, bar, close_bar)``. Either component
+            may be ``None`` if it doesn't apply.
+        """
+        if callable(progress):
+            return progress, None, False
+        if progress in (None, "", False):
+            return None, None, False
+        mode = str(progress).lower()
+        if mode not in ("bar", "log", "both"):
+            raise ValueError(
+                f"progress must be None, a callable, or one of "
+                f"'bar'/'log'/'both'; got {progress!r}."
+            )
+
+        log_cb = None
+        if mode in ("log", "both"):
+            def _log_cb(point, pt, _label=label):
+                logger.info(
+                    "%s point=%s  apply=%.4fs trigger=%.4fs iter=%.4fs",
+                    _label or "sweep", _fmt_point(point),
+                    pt["apply_s"], pt["trigger_s"], pt["iter_total_s"],
+                )
+            log_cb = _log_cb
+
+        bar = None
+        if mode in ("bar", "both"):
+            try:
+                from tqdm.auto import tqdm  # type: ignore
+                bar = tqdm(total=n_points, desc=label or "sweep",
+                           unit="pt", leave=True)
+            except ImportError:
+                logger.warning(
+                    "progress=%r requested but tqdm is not installed; "
+                    "falling back to log-only.", progress,
+                )
+                if log_cb is None:
+                    def _fallback_cb(point, pt, _label=label):
+                        logger.info(
+                            "%s point=%s  apply=%.4fs trigger=%.4fs",
+                            _label or "sweep", _fmt_point(point),
+                            pt["apply_s"], pt["trigger_s"],
+                        )
+                    log_cb = _fallback_cb
+
+        return log_cb, bar, bar is not None
 
     def _run_capture_block(self, pre_trigger_samples=2500, post_trigger_samples=10000, timebase=8, timeout_s=2.0):
         """Low-level: fire a TX trigger and capture N samples at a given timebase.
@@ -794,7 +874,7 @@ class VerificationTank:
         """
         if not self.scope:
             raise ValueError("No Picoscope Connected")
-        logger.info("Sending Single Trigger...")
+        logger.debug("Sending Single Trigger...")
         self.scope.run_block(pre_trigger_samples=pre_trigger_samples, post_trigger_samples=post_trigger_samples, timebase=timebase)
         # Give the scope a moment to fully arm before firing the TX pulse.
         time.sleep(0.05)
@@ -877,6 +957,335 @@ class VerificationTank:
         else:
             self.lifu.hvcontroller.wait_for_settle()
 
+    # ------------------------------------------------------------------
+    # Logging utility
+    # ------------------------------------------------------------------
+    def add_log_file(self, path, level=logging.INFO,
+                     fmt="%(asctime)s - %(levelname)s - %(name)s - %(message)s"):
+        """Stream ``openlifu_verification`` log records to ``path``.
+
+        Adds a :class:`logging.FileHandler` to the top-level
+        ``openlifu_verification`` package logger. All submodule loggers
+        (``openlifu_verification.verificationtank``,
+        ``openlifu_verification.picoscope``, …) inherit the handler.
+
+        This does not touch the root logger, and it does not silence any
+        existing handlers — it simply mirrors the same records into the
+        file. Call :meth:`remove_log_file` (or close the returned handler
+        yourself) when you're done.
+
+        Args:
+            path: File path for the log. Parent dirs are created.
+            level: Minimum log level captured to the file.
+            fmt: ``logging`` format string. The default includes a
+                timestamp, level, logger name, and the message.
+
+        Returns:
+            The :class:`logging.FileHandler` that was attached.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setLevel(level)
+        handler.setFormatter(logging.Formatter(fmt))
+        # Make sure the package logger will forward records to the handler.
+        if _PACKAGE_LOGGER.level > level or _PACKAGE_LOGGER.level == logging.NOTSET:
+            _PACKAGE_LOGGER.setLevel(level)
+        _PACKAGE_LOGGER.addHandler(handler)
+        logger.info("Logging to %s at level %s.", path, logging.getLevelName(level))
+        if not hasattr(self, "_log_handlers"):
+            self._log_handlers = []
+        self._log_handlers.append(handler)
+        return handler
+
+    def remove_log_file(self, handler=None):
+        """Detach a file handler installed by :meth:`add_log_file`.
+
+        Args:
+            handler: The specific handler to remove; if ``None``, all
+                handlers installed via :meth:`add_log_file` are removed.
+        """
+        handlers = getattr(self, "_log_handlers", [])
+        if handler is None:
+            for h in list(handlers):
+                _PACKAGE_LOGGER.removeHandler(h)
+                h.close()
+            handlers.clear()
+        else:
+            _PACKAGE_LOGGER.removeHandler(handler)
+            handler.close()
+            if handler in handlers:
+                handlers.remove(handler)
+
+    # ------------------------------------------------------------------
+    # High-level scans
+    # ------------------------------------------------------------------
+    def scan_lateral(self, *,
+                     x_range=(-10.0, 10.0),
+                     num_x=41,
+                     y_range=None,
+                     num_y=1,
+                     y=0.0,
+                     z=50.0,
+                     time_start_s=100e-6,
+                     time_stop_s=200e-6,
+                     sampling_interval_ns=100,
+                     chunk_size=0,
+                     timeout_s=None,
+                     progress="bar") -> ScanResult:
+        """Sweep the focus over an (x, y) grid at a fixed z.
+
+        Requires the tank to be already configured
+        (:meth:`configure_lifu`) and HV enabled
+        (:meth:`enable_hv_output` with ``wait=True``).
+
+        Args:
+            x_range: ``(x_min, x_max)`` in mm.
+            num_x: Number of x samples across ``x_range``.
+            y_range: Optional ``(y_min, y_max)`` in mm. If ``None`` and
+                ``num_y == 1`` the sweep runs a single row at ``y=y``.
+            num_y: Number of y samples across ``y_range`` (1 for a line
+                scan).
+            y: y coordinate used when ``num_y == 1`` and ``y_range`` is
+                ``None``.
+            z: Fixed z depth (mm).
+            time_start_s, time_stop_s, sampling_interval_ns: Capture
+                window for each pulse.
+            chunk_size: Rapid-block chunk size (0 = whole sweep).
+            timeout_s: Passed through to
+                :meth:`finish_rapid_capture`.
+            progress: See :meth:`run_rapid_sweep`.
+
+        Returns:
+            A :class:`ScanResult` with ``scan_type="lateral"``. Coord
+            axes are ``yfoci``, ``xfoci`` (only ``xfoci`` if ``num_y ==
+            1``).
+        """
+        xfoci = np.linspace(x_range[0], x_range[1], num_x)
+        if num_y > 1:
+            if y_range is None:
+                raise ValueError("y_range must be given when num_y > 1.")
+            yfoci = np.linspace(y_range[0], y_range[1], num_y)
+        else:
+            yfoci = np.array([float(y)])
+
+        focus_points = [(float(xi), float(yi), float(z))
+                        for yi in yfoci for xi in xfoci]
+
+        def apply_point(point):
+            xi, yi, zi = point
+            self.set_focus(xi, yi, zi)
+
+        outputs, timings = self.run_rapid_sweep(
+            points=focus_points,
+            apply_point=apply_point,
+            time_start_s=time_start_s,
+            time_stop_s=time_stop_s,
+            sampling_interval_ns=sampling_interval_ns,
+            chunk_size=chunk_size or len(focus_points),
+            timeout_s=timeout_s,
+            progress=progress,
+            progress_label="scan_lat" if num_y == 1 else "scan_2d",
+        )
+        traces, t_axis, ok_mask = self._stack_hydrophone_traces(outputs)
+        if traces is None:
+            raise RuntimeError("No points captured in scan_lateral.")
+
+        if num_y > 1:
+            traces = traces.reshape(num_y, num_x, -1)
+            coords = {"yfoci": yfoci, "xfoci": xfoci}
+        else:
+            traces = traces.reshape(num_x, -1)
+            coords = {"xfoci": xfoci}
+
+        return ScanResult(
+            scan_type="lateral" if num_y == 1 else "2d",
+            t=t_axis,
+            traces=traces,
+            coords=coords,
+            hydrophone_channel=self.hydrophone_channel,
+            chunk_size=chunk_size or len(focus_points),
+            timings=_collect_timings(timings),
+            metadata={
+                "z_mm": float(z),
+                "frequency_kHz": float(self.frequency),
+                "voltage_V": float(self.hv_voltage) if self.hv_voltage is not None else float("nan"),
+                "captured_mask": ok_mask,
+            },
+        )
+
+    def scan_2d(self, *,
+                x_range=(-4.0, 4.0),
+                num_x=9,
+                y_range=(-4.0, 4.0),
+                num_y=9,
+                z=50.0,
+                time_start_s=100e-6,
+                time_stop_s=200e-6,
+                sampling_interval_ns=100,
+                chunk_size=0,
+                timeout_s=None,
+                progress="bar") -> ScanResult:
+        """Convenience wrapper: 2-D focus grid.
+
+        Same as :meth:`scan_lateral` with ``num_y > 1``. Returns a
+        :class:`ScanResult` with ``scan_type="2d"``.
+        """
+        return self.scan_lateral(
+            x_range=x_range, num_x=num_x,
+            y_range=y_range, num_y=num_y,
+            z=z,
+            time_start_s=time_start_s,
+            time_stop_s=time_stop_s,
+            sampling_interval_ns=sampling_interval_ns,
+            chunk_size=chunk_size,
+            timeout_s=timeout_s,
+            progress=progress,
+        )
+
+    def scan_frequency(self, *,
+                       frequencies_kHz,
+                       duration_msec,
+                       time_start_s=100e-6,
+                       time_stop_s=200e-6,
+                       sampling_interval_ns=100,
+                       chunk_size=0,
+                       timeout_s=None,
+                       progress="bar") -> ScanResult:
+        """Sweep the TX pulse frequency at the current focus.
+
+        Requires that :meth:`set_focus` and :meth:`enable_hv_output`
+        have already been called.
+
+        Args:
+            frequencies_kHz: 1-D iterable of frequencies to sweep.
+            duration_msec: Pulse duration (ms) reused at every point;
+                the number of cycles per pulse is
+                ``int(duration_msec * frequency_kHz)``.
+            time_start_s, time_stop_s, sampling_interval_ns: Capture
+                window.
+            chunk_size: Rapid-block chunk size (0 = whole sweep).
+            timeout_s: Passed through to
+                :meth:`finish_rapid_capture`.
+            progress: See :meth:`run_rapid_sweep`.
+
+        Returns:
+            A :class:`ScanResult` with ``scan_type="frequency"`` and
+            coord ``freq_kHz``.
+        """
+        freqs = np.asarray(list(frequencies_kHz), dtype=float)
+
+        def apply_point(freq_kHz):
+            self.set_pulse(frequency_kHz=freq_kHz, duration_msec=duration_msec)
+
+        outputs, timings = self.run_rapid_sweep(
+            points=freqs.tolist(),
+            apply_point=apply_point,
+            time_start_s=time_start_s,
+            time_stop_s=time_stop_s,
+            sampling_interval_ns=sampling_interval_ns,
+            chunk_size=chunk_size or len(freqs),
+            timeout_s=timeout_s,
+            progress=progress,
+            progress_label="scan_freq",
+        )
+        traces, t_axis, ok_mask = self._stack_hydrophone_traces(outputs)
+        if traces is None:
+            raise RuntimeError("No points captured in scan_frequency.")
+        return ScanResult(
+            scan_type="frequency",
+            t=t_axis,
+            traces=traces,
+            coords={"freq_kHz": freqs[ok_mask] if not ok_mask.all() else freqs},
+            hydrophone_channel=self.hydrophone_channel,
+            chunk_size=chunk_size or len(freqs),
+            timings=_collect_timings(timings),
+            metadata={
+                "voltage_V": float(self.hv_voltage) if self.hv_voltage is not None else float("nan"),
+                "duration_msec": float(duration_msec),
+                "captured_mask": ok_mask,
+            },
+        )
+
+    def scan_voltage(self, *,
+                     voltages_V,
+                     time_start_s=100e-6,
+                     time_stop_s=200e-6,
+                     sampling_interval_ns=100,
+                     chunk_size=0,
+                     timeout_s=None,
+                     progress="bar") -> ScanResult:
+        """Sweep the HV rail voltage at the current focus/pulse profile.
+
+        Each point calls :meth:`set_voltage` with ``wait=True`` before
+        firing the trigger, which adds ~50-200 ms per point for HV
+        settling. Requires that :meth:`enable_hv_output` was called
+        already.
+
+        Args:
+            voltages_V: 1-D iterable of voltages to sweep.
+            time_start_s, time_stop_s, sampling_interval_ns: Capture
+                window.
+            chunk_size: Rapid-block chunk size (0 = whole sweep).
+            timeout_s: Passed through to
+                :meth:`finish_rapid_capture`.
+            progress: See :meth:`run_rapid_sweep`.
+
+        Returns:
+            A :class:`ScanResult` with ``scan_type="voltage"`` and
+            coord ``voltage_V``.
+        """
+        voltages = np.asarray(list(voltages_V), dtype=float)
+
+        def apply_point(voltage):
+            self.set_voltage(float(voltage), wait=True)
+
+        outputs, timings = self.run_rapid_sweep(
+            points=voltages.tolist(),
+            apply_point=apply_point,
+            time_start_s=time_start_s,
+            time_stop_s=time_stop_s,
+            sampling_interval_ns=sampling_interval_ns,
+            chunk_size=chunk_size or len(voltages),
+            timeout_s=timeout_s,
+            progress=progress,
+            progress_label="scan_voltage",
+        )
+        traces, t_axis, ok_mask = self._stack_hydrophone_traces(outputs)
+        if traces is None:
+            raise RuntimeError("No points captured in scan_voltage.")
+        return ScanResult(
+            scan_type="voltage",
+            t=t_axis,
+            traces=traces,
+            coords={"voltage_V": voltages[ok_mask] if not ok_mask.all() else voltages},
+            hydrophone_channel=self.hydrophone_channel,
+            chunk_size=chunk_size or len(voltages),
+            timings=_collect_timings(timings),
+            metadata={
+                "frequency_kHz": float(self.frequency),
+                "captured_mask": ok_mask,
+            },
+        )
+
+    def _stack_hydrophone_traces(self, outputs):
+        """Pack the hydrophone channel from ``run_rapid_sweep`` outputs.
+
+        Returns:
+            ``(traces, t_axis, mask)``. ``traces`` has shape ``(n_ok,
+            samples)``, ``t_axis`` is the common time axis in ns, and
+            ``mask`` is a bool array over the input ``outputs``. All
+            three are ``None`` if nothing was captured.
+        """
+        hydro = self.hydrophone_channel
+        mask = np.array([o is not None for o in outputs], dtype=bool)
+        if not mask.any():
+            return None, None, None
+        good = [o for o in outputs if o is not None]
+        t_axis = good[0]["time"]
+        traces = np.stack([o[hydro] for o in good], axis=0)
+        return traces, t_axis, mask
+
     def get_peak_voltage(self, x, y, z,
                          time_start_s=-10e-6,
                          time_stop_s=200e-6,
@@ -918,3 +1327,28 @@ class VerificationTank:
             logger.info(f"Iteration {i+1}/{iterations}: x={x:.2f}, y={y:.2f}, Vp-p={v_current:.2f}")
 
         return x, y
+
+
+def _fmt_point(point) -> str:
+    """Short string representation of a sweep point for log messages."""
+    if isinstance(point, (list, tuple)):
+        parts = []
+        for v in point:
+            try:
+                parts.append(f"{float(v):+.2f}")
+            except (TypeError, ValueError):
+                parts.append(repr(v))
+        return "(" + ", ".join(parts) + ")"
+    try:
+        return f"{float(point):.4g}"
+    except (TypeError, ValueError):
+        return repr(point)
+
+
+def _collect_timings(timings):
+    """Convert the list-of-dicts from run_rapid_sweep to a dict-of-arrays."""
+    if not timings:
+        return {}
+    keys = ("apply_s", "trigger_s", "arm_s", "xfer_s", "iter_total_s")
+    return {k: np.array([t.get(k, np.nan) for t in timings], dtype=float)
+            for k in keys}
