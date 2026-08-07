@@ -57,12 +57,10 @@ def main():
             ver.set_focus(xInput, yInput, zInput)
 
             if not args.no_scope:
-                # Configure Picoscope. auto_trigger_ms=0 disables the scope's
-                # own auto-trigger fallback so wait_ready only returns when the
-                # TX pulse actually arrives (or on our timeout).
-                ver.scope.set_channel('A', range_mv=100, coupling='DC')
-                ver.scope.set_channel('B', range_mv=5000, coupling='DC')
-                ver.scope.set_trigger(channel='B', threshold_mv=1000, direction='rising', auto_trigger_ms=0)
+                # Scope channels + trigger are auto-configured with
+                # sensible defaults during VerificationTank.__enter__.
+                # Override the hydrophone vertical range here if needed.
+                ver.set_hydrophone_range(range_mv=100)
 
             # Enable power supply
             ver.enable_hv_output(wait=True)
@@ -72,11 +70,11 @@ def main():
             if args.no_scope:
                 ver.lifu.start_sonication()
             else:
-                result = ver.run_capture_timed(
+                result = ver.run_capture(
+                    time_start_s=100e-6,
+                    time_stop_s=200e-6,
                     sampling_interval_ns=100,
-                    pre_trigger_s=10e-6,
-                    post_trigger_s=200e-6,
-                    timeout_s=3.0
+                    timeout_s=3.0,
                 )
 
     except (ConnectionError, ValueError, Exception) as e:
@@ -92,9 +90,9 @@ def main():
         logger.warning("No pulse captured within the timeout window.")
         return
     if result:
-        # Plot data
-        plt.plot(result["time"], result["A"])
-        plt.xlabel('Time (ns)')
+        # Plot data. `time` is in ns relative to the trigger event.
+        plt.plot(result["time"]*1e-3, result[ver.hydrophone_channel])
+        plt.xlabel('Time (us)')
         plt.ylabel('Voltage (mV)')
         plt.show()
     else:

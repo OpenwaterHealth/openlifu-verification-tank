@@ -95,6 +95,11 @@ class Picoscope:
         self.max_adc = ctypes.c_int16()
         self.channel_ranges = {}  # Store configured channel ranges
         self.enabled_channels = set()
+        # Last-issued simple-trigger config, keyed by kwarg name. Populated
+        # by ``set_trigger`` so callers (e.g. ``VerificationTank.run_capture``)
+        # can re-apply the same trigger with a modified ``delay_samples``
+        # for advanced (post-trigger-delayed) captures.
+        self._trigger_config: Optional[Dict[str, Union[str, float, int]]] = None
         self._is_open = False
 
 
@@ -282,11 +287,42 @@ class Picoscope:
                 auto_trigger_ms
             )
             assert_pico_ok(self.status["trigger"])
-            
+
+            # Remember these settings so we can re-issue the trigger with
+            # a different delay without the caller having to re-supply
+            # threshold/direction/auto_trigger_ms.
+            self._trigger_config = {
+                "channel": channel,
+                "threshold_mv": threshold_mv,
+                "direction": direction,
+                "delay_samples": delay_samples,
+                "auto_trigger_ms": auto_trigger_ms,
+            }
+
             logger.info(f"Trigger configured: Channel {channel}, {threshold_mv}mV, {direction}")
             
         except Exception as e:
             raise PicoscopeError(f"Failed to configure trigger: {e}")
+
+    def set_trigger_delay(self, delay_samples: int):
+        """Re-apply the current trigger with a new ``delay_samples`` value.
+
+        The scope's simple-trigger ``delay_samples`` field shifts the
+        capture start to a specified number of sample periods *after*
+        the trigger event fires. This helper preserves the channel /
+        threshold / direction / auto_trigger settings from the most
+        recent ``set_trigger`` call so only the delay changes.
+
+        Raises:
+            PicoscopeError: If no trigger has been configured yet.
+        """
+        if self._trigger_config is None:
+            raise PicoscopeError(
+                "No trigger has been configured yet; call set_trigger first."
+            )
+        cfg = dict(self._trigger_config)
+        cfg["delay_samples"] = int(delay_samples)
+        self.set_trigger(**cfg)
             
     def get_timebase_info(self, timebase: int, max_samples: int) -> Tuple[float, int]:
         """
@@ -392,52 +428,83 @@ class Picoscope:
 
     def plan_capture(self,
                      sampling_interval_ns: float,
-                     pre_trigger_s: float,
-                     post_trigger_s: float,
+                     time_start_s: float,
+                     time_stop_s: float,
                      max_timebase: int = 40) -> Dict[str, Union[int, float]]:
         """Resolve a time-based capture request to concrete scope settings.
 
-        Requests are specified as *time intervals in seconds*; the scope
-        can only deliver a discrete set of sampling intervals, so this
-        method picks the closest available timebase (via ``find_timebase``)
-        and converts the pre/post-trigger durations to sample counts using
-        the *actual* interval the scope will use.
+        The window is specified as a time range *relative to the trigger*::
+
+            trigger event at t = 0
+            capture:  t = time_start_s ... time_stop_s
+
+        - ``time_start_s < 0`` → conventional pre-trigger capture; the
+          scope buffers samples from ``time_start_s`` up to the trigger
+          and continues to ``time_stop_s``.
+        - ``time_start_s >= 0`` → advanced-trigger capture; the scope's
+          ``delay_samples`` field shifts the capture start to
+          ``time_start_s`` after the trigger event, so ``pre_trigger_samples``
+          is zero and ``post_trigger_samples`` covers the full window.
+
+        Because the scope can only deliver discrete sampling intervals
+        and integer sample counts, the returned window may differ from
+        the request; the actual values are in the ``time_start_s`` /
+        ``time_stop_s`` / ``sampling_interval_ns`` keys.
 
         Args:
             sampling_interval_ns: Desired time between samples in ns.
-            pre_trigger_s: Requested capture window before the trigger, seconds.
-            post_trigger_s: Requested capture window after the trigger, seconds.
+            time_start_s: Start of the capture window, relative to the
+                trigger. Negative → pre-trigger, positive → delayed.
+            time_stop_s: End of the capture window, relative to the
+                trigger. Must be greater than ``time_start_s``.
             max_timebase: Search bound forwarded to ``find_timebase``.
 
         Returns:
             Dict with keys:
               - ``timebase`` (int): index to pass to ``run_block``.
               - ``pre_trigger_samples`` (int): sample count before trigger.
-              - ``post_trigger_samples`` (int): sample count after trigger.
+              - ``post_trigger_samples`` (int): sample count after the
+                capture start (which is trigger + delay).
+              - ``delay_samples`` (int): trigger-to-capture-start delay.
               - ``sampling_interval_ns`` (float): actual scope interval.
-              - ``pre_trigger_s`` (float): actual pre-trigger window.
-              - ``post_trigger_s`` (float): actual post-trigger window.
+              - ``time_start_s`` (float): actual capture start relative to trigger.
+              - ``time_stop_s`` (float): actual capture end relative to trigger.
         """
-        if pre_trigger_s < 0 or post_trigger_s < 0:
-            raise ValueError("pre_trigger_s and post_trigger_s must be >= 0")
+        if time_stop_s <= time_start_s:
+            raise ValueError("time_stop_s must be greater than time_start_s")
 
         timebase, actual_interval_ns = self.find_timebase(
             sampling_interval_ns, max_timebase=max_timebase
         )
         interval_s = actual_interval_ns * 1e-9
-        pre_samples = int(round(pre_trigger_s / interval_s))
-        post_samples = int(round(post_trigger_s / interval_s))
+
+        if time_start_s < 0:
+            pre_samples = int(round(-time_start_s / interval_s))
+            delay_samples = 0
+            # post-trigger covers 0 .. time_stop_s (clamped to >= 0).
+            post_samples = int(round(max(time_stop_s, 0.0) / interval_s))
+            actual_start_s = -pre_samples * interval_s
+            actual_stop_s = post_samples * interval_s
+        else:
+            pre_samples = 0
+            delay_samples = int(round(time_start_s / interval_s))
+            post_samples = int(round((time_stop_s - time_start_s) / interval_s))
+            actual_start_s = delay_samples * interval_s
+            actual_stop_s = (delay_samples + post_samples) * interval_s
+
         # ps5000aRunBlock requires at least 1 sample total.
         if pre_samples + post_samples < 1:
             post_samples = 1
+            actual_stop_s = actual_start_s + interval_s
 
         return {
             "timebase": timebase,
             "pre_trigger_samples": pre_samples,
             "post_trigger_samples": post_samples,
+            "delay_samples": delay_samples,
             "sampling_interval_ns": actual_interval_ns,
-            "pre_trigger_s": pre_samples * interval_s,
-            "post_trigger_s": post_samples * interval_s,
+            "time_start_s": actual_start_s,
+            "time_stop_s": actual_stop_s,
         }
 
     def run_block(self, 
@@ -658,4 +725,4 @@ class Picoscope:
             
         except Exception as e:
             raise PicoscopeError(f"Failed to stop capture: {e}")
-        
+        

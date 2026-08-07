@@ -80,13 +80,31 @@ class VerificationTank:
     A context manager to simplify OpenLIFU verification tasks.
     """
 
-    def __init__(self, frequency=400, use_picoscope=True, num_modules=1, resolution=PICOSCOPE_RESOLUTION, ext_power_supply=True, voltage_table_selection="dvt"):
+    def __init__(self,
+                 frequency=400,
+                 use_picoscope=True,
+                 num_modules=1,
+                 resolution=PICOSCOPE_RESOLUTION,
+                 ext_power_supply=True,
+                 voltage_table_selection="dvt",
+                 hydrophone_channel="A",
+                 trigger_channel="B",
+                 hydrophone_range_mv=100,
+                 trigger_range_mv=5000,
+                 trigger_threshold_mv=1000,
+                 trigger_direction="rising"):
         self.use_picoscope = use_picoscope
         self.resolution = resolution
         self.num_modules = num_modules
         self.frequency = frequency
         self.ext_power_supply = ext_power_supply
         self.voltage_table_selection = voltage_table_selection
+        self.hydrophone_channel = hydrophone_channel
+        self.trigger_channel = trigger_channel
+        self.hydrophone_range_mv = hydrophone_range_mv
+        self.trigger_range_mv = trigger_range_mv
+        self.trigger_threshold_mv = trigger_threshold_mv
+        self.trigger_direction = trigger_direction
         self.lifu = None
         self.scope = None
         self.hv = None
@@ -108,6 +126,29 @@ class VerificationTank:
             if self.use_picoscope:
                 self.scope = Picoscope(resolution=self.resolution)
                 self.scope.__enter__()
+                # Sensible default channel + trigger config so callers
+                # don't have to repeat the same boilerplate every script.
+                # Override afterwards with set_hydrophone_range /
+                # set_trigger_range or by calling scope.set_channel /
+                # scope.set_trigger directly.
+                self.scope.set_channel(
+                    self.hydrophone_channel,
+                    range_mv=self.hydrophone_range_mv,
+                    coupling='DC',
+                )
+                self.scope.set_channel(
+                    self.trigger_channel,
+                    range_mv=self.trigger_range_mv,
+                    coupling='DC',
+                )
+                # auto_trigger_ms=0 disables the scope's auto-trigger
+                # fallback so wait_ready only returns on a real edge.
+                self.scope.set_trigger(
+                    channel=self.trigger_channel,
+                    threshold_mv=self.trigger_threshold_mv,
+                    direction=self.trigger_direction,
+                    auto_trigger_ms=0,
+                )
             self.lifu.__enter__()
             if self.hv is not None:
                 self.hv.__enter__()
@@ -332,21 +373,157 @@ class VerificationTank:
             except Exception as e:
                 logger.warning("stop_sonication after trigger raised: %s", e)
 
-    def run_capture(self, pre_trigger_samples=2500, post_trigger_samples=10000, timebase=8, timeout_s=2.0):
-        """Fire a single TX trigger and capture the resulting scope block.
+    def set_hydrophone_range(self, range_mv, coupling="DC"):
+        """Set the scope's vertical range on the hydrophone channel.
+
+        Args:
+            range_mv: Full-scale +/- range in millivolts. Must be one of
+                the discrete PicoScope ranges (10, 20, 50, 100, 200, 500,
+                1000, 2000, 5000, 10000, 20000, 50000).
+            coupling: 'DC' (default) or 'AC'.
+        """
+        if not self.scope:
+            raise ValueError("No Picoscope Connected")
+        self.scope.set_channel(
+            self.hydrophone_channel, range_mv=range_mv, coupling=coupling
+        )
+        self.hydrophone_range_mv = range_mv
+
+    def set_trigger_range(self, range_mv, coupling="DC"):
+        """Set the scope's vertical range on the trigger channel.
+
+        Note: changing the range invalidates the current trigger config
+        (threshold_mV is stored in ADC counts against the range), so this
+        also re-applies the trigger using the currently-configured
+        threshold / direction.
+
+        Args:
+            range_mv: Full-scale +/- range in millivolts.
+            coupling: 'DC' (default) or 'AC'.
+        """
+        if not self.scope:
+            raise ValueError("No Picoscope Connected")
+        self.scope.set_channel(
+            self.trigger_channel, range_mv=range_mv, coupling=coupling
+        )
+        self.trigger_range_mv = range_mv
+        # Re-apply the trigger so its threshold_mV is re-encoded against
+        # the new range.
+        self.scope.set_trigger(
+            channel=self.trigger_channel,
+            threshold_mv=self.trigger_threshold_mv,
+            direction=self.trigger_direction,
+            auto_trigger_ms=0,
+        )
+
+    def run_capture(self,
+                    time_start_s,
+                    time_stop_s,
+                    sampling_interval_ns,
+                    timeout_s=2.0):
+        """Fire a single TX trigger and capture a time-based scope block.
+
+        The window is specified relative to the scope trigger event:
+
+        - ``time_start_s < 0`` → pre-trigger capture; the scope buffers
+          data from ``time_start_s`` up through ``time_stop_s``.
+        - ``time_start_s >= 0`` → delayed (advanced-trigger) capture;
+          the scope waits ``time_start_s`` after the trigger before it
+          starts collecting samples. This lets you skim the front of
+          long captures without wasting samples/RAM.
+
+        The scope only supports discrete sampling intervals and integer
+        sample counts, so what actually gets used may differ from what
+        was requested. The returned data dict includes
+        ``sampling_interval_ns``, ``time_start_s``, and ``time_stop_s``
+        so you know what was really applied.
+
+        This method assumes the trigger has already been configured via
+        ``self.scope.set_trigger(channel=self.trigger_channel, ...)``.
+        The ``delay_samples`` field of that trigger is re-applied here
+        based on ``time_start_s``.
+
+        Example::
+
+            # samples every 100 ns for 100 us, starting 10 us before trigger
+            data = ver.run_capture(
+                time_start_s=-10e-6,
+                time_stop_s=100e-6,
+                sampling_interval_ns=100,
+            )
+
+        Args:
+            time_start_s: Start of the capture window relative to trigger.
+            time_stop_s: End of the capture window relative to trigger.
+            sampling_interval_ns: Requested time between samples in ns.
+            timeout_s: Max time to wait for the scope trigger to fire.
+
+        Returns:
+            The scope data dict with:
+              - ``time``: sample times relative to the trigger (ns).
+              - one array per enabled channel (mV).
+              - ``sampling_interval_ns``, ``time_start_s``,
+                ``time_stop_s``: actual applied values.
+            Or ``None`` if the scope's trigger timed out.
+        """
+        if not self.scope:
+            raise ValueError("No Picoscope Connected")
+        plan = self.scope.plan_capture(
+            sampling_interval_ns=sampling_interval_ns,
+            time_start_s=time_start_s,
+            time_stop_s=time_stop_s,
+        )
+        logger.info(
+            "run_capture: requested %.1f ns / start %.3f us / stop %.3f us; "
+            "actual %.3f ns / start %.3f us / stop %.3f us "
+            "(timebase=%d, pre=%d, post=%d, delay=%d)",
+            sampling_interval_ns, time_start_s * 1e6, time_stop_s * 1e6,
+            plan["sampling_interval_ns"],
+            plan["time_start_s"] * 1e6, plan["time_stop_s"] * 1e6,
+            plan["timebase"],
+            plan["pre_trigger_samples"], plan["post_trigger_samples"],
+            plan["delay_samples"],
+        )
+        # Re-apply the scope trigger with the planned delay. Requires
+        # that the user has already called set_trigger to configure
+        # channel/threshold/direction/auto_trigger_ms.
+        self.scope.set_trigger_delay(plan["delay_samples"])
+
+        result = self._run_capture_block(
+            pre_trigger_samples=plan["pre_trigger_samples"],
+            post_trigger_samples=plan["post_trigger_samples"],
+            timebase=plan["timebase"],
+            timeout_s=timeout_s,
+        )
+        if result is not None:
+            # Shift the scope's zero-based time axis so t=0 is the trigger.
+            interval_ns = plan["sampling_interval_ns"]
+            offset_ns = plan["time_start_s"] * 1e9
+            result["time"] = result["time"] + offset_ns
+            result["sampling_interval_ns"] = interval_ns
+            result["time_start_s"] = plan["time_start_s"]
+            result["time_stop_s"] = plan["time_stop_s"]
+        return result
+
+    def _run_capture_block(self, pre_trigger_samples=2500, post_trigger_samples=10000, timebase=8, timeout_s=2.0):
+        """Low-level: fire a TX trigger and capture N samples at a given timebase.
+
+        Prefer :meth:`run_capture`, which accepts time-based inputs
+        (``time_start_s``, ``time_stop_s``, ``sampling_interval_ns``)
+        and re-applies the scope trigger delay. This method is exposed
+        for callers that already know the sample counts and timebase
+        they want (e.g. rapid-block mode).
 
         Args:
             pre_trigger_samples: Samples captured before the scope trigger.
-            post_trigger_samples: Samples captured after the scope trigger.
+            post_trigger_samples: Samples captured after the scope trigger
+                (or after ``trigger + delay`` if a trigger delay is set).
             timebase: Picoscope timebase index.
-            timeout_s: Maximum time to wait for the scope to see its trigger,
-                in seconds. If the scope's ``auto_trigger_ms`` is 0 and no
-                trigger arrives before this timeout, ``None`` is returned
-                instead of a data dict.
+            timeout_s: Max time to wait for the scope trigger to fire.
 
         Returns:
-            Data dict from the scope, or ``None`` if the scope never saw a
-            trigger within *timeout_s*.
+            Data dict from the scope, or ``None`` if the scope never
+            saw a trigger within *timeout_s*.
         """
         if not self.scope:
             raise ValueError("No Picoscope Connected")
@@ -373,68 +550,6 @@ class VerificationTank:
                 self.lifu.stop_sonication(turn_hv_off=False, wait_for_settle=False)
             except Exception as e:
                 logger.warning("stop_sonication after capture raised: %s", e)
-
-    def run_capture_timed(self,
-                          sampling_interval_ns,
-                          pre_trigger_s,
-                          post_trigger_s,
-                          timeout_s=2.0):
-        """Fire a single TX trigger and capture a time-based scope block.
-
-        Convenience wrapper over :meth:`run_capture` that lets you specify
-        the capture window in seconds and the sampling density in ns.
-        The scope only supports a discrete set of sampling intervals, so
-        the actual interval and the actual window durations may differ
-        from the requested values; the returned data dict includes a
-        ``sampling_interval_ns`` key so you know what was really used.
-
-        Example::
-
-            # samples every 100 ns for 100 us, starting 10 us before trigger
-            data = ver.run_capture_timed(
-                sampling_interval_ns=100,
-                pre_trigger_s=10e-6,
-                post_trigger_s=100e-6,
-            )
-
-        Args:
-            sampling_interval_ns: Requested time between samples in ns.
-            pre_trigger_s: Requested capture window before the trigger,
-                in seconds.
-            post_trigger_s: Requested capture window after the trigger,
-                in seconds.
-            timeout_s: Forwarded to :meth:`run_capture`.
-
-        Returns:
-            The scope data dict with an added ``sampling_interval_ns``
-            key giving the actual per-sample interval, or ``None`` if
-            the scope's trigger timed out.
-        """
-        if not self.scope:
-            raise ValueError("No Picoscope Connected")
-        plan = self.scope.plan_capture(
-            sampling_interval_ns=sampling_interval_ns,
-            pre_trigger_s=pre_trigger_s,
-            post_trigger_s=post_trigger_s,
-        )
-        logger.info(
-            "run_capture_timed: requested %.1f ns / pre %.1f us / post %.1f us; "
-            "actual %.3f ns / pre %.3f us / post %.3f us (timebase=%d, samples=%d)",
-            sampling_interval_ns, pre_trigger_s * 1e6, post_trigger_s * 1e6,
-            plan["sampling_interval_ns"],
-            plan["pre_trigger_s"] * 1e6, plan["post_trigger_s"] * 1e6,
-            plan["timebase"],
-            plan["pre_trigger_samples"] + plan["post_trigger_samples"],
-        )
-        result = self.run_capture(
-            pre_trigger_samples=plan["pre_trigger_samples"],
-            post_trigger_samples=plan["post_trigger_samples"],
-            timebase=plan["timebase"],
-            timeout_s=timeout_s,
-        )
-        if result is not None:
-            result["sampling_interval_ns"] = plan["sampling_interval_ns"]
-        return result
 
     def set_voltage(self, voltage, wait=False):
         """
@@ -501,13 +616,22 @@ class VerificationTank:
         else:
             self.lifu.hvcontroller.wait_for_settle()
 
-    def get_peak_voltage(self, x, y, z):
+    def get_peak_voltage(self, x, y, z,
+                         time_start_s=-10e-6,
+                         time_stop_s=200e-6,
+                         sampling_interval_ns=100):
         """
-        Sets the focus to the given coordinates and returns the peak-to-peak voltage.
+        Sets the focus to the given coordinates and returns the peak-to-peak
+        voltage from the hydrophone channel.
         """
         self.set_focus(x, y, z)
-        data = self.run_capture()
-        peak_to_peak = np.max(data['A']) - np.min(data['A'])
+        data = self.run_capture(
+            time_start_s=time_start_s,
+            time_stop_s=time_stop_s,
+            sampling_interval_ns=sampling_interval_ns,
+        )
+        signal = data[self.hydrophone_channel]
+        peak_to_peak = np.max(signal) - np.min(signal)
         return peak_to_peak
 
     def find_peak_by_gradient_ascent(self, x_start, y_start, z, step_size=0.5, iterations=10, learning_rate=0.1):
