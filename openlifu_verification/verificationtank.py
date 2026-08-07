@@ -348,30 +348,21 @@ class VerificationTank:
             raise ValueError("No Picoscope Connected")
         self.scope.set_trigger(channel=channel, threshold_mV=threshold_mV, direction=direction)
 
-    def run_trigger(self, hold_s: float = 1.0):
-        """Fire a single TX trigger (no scope involvement) and stop.
+    def run_trigger(self):
+        """Fire a single TX trigger (no scope involvement).
 
-        Useful for running the pulse when an external scope application is
-        used for capture. HV must already be enabled (call
-        ``enable_hv_output(wait=True)`` first).
+        Useful for running the pulse when an external scope application
+        is used for capture. HV must already be enabled (call
+        ``enable_hv_output(wait=True)`` first) and
+        ``configure_lifu(..., trigger_mode="single")`` must have set the
+        firmware to fire exactly one pulse train per ``start_trigger``.
 
-        Args:
-            hold_s: How long to leave sonication running before calling
-                ``stop_sonication``. For ``trigger_mode="single"`` the
-                pulse train completes on its own, so this just needs to
-                cover the pulse-train duration.
+        Equivalent to :meth:`trigger_once`; kept as a separate public
+        name for scripts that just want to fire without any scope
+        involvement.
         """
         logger.info("Sending Single Trigger (no scope)...")
-        # Keep async STATUS frames off during the trigger so they don't race
-        # command responses on the shared TX CDC endpoint.
-        self.lifu.start_sonication(turn_hv_on=False, wait_for_settle=False, async_mode=False)
-        try:
-            time.sleep(hold_s)
-        finally:
-            try:
-                self.lifu.stop_sonication(turn_hv_off=False, wait_for_settle=False)
-            except Exception as e:
-                logger.warning("stop_sonication after trigger raised: %s", e)
+        self.lifu.txdevice.start_trigger()
 
     def set_hydrophone_range(self, range_mv, coupling="DC"):
         """Set the scope's vertical range on the hydrophone channel.
@@ -505,6 +496,282 @@ class VerificationTank:
             result["time_stop_s"] = plan["time_stop_s"]
         return result
 
+    # ------------------------------------------------------------------
+    # Rapid-block capture (many triggers, one bulk transfer)
+    # ------------------------------------------------------------------
+    def configure_rapid_capture(self,
+                                n_captures,
+                                time_start_s,
+                                time_stop_s,
+                                sampling_interval_ns):
+        """Plan a rapid-block capture and configure the scope memory.
+
+        Splits the scope's memory into ``n_captures`` segments, sets
+        the scope trigger delay to match ``time_start_s``, and returns
+        a plan dict describing the actual applied window / timebase.
+        After calling this, use :meth:`arm_rapid_capture`,
+        :meth:`trigger_once` (one call per segment), and
+        :meth:`finish_rapid_capture` to run the acquisition.
+
+        Args:
+            n_captures: Number of triggers/segments to capture in one
+                block. Must be <= ``scope.get_max_segments()``.
+            time_start_s: Start of the capture window relative to each trigger.
+            time_stop_s: End of the capture window relative to each trigger.
+            sampling_interval_ns: Requested time between samples in ns.
+
+        Returns:
+            The plan dict from ``scope.plan_capture`` plus
+            ``n_captures`` and ``samples_per_segment`` fields.
+        """
+        if not self.scope:
+            raise ValueError("No Picoscope Connected")
+        plan = self.scope.plan_capture(
+            sampling_interval_ns=sampling_interval_ns,
+            time_start_s=time_start_s,
+            time_stop_s=time_stop_s,
+        )
+        samples_per_segment = plan["pre_trigger_samples"] + plan["post_trigger_samples"]
+        max_per_seg = self.scope.configure_rapid_block(n_captures)
+        if samples_per_segment > max_per_seg:
+            # Undo segmentation so single-block captures still work.
+            self.scope.reset_rapid_block()
+            raise ValueError(
+                f"Rapid capture needs {samples_per_segment} samples/segment but the "
+                f"scope only allows {max_per_seg} samples/segment when split into "
+                f"{n_captures} segments. Reduce n_captures, sampling rate, or window."
+            )
+        plan["n_captures"] = n_captures
+        plan["samples_per_segment"] = samples_per_segment
+        logger.info(
+            "configure_rapid_capture: n_captures=%d samples/segment=%d "
+            "(max %d) window=[%.3f, %.3f] us dt=%.3f ns",
+            n_captures, samples_per_segment, max_per_seg,
+            plan["time_start_s"] * 1e6, plan["time_stop_s"] * 1e6,
+            plan["sampling_interval_ns"],
+        )
+        return plan
+
+    def arm_rapid_capture(self, plan):
+        """Arm the scope for a rapid-block acquisition described by ``plan``.
+
+        Applies the trigger delay from the plan and calls ``run_block``.
+        After this returns, the scope is waiting for ``n_captures``
+        triggers; call :meth:`trigger_once` that many times.
+        """
+        if not self.scope:
+            raise ValueError("No Picoscope Connected")
+        self.scope.set_trigger_delay(plan["delay_samples"])
+        self.scope.run_block(
+            pre_trigger_samples=plan["pre_trigger_samples"],
+            post_trigger_samples=plan["post_trigger_samples"],
+            timebase=plan["timebase"],
+        )
+        # Small settle so the scope is fully armed before the first pulse.
+        time.sleep(0.05)
+
+    def trigger_once(self):
+        """Fire one TX pulse (one scope trigger).
+
+        Calls ``txdevice.start_trigger()`` directly — one USB round-trip
+        (~107 ms on the current firmware) rather than the six that the
+        SDK's ``start_sonication`` + ``stop_sonication`` wrappers do
+        (~440 ms).
+
+        Assumes:
+
+        - ``configure_lifu(..., trigger_mode="single")`` so the firmware
+          fires exactly one pulse train per ``start_trigger`` and
+          auto-disarms afterwards.
+        - HV is already enabled (``enable_hv_output(wait=True)``).
+        - ``async_mode(False)`` is sticky from ``configure_lifu``.
+        """
+        self.lifu.txdevice.start_trigger()
+
+    def finish_rapid_capture(self, plan, timeout_s=None, reset=True):
+        """Wait for the rapid block to complete and bulk-transfer the data.
+
+        Args:
+            plan: The dict returned by :meth:`configure_rapid_capture`.
+            timeout_s: Max time to wait for all ``n_captures`` triggers.
+                ``None`` waits indefinitely.
+            reset: If True (default), reset the scope back to
+                single-segment mode after retrieval so subsequent
+                ``run_capture`` calls work normally.
+
+        Returns:
+            Dict with:
+              - ``'time'``: 1-D time axis (ns), zero at trigger.
+              - one entry per enabled channel: ``(n_captures, samples)`` mV.
+              - ``'overflow'``: 1-D int16, one entry per segment.
+              - ``sampling_interval_ns``, ``time_start_s``, ``time_stop_s``.
+            Or ``None`` if the scope timed out.
+        """
+        if not self.scope:
+            raise ValueError("No Picoscope Connected")
+        try:
+            if not self.scope.wait_ready(timeout_s=timeout_s):
+                logger.warning(
+                    "Rapid-block wait_ready timed out after %.3f s", timeout_s or -1.0
+                )
+                return None
+            result = self.scope.get_data_rapid(
+                samples_per_segment=plan["samples_per_segment"],
+                timebase=plan["timebase"],
+            )
+        finally:
+            if reset:
+                try:
+                    self.scope.reset_rapid_block()
+                except Exception as e:
+                    logger.warning("reset_rapid_block raised: %s", e)
+
+        # Shift time axis so t=0 is the trigger, and expose the actual plan.
+        interval_ns = plan["sampling_interval_ns"]
+        offset_ns = plan["time_start_s"] * 1e9
+        result["time"] = result["time"] + offset_ns
+        result["sampling_interval_ns"] = interval_ns
+        result["time_start_s"] = plan["time_start_s"]
+        result["time_stop_s"] = plan["time_stop_s"]
+        return result
+
+    def run_rapid_sweep(self,
+                        points,
+                        apply_point,
+                        time_start_s,
+                        time_stop_s,
+                        sampling_interval_ns,
+                        chunk_size=None,
+                        timeout_s=None,
+                        progress=None):
+        """Run a rapid-block sweep over ``points``.
+
+        Splits ``points`` into chunks of size ``chunk_size``. For each
+        chunk:
+
+          1. ``configure_rapid_capture`` + ``arm_rapid_capture`` — arm the
+             scope for ``len(chunk)`` segments.
+          2. For each point, call ``apply_point(point)`` (a caller
+             supplied callback that programs the per-point state, e.g.
+             ``set_focus``, ``set_pulse``, ``set_voltage``), then
+             ``trigger_once()``.
+          3. ``finish_rapid_capture`` — wait for all triggers and pull
+             the block back in one bulk transfer.
+          4. Split the ``(n_captures, samples)`` bulk buffer into a
+             per-point dict (one 1-D array per enabled channel) matching
+             the shape of ``run_capture`` results.
+
+        Args:
+            points: Iterable of point descriptors. Each is passed
+                unchanged to ``apply_point``.
+            apply_point: Callable ``apply_point(point) -> None`` that
+                programs the device state for one point (delays,
+                frequency, HV voltage, etc.).
+            time_start_s, time_stop_s, sampling_interval_ns: Capture
+                window (same semantics as ``run_capture``).
+            chunk_size: Maximum points per rapid block. Defaults to
+                ``len(points)`` (one big chunk). Capped internally at
+                ``scope.get_max_segments()``.
+            timeout_s: Max time to wait for each chunk to finish.
+                ``None`` waits indefinitely.
+            progress: Optional callable ``progress(point, timing) ->
+                None`` invoked after every trigger. ``timing`` is the
+                per-point dict described below.
+
+        Returns:
+            ``(outputs, timings)``:
+
+            - ``outputs``: list of per-point data dicts (same shape as
+              ``run_capture``) or ``None`` for any point in a chunk
+              whose transfer timed out.
+            - ``timings``: list of per-point dicts with keys
+              ``apply_s``, ``trigger_s``, ``arm_s`` (amortized),
+              ``xfer_s`` (amortized), ``iter_total_s``, ``captured``,
+              ``chunk_index``.
+        """
+        if not self.scope:
+            raise ValueError("No Picoscope Connected")
+        points = list(points)
+        n_points = len(points)
+        if n_points == 0:
+            return [], []
+        max_segments = self.scope.get_max_segments()
+        if chunk_size is None or chunk_size <= 0:
+            chunk_size = n_points
+        chunk_size = min(chunk_size, max_segments)
+
+        outputs = [None] * n_points
+        timings = []
+
+        for chunk_index, chunk_start in enumerate(range(0, n_points, chunk_size)):
+            chunk = points[chunk_start:chunk_start + chunk_size]
+            n_captures = len(chunk)
+
+            t_arm_start = time.perf_counter()
+            plan = self.configure_rapid_capture(
+                n_captures=n_captures,
+                time_start_s=time_start_s,
+                time_stop_s=time_stop_s,
+                sampling_interval_ns=sampling_interval_ns,
+            )
+            self.arm_rapid_capture(plan)
+            t_arm = time.perf_counter() - t_arm_start
+
+            per_point_timings = []
+            for point in chunk:
+                t_iter_start = time.perf_counter()
+
+                t0 = time.perf_counter()
+                apply_point(point)
+                t_apply = time.perf_counter() - t0
+
+                t0 = time.perf_counter()
+                self.trigger_once()
+                t_trigger = time.perf_counter() - t0
+
+                t_iter_total = time.perf_counter() - t_iter_start
+                per_point_timings.append({
+                    "apply_s": t_apply,
+                    "trigger_s": t_trigger,
+                    "iter_total_s": t_iter_total,
+                })
+
+            t_xfer_start = time.perf_counter()
+            bulk = self.finish_rapid_capture(plan, timeout_s=timeout_s)
+            t_xfer = time.perf_counter() - t_xfer_start
+
+            arm_per_pt = t_arm / n_captures
+            xfer_per_pt = t_xfer / n_captures
+            logger.info(
+                "chunk %d [%d:%d] arm=%.4fs xfer=%.4fs captured=%s",
+                chunk_index, chunk_start, chunk_start + n_captures,
+                t_arm, t_xfer, bulk is not None,
+            )
+
+            for i, (point, pt) in enumerate(zip(chunk, per_point_timings)):
+                pt.update({
+                    "chunk_index": chunk_index,
+                    "arm_s": arm_per_pt,
+                    "xfer_s": xfer_per_pt,
+                    "captured": bulk is not None,
+                })
+                if bulk is not None:
+                    per_point_data = {
+                        "time": bulk["time"],
+                        "sampling_interval_ns": bulk["sampling_interval_ns"],
+                        "time_start_s": bulk["time_start_s"],
+                        "time_stop_s": bulk["time_stop_s"],
+                        "overflow": bulk["overflow"][i],
+                    }
+                    for ch in self.scope.enabled_channels:
+                        per_point_data[ch] = bulk[ch][i]
+                    outputs[chunk_start + i] = per_point_data
+                timings.append(pt)
+                if progress is not None:
+                    progress(point, pt)
+
+        return outputs, timings
+
     def _run_capture_block(self, pre_trigger_samples=2500, post_trigger_samples=10000, timebase=8, timeout_s=2.0):
         """Low-level: fire a TX trigger and capture N samples at a given timebase.
 
@@ -531,25 +798,19 @@ class VerificationTank:
         self.scope.run_block(pre_trigger_samples=pre_trigger_samples, post_trigger_samples=post_trigger_samples, timebase=timebase)
         # Give the scope a moment to fully arm before firing the TX pulse.
         time.sleep(0.05)
-        # Mirror the test app: fire via LIFUInterface.start_sonication rather
-        # than calling txdevice.start_trigger directly. HV is already on and
-        # settled (enable_hv_output(wait=True) is called earlier), so
-        # skip the SDK's HV re-check/settle steps. Keep async STATUS off so
-        # STATUS frames don't race the start_trigger command response.
-        self.lifu.start_sonication(turn_hv_on=False, wait_for_settle=False, async_mode=False)
-        try:
-            if not self.scope.wait_ready(timeout_s=timeout_s):
-                logger.warning("Scope trigger timed out after %.3f s; no pulse captured.", timeout_s)
-                return None
-            return self.scope.get_data(pre_trigger_samples+post_trigger_samples, timebase)
-        finally:
-            # Match the test app's Start/Stop pairing: always stop sonication
-            # after the capture completes (or times out). Leave HV energized
-            # so subsequent captures don't need to re-settle.
-            try:
-                self.lifu.stop_sonication(turn_hv_off=False, wait_for_settle=False)
-            except Exception as e:
-                logger.warning("stop_sonication after capture raised: %s", e)
+        # Fast path: fire via txdevice.start_trigger() directly (one USB
+        # round-trip ~107 ms), skipping the SDK's start_sonication /
+        # stop_sonication wrappers which add 5 more round-trips for
+        # bookkeeping (HV re-check, async_mode toggles). Assumes
+        # configure_lifu was called with trigger_mode="single" so the
+        # firmware auto-disarms after one pulse train, enable_hv_output
+        # left HV energized, and async_mode(False) is sticky from
+        # configure_lifu.
+        self.lifu.txdevice.start_trigger()
+        if not self.scope.wait_ready(timeout_s=timeout_s):
+            logger.warning("Scope trigger timed out after %.3f s; no pulse captured.", timeout_s)
+            return None
+        return self.scope.get_data(pre_trigger_samples+post_trigger_samples, timebase)
 
     def set_voltage(self, voltage, wait=False):
         """

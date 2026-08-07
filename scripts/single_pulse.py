@@ -68,7 +68,7 @@ def main():
             input("Press Enter to start")
 
             if args.no_scope:
-                ver.lifu.start_sonication()
+                ver.run_trigger()
             else:
                 result = ver.run_capture(
                     time_start_s=100e-6,

@@ -48,6 +48,19 @@ RANGES_MV = {
     50000: ps.PS5000A_RANGE["PS5000A_50V"],
 }
 
+# Reverse lookup: PS5000A range enum -> full-scale mV. Used by rapid-block
+# retrieval, which converts ADC counts to mV via numpy for speed rather
+# than looping through ``adc2mV`` for every segment.
+_RANGE_ENUM_TO_MV = {v: k for k, v in RANGES_MV.items()}
+
+
+def _range_enum_to_mv(range_enum) -> int:
+    """Return the full-scale value in mV for a PS5000A range enum."""
+    try:
+        return _RANGE_ENUM_TO_MV[range_enum]
+    except KeyError:
+        raise ValueError(f"Unknown PS5000A range enum: {range_enum!r}")
+
 CHANNELS = {
     'A': ps.PS5000A_CHANNEL["PS5000A_CHANNEL_A"],
     'B': ps.PS5000A_CHANNEL["PS5000A_CHANNEL_B"],
@@ -101,6 +114,12 @@ class Picoscope:
         # for advanced (post-trigger-delayed) captures.
         self._trigger_config: Optional[Dict[str, Union[str, float, int]]] = None
         self._is_open = False
+        # Rapid-block state. ``_rapid_n_captures`` is the number of
+        # segments the device memory has been divided into (also the
+        # number of triggers ``run_block`` will wait for). ``None``
+        # means the scope is still in single-segment mode.
+        self._rapid_n_captures: Optional[int] = None
+        self._rapid_max_samples_per_segment: Optional[int] = None
 
 
         if resolution not in RESOLUTION_MAP:
@@ -707,7 +726,219 @@ class Picoscope:
         
         # Retrieve data
         return self.get_data(max_samples, timebase)
-        
+
+    # ------------------------------------------------------------------
+    # Rapid-block mode
+    # ------------------------------------------------------------------
+    def get_max_segments(self) -> int:
+        """Return the maximum number of memory segments the device supports.
+
+        The exact number depends on the current device resolution.
+        """
+        if not self._is_open:
+            raise PicoscopeError(
+                "Device not open. Use within a context manager or call open_unit() first."
+            )
+        max_segments = ctypes.c_uint32(0)
+        try:
+            self.status["getMaxSegments"] = ps.ps5000aGetMaxSegments(
+                self.chandle, ctypes.byref(max_segments)
+            )
+            assert_pico_ok(self.status["getMaxSegments"])
+        except Exception as e:
+            raise PicoscopeError(f"Failed to query max segments: {e}")
+        return max_segments.value
+
+    def configure_rapid_block(self, n_captures: int) -> int:
+        """Split device memory into ``n_captures`` segments for rapid-block mode.
+
+        In rapid-block mode, ``run_block`` arms the scope for
+        ``n_captures`` triggers; each trigger fills the next segment.
+        Call ``get_data_rapid`` after ``wait_ready`` returns to retrieve
+        the segments in a single bulk transfer.
+
+        Args:
+            n_captures: Number of segments (== number of triggers to wait
+                for). Must be >= 1 and <= ``get_max_segments()``.
+
+        Returns:
+            The maximum sample count per segment for the given ``n_captures``.
+            Your capture size (``pre + post``) must not exceed this.
+
+        Raises:
+            PicoscopeError: If segmentation fails.
+            ValueError: If ``n_captures`` is out of range.
+        """
+        if not self._is_open:
+            raise PicoscopeError(
+                "Device not open. Use within a context manager or call open_unit() first."
+            )
+        if n_captures < 1:
+            raise ValueError("n_captures must be >= 1")
+        max_segments = self.get_max_segments()
+        if n_captures > max_segments:
+            raise ValueError(
+                f"n_captures={n_captures} exceeds device max_segments={max_segments} "
+                "for the current resolution"
+            )
+
+        max_samples = ctypes.c_int32(0)
+        try:
+            self.status["memorySegments"] = ps.ps5000aMemorySegments(
+                self.chandle, n_captures, ctypes.byref(max_samples)
+            )
+            assert_pico_ok(self.status["memorySegments"])
+            self.status["setNoOfCaptures"] = ps.ps5000aSetNoOfCaptures(
+                self.chandle, n_captures
+            )
+            assert_pico_ok(self.status["setNoOfCaptures"])
+        except Exception as e:
+            raise PicoscopeError(f"Failed to configure rapid block: {e}")
+
+        self._rapid_n_captures = n_captures
+        self._rapid_max_samples_per_segment = max_samples.value
+        logger.info(
+            "Rapid-block mode: %d segments, max %d samples/segment",
+            n_captures, max_samples.value,
+        )
+        return max_samples.value
+
+    def reset_rapid_block(self):
+        """Reset the device to a single memory segment (regular block mode)."""
+        if not self._is_open:
+            return
+        max_samples = ctypes.c_int32(0)
+        try:
+            self.status["memorySegments"] = ps.ps5000aMemorySegments(
+                self.chandle, 1, ctypes.byref(max_samples)
+            )
+            assert_pico_ok(self.status["memorySegments"])
+            self.status["setNoOfCaptures"] = ps.ps5000aSetNoOfCaptures(self.chandle, 1)
+            assert_pico_ok(self.status["setNoOfCaptures"])
+        except Exception as e:
+            raise PicoscopeError(f"Failed to reset rapid block: {e}")
+        self._rapid_n_captures = None
+        self._rapid_max_samples_per_segment = None
+
+    def get_data_rapid(self,
+                       samples_per_segment: int,
+                       timebase: int,
+                       from_segment: int = 0,
+                       to_segment: Optional[int] = None) -> Dict[str, np.ndarray]:
+        """Retrieve captured segments from a rapid-block acquisition.
+
+        Uses ``ps5000aGetValuesBulk`` to transfer all requested segments
+        in a single call. Returned per-channel arrays have shape
+        ``(n_segments, samples_per_segment)``.
+
+        Args:
+            samples_per_segment: Sample count for each segment (matches
+                ``pre + post`` from ``run_block``).
+            timebase: Timebase used for the capture (only used to
+                generate the shared time axis).
+            from_segment: First segment index to retrieve (inclusive).
+            to_segment: Last segment index to retrieve (inclusive). If
+                ``None``, retrieves through the last configured segment.
+
+        Returns:
+            Dict with keys:
+              - ``'time'``: 1-D time axis (ns), shared by all segments.
+              - one entry per enabled channel: 2-D ndarray (segments, samples) in mV.
+              - ``'overflow'``: 1-D int16 array, one entry per segment.
+
+        Raises:
+            PicoscopeError: If retrieval fails.
+        """
+        if not self._is_open:
+            raise PicoscopeError(
+                "Device not open. Use within a context manager or call open_unit() first."
+            )
+        if self._rapid_n_captures is None:
+            raise PicoscopeError(
+                "Rapid-block mode not configured. Call configure_rapid_block() first."
+            )
+        if not self.enabled_channels:
+            raise PicoscopeError("No channels enabled for data capture")
+
+        if to_segment is None:
+            to_segment = self._rapid_n_captures - 1
+        if from_segment < 0 or to_segment >= self._rapid_n_captures or from_segment > to_segment:
+            raise ValueError(
+                f"Invalid segment range {from_segment}..{to_segment} "
+                f"for {self._rapid_n_captures} configured segments"
+            )
+        n_seg = to_segment - from_segment + 1
+
+        if (self._rapid_max_samples_per_segment is not None
+                and samples_per_segment > self._rapid_max_samples_per_segment):
+            raise PicoscopeError(
+                f"samples_per_segment={samples_per_segment} exceeds "
+                f"max_samples_per_segment={self._rapid_max_samples_per_segment}"
+            )
+
+        # Allocate one 2-D buffer per channel and register each segment
+        # slice with the driver via ps5000aSetDataBuffer (segment-indexed).
+        BufferType = ctypes.c_int16 * samples_per_segment
+        channel_buffers: Dict[str, np.ndarray] = {}
+        # Hold ctypes references so they don't get GC'd before GetValuesBulk.
+        _hold: list = []
+        try:
+            for channel in sorted(self.enabled_channels):
+                channel_enum = CHANNELS[channel]
+                arr = np.zeros((n_seg, samples_per_segment), dtype=np.int16)
+                channel_buffers[channel] = arr
+                for i, seg_idx in enumerate(range(from_segment, to_segment + 1)):
+                    seg_buf = BufferType.from_buffer(arr[i])
+                    _hold.append(seg_buf)
+                    self.status[f"setDataBuffer{channel}_{seg_idx}"] = ps.ps5000aSetDataBuffer(
+                        self.chandle,
+                        channel_enum,
+                        ctypes.byref(seg_buf),
+                        samples_per_segment,
+                        seg_idx,
+                        0,  # ratio mode (no downsampling)
+                    )
+                    assert_pico_ok(self.status[f"setDataBuffer{channel}_{seg_idx}"])
+        except Exception as e:
+            raise PicoscopeError(f"Failed to set rapid-block data buffer: {e}")
+
+        overflow_arr = (ctypes.c_int16 * n_seg)()
+        n_samples = ctypes.c_uint32(samples_per_segment)
+        try:
+            self.status["getValuesBulk"] = ps.ps5000aGetValuesBulk(
+                self.chandle,
+                ctypes.byref(n_samples),
+                from_segment,
+                to_segment,
+                0,  # downsample ratio
+                0,  # downsample ratio mode
+                ctypes.byref(overflow_arr),
+            )
+            assert_pico_ok(self.status["getValuesBulk"])
+        except Exception as e:
+            raise PicoscopeError(f"Failed to retrieve rapid-block data: {e}")
+
+        actual_samples = n_samples.value
+        result: Dict[str, np.ndarray] = {}
+        for channel, arr in channel_buffers.items():
+            channel_range = self.channel_ranges[channel]
+            # Truncate to actual sample count and convert ADC counts to mV.
+            trimmed = arr[:, :actual_samples]
+            # adc2mV expects a 1-D iterable; vectorize with numpy directly:
+            #   mv = adc * range_v / max_adc * 1000
+            range_mv = _range_enum_to_mv(channel_range)
+            result[channel] = trimmed.astype(np.float64) * (range_mv / float(self.max_adc.value))
+
+        time_interval_ns, _ = self.get_timebase_info(timebase, samples_per_segment)
+        result["time"] = np.linspace(0, (actual_samples - 1) * time_interval_ns, actual_samples)
+        result["overflow"] = np.frombuffer(overflow_arr, dtype=np.int16).copy()
+
+        logger.info(
+            "Rapid-block retrieved %d segments x %d samples from %d channels",
+            n_seg, actual_samples, len(self.enabled_channels),
+        )
+        return result
+
     def stop(self):
         """
         Stop any running data capture.
