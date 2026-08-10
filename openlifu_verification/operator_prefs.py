@@ -26,6 +26,12 @@ class OperatorPrefs:
     All fields default to empty strings so a freshly created cache is
     valid. Only string-typed fields are supported so the cache round-
     trips cleanly through JSON.
+
+    ``test_app_version`` and ``hydrophone_sn`` are *not* prompted —
+    they are populated by the CLI from ``openlifu_verification``'s
+    installed version and from the loaded :class:`Hydrophone` metadata
+    respectively. They live on this dataclass so downstream code
+    (``DeviceInfo`` / report writers) has a single place to look.
     """
     tester_name: str = ""
     test_app_version: str = ""
@@ -86,8 +92,9 @@ class OperatorPrefs:
         else:
             print("\n--- Test-report metadata ---")
         self.tester_name    = _ask("Tester name",     self.tester_name,     required=True)
-        self.test_app_version = _ask("Test app version", self.test_app_version, required=False)
-        self.hydrophone_sn  = _ask("Hydrophone S/N",  self.hydrophone_sn,   required=True)
+        # test_app_version is set by the CLI from the installed package
+        # version, and hydrophone_sn is read from the loaded Hydrophone
+        # calibration file — don't prompt for either.
         self.txm_sn         = _ask("TXM S/N",         self.txm_sn,          required=True)
         self.txm_hw_rev     = _ask_choice("TXM hardware rev",
                                          self.txm_hw_rev,

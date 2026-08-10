@@ -95,7 +95,7 @@ class VerificationTank:
                  use_picoscope=True,
                  num_modules=1,
                  resolution=PICOSCOPE_RESOLUTION,
-                 ext_power_supply=True,
+                 ext_power_supply=False,
                  voltage_table_selection="dvt",
                  hydrophone_channel="A",
                  trigger_channel="B",

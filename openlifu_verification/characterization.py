@@ -35,6 +35,7 @@ from scipy.signal import hilbert
 from .acceptance import AcceptanceCriteria
 from .device_info import DeviceInfo
 from .operator_prefs import OperatorPrefs
+from .scan_config import ScanConfig, choose_range_mv
 from .scan_results import ScanResult
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,8 @@ ROW = {
     "axial_depth_mm":    "D.7",
 }
 
-# Scan geometry defaults (locked in Stage 0 design review).
+# Scan geometry defaults kept as module constants for backward compat;
+# the live values are pulled from :class:`ScanConfig` at run time.
 LATERAL_1D_EXTENT_MM = 5.0
 LATERAL_1D_POINTS = 21
 SCAN_2D_EXTENT_MM = 3.0
@@ -190,6 +192,40 @@ def _ripple_dB(values: np.ndarray) -> float:
     return float(20.0 * np.log10(v.max() / v.min()))
 
 
+def _concat_voltage_results(results: list[ScanResult]) -> ScanResult:
+    """Concatenate a list of voltage-sweep :class:`ScanResult` objects.
+
+    All inputs must share the same ``t`` axis and units; each contributes
+    its own slice of the ``voltage_V`` coord and its own rows of
+    ``traces``. If only one result is given, it's returned as-is.
+    """
+    if len(results) == 1:
+        return results[0]
+    if not results:
+        raise ValueError("no voltage-sweep results to concatenate")
+    base = results[0]
+    t = base.t
+    for r in results[1:]:
+        if r.t.shape != t.shape or not np.allclose(r.t, t):
+            raise ValueError("voltage-sweep results have mismatched time axes")
+    traces = np.concatenate([np.atleast_2d(r.traces) for r in results], axis=0)
+    coords = {"voltage_V": np.concatenate(
+        [np.asarray(r.coords["voltage_V"], dtype=float) for r in results]
+    )}
+    meta = dict(base.metadata)
+    meta["range_groups_mv"] = [r.metadata.get("hydrophone_range_mv") for r in results]
+    return ScanResult(
+        scan_type=base.scan_type,
+        t=t,
+        traces=traces,
+        coords=coords,
+        hydrophone_channel=base.hydrophone_channel,
+        chunk_size=sum(r.chunk_size for r in results),
+        units=base.units,
+        metadata=meta,
+    )
+
+
 # ----------------------------------------------------------------------
 # Characterization workflow
 # ----------------------------------------------------------------------
@@ -223,6 +259,7 @@ class Characterization:
     def __init__(self, ver, *,
                  prefs: OperatorPrefs,
                  criteria: Optional[AcceptanceCriteria] = None,
+                 scan_config: Optional[ScanConfig] = None,
                  output_dir: Optional[Path] = None,
                  frequency_kHz: float = 400.0,
                  voltage_V: float = 20.0,
@@ -230,6 +267,7 @@ class Characterization:
         self.ver = ver
         self.prefs = prefs
         self.criteria = criteria or AcceptanceCriteria()
+        self.scan_config = scan_config or ScanConfig()
         self.output_dir = Path(output_dir) if output_dir is not None else None
         self.frequency_kHz = float(frequency_kHz)
         self.voltage_V = float(voltage_V)
@@ -253,13 +291,13 @@ class Characterization:
 
         p = self.prefs
         r = self.report
-        r.set_row(ROW["test_date"],        "Test Date",           info.test_date,       unit="YYYY-MM-DD")
+        r.set_row(ROW["test_date"],        "Test Date",           info.test_date)
         r.set_row(ROW["tester_name"],      "Tester Name",         p.tester_name)
         r.set_row(ROW["test_app_version"], "Test App Version",    p.test_app_version)
         r.set_row(ROW["sdk_version"],      "SDK Version",         info.sdk_version)
         r.set_row(ROW["hydrophone_sn"],    "Hydrophone S/N",      p.hydrophone_sn)
 
-        r.set_row(ROW["txm_sn"],           "Serial Number",       p.txm_sn,             unit="TXM-FREQ-REV-SN")
+        r.set_row(ROW["txm_sn"],           "Serial Number",       p.txm_sn)
         r.set_row(ROW["txm_freq_kHz"],     "Frequency",           self.frequency_kHz,   unit="kHz")
         r.set_row(ROW["txm_hw_rev"],       "Hardware Rev",        p.txm_hw_rev)
         r.set_row(ROW["txm_hwid"],         "Hardware ID",         info.txm_hwid)
@@ -273,16 +311,15 @@ class Characterization:
         r.set_row(ROW["voltage_rail"],     "Voltage Rail Setting", self.voltage_V,      unit="V (+/-)")
         return info
 
-    def warmup_and_arrival_check(self, *,
-                                 time_start_s: float = 100e-6,
-                                 time_stop_s: float = 200e-6,
-                                 sampling_interval_ns: float = 100.0) -> dict:
+    def warmup_and_arrival_check(self) -> dict:
         """Fire a single pulse at the nominal focus and verify arrival."""
         pos = self.ver.hydrophone_position
+        # Ensure the scope range is at the config's baseline for the
+        # "warm-up" and every subsequent low-voltage phase.
+        self._apply_baseline_range()
         meas = self.ver.measure_pressure(
             float(pos[0]), float(pos[1]), float(pos[2]),
-            time_start_s=time_start_s, time_stop_s=time_stop_s,
-            sampling_interval_ns=sampling_interval_ns,
+            **self.scan_config.scope_kwargs(),
         )
         if meas is None:
             result = {"passed": False, "reason": "scope timeout"}
@@ -324,45 +361,41 @@ class Characterization:
         logger.info("Peak located at (%.4f, %.4f) mm", x, y)
         return float(x), float(y)
 
-    def run_beam_scans(self, *,
-                       time_start_s: float = 100e-6,
-                       time_stop_s: float = 200e-6,
-                       sampling_interval_ns: float = 100.0) -> dict:
+    def run_beam_scans(self) -> dict:
         """Run 1-D lateral, 1-D elevation, and the 2-D grid scan.
 
-        All three are stored on ``self.report.scans`` under
+        Geometry (extents / point counts) comes from
+        :attr:`scan_config`; results are stored under
         ``"lateral_1d"``, ``"elevation_1d"``, ``"scan_2d"``.
         """
-        ext = LATERAL_1D_EXTENT_MM
-        pts = LATERAL_1D_POINTS
+        cfg = self.scan_config
+        scope_kw = cfg.scope_kwargs()
+        ext = cfg.lateral_1d.extent_mm
+        pts = cfg.lateral_1d.points
 
         logger.info("Running 1-D lateral scan (\u00b1%.1f mm, %d pts)...", ext, pts)
         lat = self.ver.scan_lateral(
             x_range=(-ext, ext), num_x=pts, num_y=1, y=0.0,
-            absolute=False,
-            time_start_s=time_start_s, time_stop_s=time_stop_s,
-            sampling_interval_ns=sampling_interval_ns,
+            absolute=False, **scope_kw,
         )
 
-        logger.info("Running 1-D elevation scan (\u00b1%.1f mm, %d pts)...", ext, pts)
+        ext_e = cfg.elevation_1d.extent_mm
+        pts_e = cfg.elevation_1d.points
+        logger.info("Running 1-D elevation scan (\u00b1%.1f mm, %d pts)...", ext_e, pts_e)
         # Elevation scan = single-x, multiple-y "lateral" call.
         elev = self.ver.scan_lateral(
-            x_range=(-0.0, 0.0), num_x=1,
-            y_range=(-ext, ext), num_y=pts,
-            absolute=False,
-            time_start_s=time_start_s, time_stop_s=time_stop_s,
-            sampling_interval_ns=sampling_interval_ns,
+            x_range=(0.0, 0.0), num_x=1,
+            y_range=(-ext_e, ext_e), num_y=pts_e,
+            absolute=False, **scope_kw,
         )
 
-        ext2 = SCAN_2D_EXTENT_MM
-        pts2 = SCAN_2D_POINTS
+        ext2 = cfg.scan_2d.extent_mm
+        pts2 = cfg.scan_2d.points
         logger.info("Running 2-D scan (\u00b1%.1f mm, %d\u00d7%d pts)...", ext2, pts2, pts2)
         two_d = self.ver.scan_2d(
             x_range=(-ext2, ext2), num_x=pts2,
             y_range=(-ext2, ext2), num_y=pts2,
-            absolute=False,
-            time_start_s=time_start_s, time_stop_s=time_stop_s,
-            sampling_interval_ns=sampling_interval_ns,
+            absolute=False, **scope_kw,
         )
 
         self.report.scans["lateral_1d"] = lat
@@ -370,16 +403,13 @@ class Characterization:
         self.report.scans["scan_2d"] = two_d
         return {"lateral_1d": lat, "elevation_1d": elev, "scan_2d": two_d}
 
-    def measure_waveform_at_peak(self, *,
-                                 time_start_s: float = 100e-6,
-                                 time_stop_s: float = 200e-6,
-                                 sampling_interval_ns: float = 100.0) -> dict:
+    def measure_waveform_at_peak(self) -> dict:
         """Fire one pulse at the peak; compute PNP + axial depth."""
         pos = self.ver.hydrophone_position
+        self._apply_baseline_range()
         meas = self.ver.measure_pressure(
             float(pos[0]), float(pos[1]), float(pos[2]),
-            time_start_s=time_start_s, time_stop_s=time_stop_s,
-            sampling_interval_ns=sampling_interval_ns,
+            **self.scan_config.scope_kwargs(),
         )
         if meas is None:
             raise RuntimeError("Scope timeout while measuring waveform at peak.")
@@ -399,20 +429,19 @@ class Characterization:
                     pnp_MPa, axial_depth_mm)
         return result
 
-    def sweep_frequency(self, *, duration_msec: Optional[float] = None,
-                        time_start_s: float = 100e-6,
-                        time_stop_s: float = 200e-6,
-                        sampling_interval_ns: float = 100.0) -> ScanResult:
+    def sweep_frequency(self, *, duration_msec: Optional[float] = None) -> ScanResult:
         """Sweep pulse frequency around nominal; fill E.2 - E.9."""
-        freqs = self.frequency_kHz + FREQ_SWEEP_OFFSETS_KHZ
+        cfg = self.scan_config
+        freqs = self.frequency_kHz + np.asarray(cfg.frequency_sweep.offsets_kHz,
+                                                dtype=float)
         if duration_msec is None:
-            duration_msec = 20.0 / self.frequency_kHz  # ~20 cycles
+            duration_msec = float(cfg.frequency_sweep.cycles_per_burst) / self.frequency_kHz
+        self._apply_baseline_range()
         logger.info("Frequency sweep across %s kHz...", freqs.tolist())
         result = self.ver.scan_frequency(
             frequencies_kHz=freqs,
             duration_msec=duration_msec,
-            time_start_s=time_start_s, time_stop_s=time_stop_s,
-            sampling_interval_ns=sampling_interval_ns,
+            **cfg.scope_kwargs(),
         )
         # Per-freq PNP.
         traces = np.atleast_2d(result.traces)
@@ -432,18 +461,44 @@ class Characterization:
         return result
 
     def sweep_voltage(self, *,
-                      time_start_s: float = 100e-6,
-                      time_stop_s: float = 200e-6,
-                      sampling_interval_ns: float = 100.0,
                       voltages_V: Optional[np.ndarray] = None) -> ScanResult:
-        """Sweep HV rail; fill F.2 - F.7 and compute linearity R^2."""
-        volts = np.asarray(VOLTAGE_SWEEP_V if voltages_V is None else voltages_V, dtype=float)
-        logger.info("Voltage sweep across %s V...", volts.tolist())
-        result = self.ver.scan_voltage(
-            voltages_V=volts,
-            time_start_s=time_start_s, time_stop_s=time_stop_s,
-            sampling_interval_ns=sampling_interval_ns,
+        """Sweep HV rail; fill F.2 - F.7 and compute linearity R^2.
+
+        The scope's vertical range is auto-scaled per voltage: voltages
+        that would clip the current range are grouped together and run
+        in a separate rapid-block pass with a larger range. This means
+        one call may produce several underlying ``scan_voltage``
+        captures which are concatenated back into a single
+        :class:`ScanResult`.
+        """
+        cfg = self.scan_config
+        volts = np.asarray(
+            cfg.voltage_sweep.voltages_V if voltages_V is None else voltages_V,
+            dtype=float,
         )
+        logger.info("Voltage sweep across %s V...", volts.tolist())
+
+        groups = self._plan_voltage_range_groups(volts)
+        results: list[ScanResult] = []
+        for group_range, group_volts in groups:
+            if group_range is not None and hasattr(self.ver, "set_hydrophone_range"):
+                try:
+                    self.ver.set_hydrophone_range(int(group_range))
+                    logger.info(
+                        "Voltage sweep group %s V \u2192 scope range \u00b1%d mV",
+                        group_volts.tolist(), int(group_range),
+                    )
+                except Exception as e:
+                    logger.warning("Could not set scope range %s: %s", group_range, e)
+            group_result = self.ver.scan_voltage(
+                voltages_V=group_volts,
+                **cfg.scope_kwargs(),
+            )
+            results.append(group_result)
+        # Reset to baseline for anything downstream.
+        self._apply_baseline_range()
+
+        result = _concat_voltage_results(results)
         traces = np.atleast_2d(result.traces)
         pnp = np.array([_pnp_MPa(row) for row in traces])
         slope, intercept, r2 = _linear_r2(volts, pnp)
@@ -463,6 +518,78 @@ class Characterization:
         logger.info("Voltage linearity: slope=%.4f MPa/V  R\u00b2=%.4f",
                     slope, r2)
         return result
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _apply_baseline_range(self) -> None:
+        """Reset the scope's hydrophone channel to the configured baseline."""
+        rng = int(self.scan_config.scope.hydrophone_range_mv)
+        if hasattr(self.ver, "set_hydrophone_range"):
+            try:
+                self.ver.set_hydrophone_range(rng)
+            except Exception as e:
+                logger.debug("set_hydrophone_range(%d) failed: %s", rng, e)
+
+    def _predict_peak_mV_at_ref(self) -> Optional[float]:
+        """Estimate the single-sided peak hydrophone signal in mV at ``self.voltage_V``.
+
+        Uses :attr:`report.waveform_at_peak` (which was captured at
+        ``self.voltage_V``): peak Pa \u2192 peak V via hydrophone
+        sensitivity \u2192 peak mV. Returns ``None`` if we can't derive
+        one (no waveform captured yet, no hydrophone attached, etc.).
+        """
+        wf = self.report.waveform_at_peak
+        if not wf:
+            return None
+        trace = np.asarray(wf.get("trace"), dtype=float)
+        if trace.size == 0:
+            return None
+        peak = float(np.max(np.abs(trace)))
+        if wf.get("units") != "Pa":
+            # Already in mV.
+            return peak
+        hyd = getattr(self.ver, "hydrophone", None)
+        if hyd is None:
+            return None
+        try:
+            pa_per_v = float(hyd.get_frequency_response(self.frequency_kHz * 1e3))
+        except Exception:
+            return None
+        if pa_per_v <= 0:
+            return None
+        peak_v = peak / pa_per_v
+        return peak_v * 1000.0  # mV
+
+    def _plan_voltage_range_groups(
+        self, volts: np.ndarray
+    ) -> list[tuple[Optional[int], np.ndarray]]:
+        """Group ``volts`` by required scope range.
+
+        Returns a list of ``(range_mv, voltages_array)`` in the same
+        order as ``volts``. If we can't predict amplitudes (no
+        baseline waveform yet, no hydrophone attached), returns a
+        single group with ``range_mv=None`` (meaning: leave the scope
+        alone).
+        """
+        cfg = self.scan_config
+        base_peak_mV = self._predict_peak_mV_at_ref()
+        if base_peak_mV is None or self.voltage_V <= 0:
+            return [(None, volts)]
+        headroom = cfg.scope.voltage_scan_headroom_pct
+        planned = []
+        for v in volts:
+            expected_peak_mV = base_peak_mV * float(v) / float(self.voltage_V)
+            planned.append(choose_range_mv(expected_peak_mV, headroom_pct=headroom))
+        # Group consecutive equal ranges together to minimize the
+        # number of separate rapid-block passes.
+        groups: list[tuple[Optional[int], list[float]]] = []
+        for rng, v in zip(planned, volts):
+            if groups and groups[-1][0] == rng:
+                groups[-1][1].append(float(v))
+            else:
+                groups.append((rng, [float(v)]))
+        return [(rng, np.asarray(vs, dtype=float)) for rng, vs in groups]
 
     # ------------------------------------------------------------------
     # Grading
