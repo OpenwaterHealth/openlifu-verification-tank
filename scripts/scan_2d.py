@@ -33,7 +33,14 @@ def main():
     parser.add_argument("--num-y", type=int, default=9)
     parser.add_argument("--x-range", type=float, nargs=2, default=[-4.0, 4.0])
     parser.add_argument("--y-range", type=float, nargs=2, default=[-4.0, 4.0])
-    parser.add_argument("--z", type=float, default=50.0)
+    parser.add_argument("--z", type=float, default=None,
+                        help="Depth in mm. Defaults to the calibrated hydrophone_position[2].")
+    parser.add_argument("--absolute", action="store_true",
+                        help="Treat x/y as absolute coords (skip offset by the hydrophone position).")
+    parser.add_argument("--hydrophone", type=str, default="",
+                        help="Path to a hydrophone calibration .txt to convert scan traces from mV to Pa.")
+    parser.add_argument("--calibration-path", type=str, default="hydrophone_position.json",
+                        help="JSON file storing the calibrated hydrophone_position (auto-loaded if present).")
     parser.add_argument("--chunk-size", type=int, default=0)
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-data", action=argparse.BooleanOptionalAction, default=True)
@@ -69,7 +76,9 @@ def main():
     try:
         with VerificationTank(frequency=frequency_kHz,
                               num_modules=1,
-                              ext_power_supply=False) as ver:
+                              ext_power_supply=False,
+                              hydrophone=args.hydrophone or None,
+                              calibration_path=args.calibration_path or None) as ver:
             if args.log_file:
                 ver.add_log_file(args.log_file)
             ver.configure_lifu(
@@ -83,15 +92,18 @@ def main():
             ver.enable_hv_output(wait=True)
             input("Press Enter to start")
 
-            result = ver.scan_2d(
+            scan_kwargs = dict(
                 x_range=tuple(args.x_range),
                 num_x=args.num_x,
                 y_range=tuple(args.y_range),
                 num_y=args.num_y,
-                z=args.z,
+                absolute=args.absolute,
                 chunk_size=args.chunk_size,
                 progress=progress,
             )
+            if args.z is not None:
+                scan_kwargs["z"] = args.z
+            result = ver.scan_2d(**scan_kwargs)
     except (ConnectionError, ValueError, Exception) as e:
         logger.error("Scan aborted: %s", e)
         raise

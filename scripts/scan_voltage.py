@@ -28,7 +28,12 @@ def main():
     parser.add_argument("--v-start", type=float, default=5.0)
     parser.add_argument("--v-stop", type=float, default=60.0)
     parser.add_argument("--v-step", type=float, default=5.0)
-    parser.add_argument("--focus", type=float, nargs=3, default=[0.0, 0.0, 50.0])
+    parser.add_argument("--focus", type=float, nargs=3, default=None,
+                        help="x y z in mm (default: calibrated hydrophone_position).")
+    parser.add_argument("--hydrophone", type=str, default="",
+                        help="Path to a hydrophone calibration .txt to convert scan traces from mV to Pa.")
+    parser.add_argument("--calibration-path", type=str, default="hydrophone_position.json",
+                        help="JSON file storing the calibrated hydrophone_position (auto-loaded if present).")
     parser.add_argument("--hydro-range-mv", type=int, default=5000,
                         help="Scope full-scale on the hydrophone channel (default 5000 mV).")
     parser.add_argument("--chunk-size", type=int, default=0)
@@ -70,7 +75,9 @@ def main():
         with VerificationTank(frequency=frequency_kHz,
                               num_modules=1,
                               ext_power_supply=False,
-                              hydrophone_range_mv=args.hydro_range_mv) as ver:
+                              hydrophone_range_mv=args.hydro_range_mv,
+                              hydrophone=args.hydrophone or None,
+                              calibration_path=args.calibration_path or None) as ver:
             if args.log_file:
                 ver.add_log_file(args.log_file)
             ver.configure_lifu(
@@ -81,7 +88,8 @@ def main():
                 pulse_count=1,
                 trigger_mode="single",
             )
-            ver.set_focus(*args.focus)
+            focus = args.focus if args.focus is not None else ver.hydrophone_position.tolist()
+            ver.set_focus(*focus)
             ver.enable_hv_output(wait=True)
             input("Press Enter to start")
 

@@ -2,7 +2,7 @@ import argparse
 import logging
 from pathlib import Path
 import numpy as np
-from openlifu_verification import VerificationTank
+from openlifu_verification import VerificationTank, ScanResult
 import matplotlib.pyplot as plt
 
 # Configure logging
@@ -38,12 +38,14 @@ def main():
     num_modules = 1
 
     result = None
+    scan_result = None
 
     logger.info("Starting Single Pulse Script...")
     try:
         with VerificationTank(frequency=frequency_kHz,
                               num_modules=num_modules,
                               use_picoscope=not args.no_scope,
+                              hydrophone='2246',
                               ext_power_supply=False) as ver:
             # Configure LIFU and HVPS
             ver.configure_lifu(
@@ -76,6 +78,32 @@ def main():
                     sampling_interval_ns=100,
                     timeout_s=3.0,
                 )
+                if result is not None:
+                    # Wrap the single capture as a ScanResult so the
+                    # units-aware .plot() picks Pa when a hydrophone
+                    # calibration is attached and mV otherwise.
+                    trace_mv = np.asarray(result[ver.hydrophone_channel])
+                    if ver.hydrophone is not None:
+                        trace = ver.hydrophone.mv_to_pa(
+                            trace_mv, ver.frequency * 1e3
+                        )
+                        units = "Pa"
+                    else:
+                        trace = trace_mv
+                        units = "mV"
+                    scan_result = ScanResult(
+                        scan_type="single_pulse",
+                        t=result["time"],
+                        traces=trace[None, :],
+                        coords={"pulse": np.array([0])},
+                        hydrophone_channel=ver.hydrophone_channel,
+                        units=units,
+                        metadata={
+                            "voltage_V": float(voltage),
+                            "frequency_kHz": float(frequency_kHz),
+                            "focus_mm": np.array([xInput, yInput, zInput], dtype=float),
+                        },
+                    )
 
     except (ConnectionError, ValueError, Exception) as e:
         logger.error(f"An error occurred: {e}")
@@ -86,17 +114,11 @@ def main():
     if args.no_scope:
         return
 
-    if result is None:
+    if result is None or scan_result is None:
         logger.warning("No pulse captured within the timeout window.")
         return
-    if result:
-        # Plot data. `time` is in ns relative to the trigger event.
-        plt.plot(result["time"]*1e-3, result[ver.hydrophone_channel])
-        plt.xlabel('Time (us)')
-        plt.ylabel('Voltage (mV)')
-        plt.show()
-    else:
-        logger.warning("No data was collected.")
+
+    scan_result.plot(kind="trace", show=True)
 
 
 if __name__ == "__main__":

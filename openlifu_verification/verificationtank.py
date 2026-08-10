@@ -9,6 +9,7 @@ import numpy as np
 from .picoscope import Picoscope
 from .qpx600dp import QPX600DP
 from .scan_results import ScanResult
+from .hydrophone import Hydrophone
 
 from openlifu_sdk.io import LIFUInterface
 from openlifu_sdk.io.LIFUTXDevice import Tx7332DelayProfile, Tx7332PulseProfile
@@ -94,7 +95,10 @@ class VerificationTank:
                  hydrophone_range_mv=100,
                  trigger_range_mv=5000,
                  trigger_threshold_mv=1000,
-                 trigger_direction="rising"):
+                 trigger_direction="rising",
+                 hydrophone=None,
+                 hydrophone_position=(0.0, 0.0, 50.0),
+                 calibration_path="hydrophone_position.json"):
         self.use_picoscope = use_picoscope
         self.resolution = resolution
         self.num_modules = num_modules
@@ -113,6 +117,15 @@ class VerificationTank:
         self.hv_enabled = False
         self.hv_voltage = None
         self.arr = None
+        # Hydrophone calibration + geometry. ``hydrophone_position`` is
+        # the *actual* (calibrated) x,y,z of the hydrophone tip in the
+        # transducer coord frame; scans use it as their origin so a
+        # sweep of e.g. -1..+1 mm around 0 lands on the true peak.
+        if isinstance(hydrophone, (str, Path)):
+            hydrophone = Hydrophone(hydrophone)
+        self.hydrophone = hydrophone
+        self.hydrophone_position = np.array(hydrophone_position, dtype=float).reshape(3)
+        self.calibration_path = Path(calibration_path) if calibration_path else None
 
     def __enter__(self):
         """
@@ -182,6 +195,19 @@ class VerificationTank:
                 f"{transducers_path}/transducers/openlifu_{self.num_modules}x{self.frequency}_evt1.json"
             )
             self.arr.sort_by_pin()
+
+            # Auto-load a previously-calibrated hydrophone position if
+            # one has been saved to ``calibration_path``. Soft failure:
+            # a missing/malformed file just leaves the default position
+            # intact.
+            if self.calibration_path is not None and self.calibration_path.is_file():
+                try:
+                    self.load_calibration()
+                except Exception as e:
+                    logger.warning(
+                        "Failed to load hydrophone calibration from %s: %s",
+                        self.calibration_path, e,
+                    )
 
 
         except Exception as e:
@@ -1026,7 +1052,8 @@ class VerificationTank:
                      y_range=None,
                      num_y=1,
                      y=0.0,
-                     z=50.0,
+                     z=None,
+                     absolute=False,
                      time_start_s=100e-6,
                      time_stop_s=200e-6,
                      sampling_interval_ns=100,
@@ -1048,7 +1075,13 @@ class VerificationTank:
                 scan).
             y: y coordinate used when ``num_y == 1`` and ``y_range`` is
                 ``None``.
-            z: Fixed z depth (mm).
+            z: Fixed z depth (mm). ``None`` uses the calibrated
+                ``hydrophone_position[2]``.
+            absolute: If ``False`` (default), ``x_range``/``y_range``/``y``
+                are relative to the calibrated ``hydrophone_position``
+                so a sweep of e.g. -1..+1 mm around 0 lands on the true
+                peak. If ``True``, the coordinates are absolute in the
+                transducer frame.
             time_start_s, time_stop_s, sampling_interval_ns: Capture
                 window for each pulse.
             chunk_size: Rapid-block chunk size (0 = whole sweep).
@@ -1059,8 +1092,15 @@ class VerificationTank:
         Returns:
             A :class:`ScanResult` with ``scan_type="lateral"``. Coord
             axes are ``yfoci``, ``xfoci`` (only ``xfoci`` if ``num_y ==
-            1``).
+            1``). Units are ``"Pa"`` if a hydrophone calibration is
+            attached, otherwise ``"mV"``.
         """
+        if z is None:
+            z = float(self.hydrophone_position[2])
+        x_off, y_off = (0.0, 0.0) if absolute else (
+            float(self.hydrophone_position[0]), float(self.hydrophone_position[1])
+        )
+
         xfoci = np.linspace(x_range[0], x_range[1], num_x)
         if num_y > 1:
             if y_range is None:
@@ -1069,7 +1109,7 @@ class VerificationTank:
         else:
             yfoci = np.array([float(y)])
 
-        focus_points = [(float(xi), float(yi), float(z))
+        focus_points = [(float(xi) + x_off, float(yi) + y_off, float(z))
                         for yi in yfoci for xi in xfoci]
 
         def apply_point(point):
@@ -1091,6 +1131,8 @@ class VerificationTank:
         if traces is None:
             raise RuntimeError("No points captured in scan_lateral.")
 
+        traces, units = self._convert_to_pressure(traces, self.frequency * 1e3)
+
         if num_y > 1:
             traces = traces.reshape(num_y, num_x, -1)
             coords = {"yfoci": yfoci, "xfoci": xfoci}
@@ -1106,11 +1148,14 @@ class VerificationTank:
             hydrophone_channel=self.hydrophone_channel,
             chunk_size=chunk_size or len(focus_points),
             timings=_collect_timings(timings),
+            units=units,
             metadata={
                 "z_mm": float(z),
                 "frequency_kHz": float(self.frequency),
                 "voltage_V": float(self.hv_voltage) if self.hv_voltage is not None else float("nan"),
                 "captured_mask": ok_mask,
+                "hydrophone_position_mm": self.hydrophone_position.copy(),
+                "absolute": bool(absolute),
             },
         )
 
@@ -1119,7 +1164,8 @@ class VerificationTank:
                 num_x=9,
                 y_range=(-4.0, 4.0),
                 num_y=9,
-                z=50.0,
+                z=None,
+                absolute=False,
                 time_start_s=100e-6,
                 time_stop_s=200e-6,
                 sampling_interval_ns=100,
@@ -1135,6 +1181,7 @@ class VerificationTank:
             x_range=x_range, num_x=num_x,
             y_range=y_range, num_y=num_y,
             z=z,
+            absolute=absolute,
             time_start_s=time_start_s,
             time_stop_s=time_stop_s,
             sampling_interval_ns=sampling_interval_ns,
@@ -1192,18 +1239,23 @@ class VerificationTank:
         traces, t_axis, ok_mask = self._stack_hydrophone_traces(outputs)
         if traces is None:
             raise RuntimeError("No points captured in scan_frequency.")
+        # Per-point frequency lookup for pressure conversion.
+        good_freqs_kHz = freqs[ok_mask] if not ok_mask.all() else freqs
+        traces, units = self._convert_to_pressure(traces, good_freqs_kHz * 1e3)
         return ScanResult(
             scan_type="frequency",
             t=t_axis,
             traces=traces,
-            coords={"freq_kHz": freqs[ok_mask] if not ok_mask.all() else freqs},
+            coords={"freq_kHz": good_freqs_kHz},
             hydrophone_channel=self.hydrophone_channel,
             chunk_size=chunk_size or len(freqs),
             timings=_collect_timings(timings),
+            units=units,
             metadata={
                 "voltage_V": float(self.hv_voltage) if self.hv_voltage is not None else float("nan"),
                 "duration_msec": float(duration_msec),
                 "captured_mask": ok_mask,
+                "hydrophone_position_mm": self.hydrophone_position.copy(),
             },
         )
 
@@ -1254,6 +1306,7 @@ class VerificationTank:
         traces, t_axis, ok_mask = self._stack_hydrophone_traces(outputs)
         if traces is None:
             raise RuntimeError("No points captured in scan_voltage.")
+        traces, units = self._convert_to_pressure(traces, self.frequency * 1e3)
         return ScanResult(
             scan_type="voltage",
             t=t_axis,
@@ -1262,9 +1315,11 @@ class VerificationTank:
             hydrophone_channel=self.hydrophone_channel,
             chunk_size=chunk_size or len(voltages),
             timings=_collect_timings(timings),
+            units=units,
             metadata={
                 "frequency_kHz": float(self.frequency),
                 "captured_mask": ok_mask,
+                "hydrophone_position_mm": self.hydrophone_position.copy(),
             },
         )
 
@@ -1304,29 +1359,402 @@ class VerificationTank:
         peak_to_peak = np.max(signal) - np.min(signal)
         return peak_to_peak
 
-    def find_peak_by_gradient_ascent(self, x_start, y_start, z, step_size=0.5, iterations=10, learning_rate=0.1):
+    def measure_pressure(self, x, y, z, *,
+                         time_start_s=100e-6,
+                         time_stop_s=200e-6,
+                         sampling_interval_ns=100,
+                         timeout_s=2.0):
+        """Fire one pulse at ``(x, y, z)`` and return the trace + RMS.
+
+        Steers to the focus, captures the hydrophone trace, and
+        (if a hydrophone calibration is attached) converts it from mV
+        to Pa via the single-frequency lookup at ``self.frequency``.
+
+        Args:
+            x, y, z: Focus in mm.
+            time_start_s, time_stop_s, sampling_interval_ns: Capture
+                window.
+            timeout_s: Max wait for the scope trigger.
+
+        Returns:
+            Dict with:
+
+            - ``t``: 1-D time axis (ns), zero at trigger.
+            - ``trace``: 1-D signal, in ``units``.
+            - ``rms``: scalar RMS over the whole window.
+            - ``vpp``: scalar peak-to-peak amplitude.
+            - ``units``: ``"Pa"`` if a hydrophone is attached,
+              otherwise ``"mV"``.
+
+            Or ``None`` if the scope timed out.
         """
-        Finds the x-y coordinates that produce the maximum peak voltage using gradient ascent.
+        self.set_focus(x, y, z)
+        data = self.run_capture(
+            time_start_s=time_start_s,
+            time_stop_s=time_stop_s,
+            sampling_interval_ns=sampling_interval_ns,
+            timeout_s=timeout_s,
+        )
+        if data is None:
+            return None
+        trace_mv = np.asarray(data[self.hydrophone_channel], dtype=float)
+        if self.hydrophone is not None:
+            trace = np.asarray(
+                self.hydrophone.mv_to_pa(trace_mv, self.frequency * 1e3),
+                dtype=float,
+            )
+            units = "Pa"
+        else:
+            trace = trace_mv
+            units = "mV"
+        return {
+            "t": data["time"],
+            "trace": trace,
+            "rms": float(np.sqrt(np.mean(trace ** 2))),
+            "vpp": float(np.max(trace) - np.min(trace)),
+            "units": units,
+        }
+
+    # ------------------------------------------------------------------
+    # Hydrophone calibration + position
+    # ------------------------------------------------------------------
+    def attach_hydrophone(self, hydrophone):
+        """Attach (or replace) the hydrophone calibration.
+
+        Once attached, subsequent scans convert traces from voltage
+        (mV) to pressure (Pa) using the calibrated V/Pa sensitivity at
+        the pulse frequency. Pass ``None`` to detach and go back to
+        raw mV.
+
+        Args:
+            hydrophone: A :class:`Hydrophone` instance, a path to a
+                ``.txt`` calibration file, or ``None``.
         """
-        x = x_start
-        y = y_start
+        if hydrophone is None:
+            self.hydrophone = None
+            return None
+        if isinstance(hydrophone, (str, Path)):
+            hydrophone = Hydrophone(hydrophone)
+        self.hydrophone = hydrophone
+        return hydrophone
 
-        for i in range(iterations):
-            # Calculate the gradient
-            v_current = self.get_peak_voltage(x, y, z)
-            v_x = self.get_peak_voltage(x + step_size, y, z)
-            v_y = self.get_peak_voltage(x, y + step_size, z)
+    def save_calibration(self, path=None):
+        """Persist ``hydrophone_position`` to a small JSON file.
 
-            grad_x = (v_x - v_current) / step_size
-            grad_y = (v_y - v_current) / step_size
+        Args:
+            path: Destination path; defaults to
+                ``self.calibration_path``.
 
-            # Update the coordinates
-            x += learning_rate * grad_x
-            y += learning_rate * grad_y
+        Returns:
+            The path written.
+        """
+        if path is None:
+            path = self.calibration_path
+        if path is None:
+            raise ValueError("No calibration_path configured.")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "hydrophone_position_mm": self.hydrophone_position.tolist(),
+        }
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        logger.info(
+            "Saved hydrophone calibration to %s (position=%s)",
+            path, self.hydrophone_position.tolist(),
+        )
+        return path
 
-            logger.info(f"Iteration {i+1}/{iterations}: x={x:.2f}, y={y:.2f}, Vp-p={v_current:.2f}")
+    def load_calibration(self, path=None):
+        """Load ``hydrophone_position`` from a JSON file.
+
+        Args:
+            path: Source path; defaults to ``self.calibration_path``.
+
+        Returns:
+            The loaded 3-vector position in mm.
+        """
+        if path is None:
+            path = self.calibration_path
+        if path is None:
+            raise ValueError("No calibration_path configured.")
+        path = Path(path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        pos = np.array(data["hydrophone_position_mm"], dtype=float).reshape(3)
+        self.hydrophone_position = pos
+        logger.info(
+            "Loaded hydrophone calibration from %s (position=%s)",
+            path, pos.tolist(),
+        )
+        return pos
+
+    def find_peak(self, *,
+                  x0=None, y0=None, z=None,
+                  initial_step=0.5,
+                  tol=0.02,
+                  max_iter=40,
+                  hysteresis=0.01,
+                  rotate_basis=True,
+                  time_start_s=100e-6,
+                  time_stop_s=200e-6,
+                  sampling_interval_ns=100,
+                  plot=False,
+                  store=True,
+                  save=False,
+                  keep_plot_open=True):
+        """Locate the true (x, y) hydrophone peak via 2-D gradient ascent.
+
+        Estimates the RMS-pressure gradient by central differences on
+        a local ``(u, v)`` basis, steps along the (in general
+        diagonal) gradient direction, and backtracks (halves ``step``)
+        when a trial move fails to beat the current best by more than
+        ``hysteresis``. On success the basis rotates so ``u`` aligns
+        with the accepted gradient direction, which is more
+        informative on elongated peaks.
+
+        Starts at the current ``hydrophone_position`` unless
+        ``x0``/``y0``/``z`` are passed. When ``store=True`` (default),
+        the found ``(x, y, z)`` is written to
+        ``self.hydrophone_position`` in place, so any subsequent
+        relative scan (``scan_lateral`` / ``scan_2d`` /
+        ``scan_frequency`` / ``scan_voltage``) will be centered on the
+        empirical peak.
+
+        Args:
+            x0, y0, z: Starting focus (mm). Default to the current
+                ``hydrophone_position``.
+            initial_step: Initial trial step length (mm).
+            tol: Convergence tolerance (mm). Iteration stops when
+                ``step`` falls below this.
+            max_iter: Maximum iterations.
+            hysteresis: Fractional RMS improvement required to accept
+                a move.
+            rotate_basis: If ``True`` (default), rotate the probe
+                basis to align ``u`` with each accepted gradient
+                direction.
+            time_start_s, time_stop_s, sampling_interval_ns: Capture
+                window used at every point.
+            plot: If ``True``, open a live 3-panel matplotlib figure
+                (trace / xy scatter / info text) that updates on every
+                measurement. Default ``False``.
+            store: If ``True`` (default), update
+                ``self.hydrophone_position`` with the located
+                ``(x, y, z)``.
+            save: If ``True``, also persist the updated position via
+                :meth:`save_calibration`. Default ``False``.
+            keep_plot_open: When ``plot=True``, leave the figure open
+                after the search completes (blocks on ``plt.show()``).
+                Default ``True``.
+
+        Returns:
+            ``(x, y)`` \u2014 the located peak in mm.
+        """
+        from . import search
+
+        if z is None:
+            z = float(self.hydrophone_position[2])
+        if x0 is None:
+            x0 = float(self.hydrophone_position[0])
+        if y0 is None:
+            y0 = float(self.hydrophone_position[1])
+
+        handles = None
+        on_progress = None
+        if plot:
+            handles = search.make_live_figure()
+            handles["ax_scatter"].set_title(
+                f"find_peak @ z={z:.2f} mm  (color = RMS)"
+            )
+
+            def on_progress(**kw):
+                search.update_live_figure(handles, **kw)
+
+        def measure_fn(x, y):
+            return self.measure_pressure(
+                x, y, z,
+                time_start_s=time_start_s,
+                time_stop_s=time_stop_s,
+                sampling_interval_ns=sampling_interval_ns,
+            )
+
+        logger.info(
+            "find_peak: starting at (%.3f, %.3f, %.3f) mm  "
+            "initial_step=%.3f mm  tol=%.3f mm",
+            x0, y0, z, initial_step, tol,
+        )
+        result = search.gradient_search(
+            measure_fn,
+            x0=x0, y0=y0,
+            initial_step=initial_step,
+            tol=tol,
+            max_iter=max_iter,
+            hysteresis=hysteresis,
+            rotate_basis=rotate_basis,
+            on_progress=on_progress,
+        )
+        x, y = result["best_x"], result["best_y"]
+        logger.info(
+            "find_peak: %s at (%.4f, %.4f, %.4f) mm  RMS=%.4g %s  "
+            "(%d iterations, %d evaluations)",
+            "converged" if result["converged"] else "hit max_iter",
+            x, y, z, result["best_rms"], result["units"],
+            result["iterations"], result["evaluations"],
+        )
+
+        if store:
+            self.hydrophone_position = np.array([x, y, z], dtype=float)
+        if save:
+            if result["converged"]:
+                self.save_calibration()
+            else:
+                logger.warning(
+                    "find_peak did not converge (step > tol); "
+                    "skipping save_calibration.",
+                )
+
+        if plot and keep_plot_open:
+            import matplotlib.pyplot as plt
+            plt.ioff()
+            plt.show()
 
         return x, y
+
+    def find_xy_peak(self, *,
+                     z=None,
+                     x0=None,
+                     y0=None,
+                     step_size=0.5,
+                     iterations=10,
+                     learning_rate=0.1,
+                     time_start_s=-10e-6,
+                     time_stop_s=200e-6,
+                     sampling_interval_ns=100,
+                     store=True,
+                     save=False):
+        """Locate the true (x, y) peak of the hydrophone via gradient ascent.
+
+        Uses finite-difference gradients of the peak-to-peak
+        hydrophone voltage at each iteration. Starts from
+        ``(x0, y0, z)`` — defaulting to the current
+        ``self.hydrophone_position`` — so calling this after a rough
+        first-time setup refines the stored position.
+
+        Args:
+            z: Depth (mm) to search at. ``None`` uses
+                ``hydrophone_position[2]``.
+            x0, y0: Starting (x, y) in mm. ``None`` uses the current
+                ``hydrophone_position``.
+            step_size: Finite-difference step (mm) used to estimate
+                the gradient.
+            iterations: Number of ascent steps.
+            learning_rate: Ascent step size (mm per unit gradient).
+            time_start_s, time_stop_s, sampling_interval_ns: Capture
+                window used for each measurement.
+            store: If ``True`` (default), update
+                ``self.hydrophone_position`` with the found (x, y, z).
+            save: If ``True``, also write the updated position to
+                ``self.calibration_path`` (call
+                :meth:`save_calibration`).
+
+        Returns:
+            ``(x, y, z, vpp)`` — the located peak and its Vpp (mV).
+        """
+        if z is None:
+            z = float(self.hydrophone_position[2])
+        if x0 is None:
+            x0 = float(self.hydrophone_position[0])
+        if y0 is None:
+            y0 = float(self.hydrophone_position[1])
+        x, y = float(x0), float(y0)
+
+        v_current = self.get_peak_voltage(
+            x, y, z,
+            time_start_s=time_start_s, time_stop_s=time_stop_s,
+            sampling_interval_ns=sampling_interval_ns,
+        )
+        logger.info(
+            "find_xy_peak start: x=%.3f y=%.3f z=%.3f Vpp=%.3f mV",
+            x, y, z, v_current,
+        )
+        for i in range(iterations):
+            v_x = self.get_peak_voltage(
+                x + step_size, y, z,
+                time_start_s=time_start_s, time_stop_s=time_stop_s,
+                sampling_interval_ns=sampling_interval_ns,
+            )
+            v_y = self.get_peak_voltage(
+                x, y + step_size, z,
+                time_start_s=time_start_s, time_stop_s=time_stop_s,
+                sampling_interval_ns=sampling_interval_ns,
+            )
+            grad_x = (v_x - v_current) / step_size
+            grad_y = (v_y - v_current) / step_size
+            x += learning_rate * grad_x
+            y += learning_rate * grad_y
+            v_current = self.get_peak_voltage(
+                x, y, z,
+                time_start_s=time_start_s, time_stop_s=time_stop_s,
+                sampling_interval_ns=sampling_interval_ns,
+            )
+            logger.info(
+                "find_xy_peak iter %d/%d: x=%.3f y=%.3f Vpp=%.3f mV "
+                "(grad=(%.3f, %.3f))",
+                i + 1, iterations, x, y, v_current, grad_x, grad_y,
+            )
+
+        if store:
+            self.hydrophone_position = np.array([x, y, z], dtype=float)
+        if save:
+            self.save_calibration()
+        return x, y, z, v_current
+
+    def find_peak_by_gradient_ascent(self, x_start, y_start, z,
+                                     step_size=0.5, iterations=10,
+                                     learning_rate=0.1):
+        """Legacy wrapper for :meth:`find_xy_peak`.
+
+        Kept for backward compatibility with older scripts. Does not
+        update ``self.hydrophone_position`` (pass ``store=True`` to
+        :meth:`find_xy_peak` for the new behavior).
+        """
+        x, y, _z, _v = self.find_xy_peak(
+            z=z, x0=x_start, y0=y_start,
+            step_size=step_size, iterations=iterations,
+            learning_rate=learning_rate,
+            store=False, save=False,
+        )
+        return x, y
+
+    # ------------------------------------------------------------------
+    # Pressure conversion helper (used by scans)
+    # ------------------------------------------------------------------
+    def _convert_to_pressure(self, traces, frequency_hz):
+        """Convert an (N, samples) trace array from mV to Pa.
+
+        Args:
+            traces: 2-D array of hydrophone voltage in mV. First axis
+                is the sweep index, second is time.
+            frequency_hz: Frequency (Hz) at which to look up the V/Pa
+                sensitivity. Scalar (single-frequency scan) or 1-D
+                array of length ``traces.shape[0]`` (per-point
+                frequency, e.g. scan_frequency).
+
+        Returns:
+            ``(traces_out, units)`` where ``units`` is ``"Pa"`` when
+            the hydrophone is attached, otherwise ``"mV"`` and
+            ``traces`` is returned unchanged.
+        """
+        if self.hydrophone is None:
+            return traces, "mV"
+        freq_hz_arr = np.asarray(frequency_hz, dtype=float)
+        pa_per_v = np.asarray(
+            self.hydrophone.get_frequency_response(freq_hz_arr), dtype=float,
+        )
+        voltage_v = np.asarray(traces, dtype=float) * 1e-3
+        if pa_per_v.ndim == 0:
+            return voltage_v * float(pa_per_v), "Pa"
+        # Broadcast per-row sensitivities against (N, samples) traces.
+        pa_per_v = pa_per_v.reshape((-1,) + (1,) * (voltage_v.ndim - 1))
+        return voltage_v * pa_per_v, "Pa"
 
 
 def _fmt_point(point) -> str:

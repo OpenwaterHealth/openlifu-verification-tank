@@ -23,21 +23,92 @@ class Hydrophone:
         calibration_data (pd.DataFrame): DataFrame with frequency-dependent calibration data
         sensitivity_interp (callable): Interpolation function for sensitivity vs frequency
     """
-    
-    def __init__(self, calibration_file_path: Union[str, Path]):
+
+    #: Default hydrophone model prefix used when resolving a bare ID.
+    #: Override via the ``model=`` kwarg to :meth:`__init__` for other
+    #: hydrophones (e.g. ``"HGL0200"``).
+    model = "HNR0500"
+
+    #: Default directory searched when resolving a bare ID. Points at the
+    #: ``hydrophone_calibrations/`` folder next to the package's
+    #: workspace root; callers can pass ``search_dirs=`` to override.
+    default_search_dir = Path(__file__).resolve().parent.parent / "hydrophone_calibrations"
+
+    def __init__(self,
+                 calibration: Union[str, Path],
+                 *,
+                 model: str | None = None,
+                 search_dirs=None):
         """
         Initialize the Hydrophone object by reading a calibration file.
-        
+
         Parameters:
-            calibration_file_path: Path to the calibration file
+            calibration: Either a path to a calibration ``.txt`` file, or
+                a bare hydrophone ID (e.g. ``"2246"``). When it's an ID,
+                the file is looked up as ``{model}-{id}*.txt`` under
+                ``search_dirs`` (defaulting to the workspace
+                ``hydrophone_calibrations/`` folder).
+            model: Optional override for the hydrophone model prefix
+                used to resolve a bare ID (defaults to
+                :attr:`Hydrophone.model`).
+            search_dirs: Optional iterable of directories to search for
+                the calibration file when ``calibration`` is a bare ID.
+                Defaults to ``[cwd/hydrophone_calibrations,
+                Hydrophone.default_search_dir]``.
         """
-        self.calibration_file_path = Path(calibration_file_path)
+        self.calibration_file_path = self._resolve_calibration_path(
+            calibration, model=model, search_dirs=search_dirs,
+        )
         self.metadata = {}
         self.calibration_data = None
         self.sensitivity_interp = None
-        
+
         self._parse_calibration_file()
         self._create_sensitivity_interpolator()
+
+    @classmethod
+    def _resolve_calibration_path(cls, calibration, *, model=None, search_dirs=None) -> Path:
+        """Resolve ``calibration`` (path or ID) to an existing file path."""
+        if isinstance(calibration, Path) or (isinstance(calibration, str) and Path(calibration).is_file()):
+            return Path(calibration)
+
+        if not isinstance(calibration, str):
+            raise TypeError(
+                f"calibration must be a path or hydrophone ID string, got {type(calibration).__name__}"
+            )
+
+        model = model or cls.model
+        if search_dirs is None:
+            search_dirs = [
+                Path.cwd() / "hydrophone_calibrations",
+                cls.default_search_dir,
+            ]
+        else:
+            search_dirs = [Path(d) for d in search_dirs]
+
+        # Match ``{model}-{id}*.txt`` (case-insensitive on Windows anyway).
+        pattern = f"{model}-{calibration}*.txt"
+        for directory in search_dirs:
+            if not directory.is_dir():
+                continue
+            hits = sorted(directory.glob(pattern))
+            if hits:
+                if len(hits) > 1:
+                    # Deterministic pick + warn so we don't silently swap
+                    # calibrations mid-scan.
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "Multiple calibration files matched %s in %s; using %s",
+                        pattern, directory, hits[0].name,
+                    )
+                return hits[0]
+
+        searched = ", ".join(str(d) for d in search_dirs) or "(none)"
+        raise FileNotFoundError(
+            f"No calibration file found for ID {calibration!r} "
+            f"(pattern {pattern!r}) in {searched}. "
+            f"Pass a full path or a valid hydrophone ID."
+        )
     
     def _parse_calibration_file(self):
         """Parse the calibration file to extract metadata and tabular data."""
@@ -132,7 +203,33 @@ class Hydrophone:
             raise ValueError("Sensitivity interpolator not available")
         
         return self.sensitivity_interp(frequencies_hz)
-    
+
+    def mv_to_pa(self, voltage_mv, frequency_hz):
+        """Convert hydrophone voltage (mV) to pressure (Pa) via lookup.
+
+        Uses the calibrated V/Pa sensitivity at ``frequency_hz`` — a
+        pure single-frequency scaling, no FFT / deconvolution. Suitable
+        when the signal is narrowband around ``frequency_hz`` (which is
+        the case for the TX pulses this rig fires).
+
+        Args:
+            voltage_mv: Voltage samples in mV. Scalar or array; the
+                array can be any shape, and broadcasting rules apply
+                against ``frequency_hz``.
+            frequency_hz: Frequency (Hz) at which to look up the
+                sensitivity. Scalar for a single-frequency conversion,
+                or an array with a shape that broadcasts against
+                ``voltage_mv`` (typically the leading axes) for
+                per-trace conversion (e.g. a frequency sweep).
+
+        Returns:
+            Pressure in Pa, same shape as the broadcast result of
+            ``voltage_mv`` and ``frequency_hz``.
+        """
+        voltage_v = np.asarray(voltage_mv, dtype=float) * 1e-3
+        pa_per_v = np.asarray(self.get_frequency_response(np.asarray(frequency_hz)), dtype=float)
+        return voltage_v * pa_per_v
+
     def deconvolve_voltage_signal(self, 
                                   voltage_signal: np.ndarray, 
                                   sampling_interval: float,

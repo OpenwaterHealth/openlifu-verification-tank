@@ -51,6 +51,9 @@ class ScanResult:
             order.
         metadata: Free-form dict of extra fields (voltage, focus,
             frequency, etc.) written into the NPZ under ``meta_<key>``.
+        units: Physical units of ``traces``. ``"mV"`` (raw
+            hydrophone voltage) or ``"Pa"`` (converted via a
+            :class:`~openlifu_verification.Hydrophone` calibration).
     """
 
     scan_type: str
@@ -61,6 +64,7 @@ class ScanResult:
     chunk_size: int = 0
     timings: dict[str, np.ndarray] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    units: str = "mV"
 
     # ---- reductions ---------------------------------------------------
     @property
@@ -153,7 +157,7 @@ class ScanResult:
             x = self.coords[xname]
             ax.plot(x, values, ".-", **kwargs)
             ax.set_xlabel(_axis_label(xname))
-            ax.set_ylabel(_reduction_label(reduce))
+            ax.set_ylabel(self._reduction_label(reduce))
             ax.grid(True)
 
         elif kind == "heatmap":
@@ -173,14 +177,14 @@ class ScanResult:
             )
             ax.set_xlabel(_axis_label(col_name))
             ax.set_ylabel(_axis_label(row_name))
-            fig.colorbar(im, ax=ax, label=_reduction_label(reduce))
+            fig.colorbar(im, ax=ax, label=self._reduction_label(reduce))
 
         elif kind == "trace":
             idx = self._resolve_trace_index(index)
             trace = self.traces[idx]
             ax.plot(self.t, trace, **kwargs)
             ax.set_xlabel("time (ns)")
-            ax.set_ylabel("hydrophone (mV)")
+            ax.set_ylabel(self._trace_label())
             ax.grid(True)
 
         elif kind == "trace_image":
@@ -199,7 +203,7 @@ class ScanResult:
             )
             ax.set_xlabel("time (ns)")
             ax.set_ylabel(_axis_label(xname))
-            fig.colorbar(im, ax=ax, label="hydrophone (mV)")
+            fig.colorbar(im, ax=ax, label=self._trace_label())
 
         else:
             raise ValueError(
@@ -250,6 +254,7 @@ class ScanResult:
             "chunk_size": np.int64(self.chunk_size),
             "hydrophone_channel": np.array(self.hydrophone_channel),
             "scan_type": np.array(self.scan_type),
+            "units": np.array(self.units),
         }
         for name, arr in self.coords.items():
             payload[name] = np.asarray(arr)
@@ -267,7 +272,7 @@ class ScanResult:
             np.savetxt(
                 txt_path,
                 np.column_stack((x, vpp)),
-                header=f"{xname}\tVpp_mV",
+                header=f"{xname}\tVpp_{self.units}",
                 fmt="%.6e",
                 delimiter="\t",
             )
@@ -309,7 +314,7 @@ class ScanResult:
     def _auto_title(self, kind: str, reduce: str) -> str:
         base = f"{self.scan_type} scan"
         if kind in ("line", "heatmap"):
-            base += f" — {_reduction_label(reduce)}"
+            base += f" — {self._reduction_label(reduce)}"
         elif kind == "trace":
             base += " — single trace"
         elif kind == "trace_image":
@@ -324,6 +329,15 @@ class ScanResult:
         if meta_bits:
             base += " (" + ", ".join(meta_bits) + ")"
         return base
+
+    def _reduction_label(self, reduction: str) -> str:
+        """Human-readable label for a reduction, respecting ``self.units``."""
+        base = _REDUCTION_BASES.get(reduction.lower(), reduction)
+        return f"{base} ({self.units})"
+
+    def _trace_label(self) -> str:
+        """Y-axis label for a raw trace plot."""
+        return f"hydrophone ({self.units})"
 
 
 # ----------------------------------------------------------------------
@@ -342,6 +356,13 @@ _REDUCTION_LABELS = {
     "vpp": "Vpp (mV)",
     "vmin": "V min (mV)",
     "vmax": "V max (mV)",
+}
+# Base names used by ``ScanResult._reduction_label`` (units are added
+# from ``ScanResult.units`` so mV/Pa scans get the right axis label).
+_REDUCTION_BASES = {
+    "vpp": "Vpp",
+    "vmin": "V min",
+    "vmax": "V max",
 }
 
 
