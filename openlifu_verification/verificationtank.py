@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 _PACKAGE_LOGGER = logging.getLogger("openlifu_verification")
 PICOSCOPE_RESOLUTION = "15BIT"
 SPEED_OF_SOUND = 1500  # m/s in water
+# Fixed electrical delay between the scope trigger's rising edge and
+# the actual start of ultrasound emission (visible in traces as a
+# small burst of EM pickup at t=0). Used to convert measured
+# time-of-arrival into an axial depth. Hard-coded from calibration on
+# current TX7332 firmware; override via ``VerificationTank(
+# system_transmit_delay_us=...)`` if a future firmware changes it.
+SYSTEM_TRANSMIT_DELAY_US = 114.0
 HYDROPHONE_CHANNEL = 'A'
 TRIGGER_CHANNEL = 'B'
 
@@ -98,7 +105,8 @@ class VerificationTank:
                  trigger_direction="rising",
                  hydrophone=None,
                  hydrophone_position=(0.0, 0.0, 50.0),
-                 calibration_path="hydrophone_position.json"):
+                 calibration_path="hydrophone_position.json",
+                 system_transmit_delay_us=SYSTEM_TRANSMIT_DELAY_US):
         self.use_picoscope = use_picoscope
         self.resolution = resolution
         self.num_modules = num_modules
@@ -126,6 +134,10 @@ class VerificationTank:
         self.hydrophone = hydrophone
         self.hydrophone_position = np.array(hydrophone_position, dtype=float).reshape(3)
         self.calibration_path = Path(calibration_path) if calibration_path else None
+        # Fixed electrical delay between trigger and actual ultrasound
+        # emission (µs). Used to convert arrival time ↔ axial depth
+        # via ``expected_arrival_us = system_transmit_delay_us + z_mm / SOS``.
+        self.system_transmit_delay_us = float(system_transmit_delay_us)
 
     def __enter__(self):
         """

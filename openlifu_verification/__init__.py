@@ -5,6 +5,9 @@ from .qpx600dp import QPX600DP
 from .scan_results import ScanResult
 from .verificationtank import VerificationTank
 from .hydrophone import Hydrophone
+from .operator_prefs import OperatorPrefs
+from .acceptance import AcceptanceCriteria
+from .device_info import DeviceInfo
 
 # The upstream openlifu_sdk logs a lot at INFO/DEBUG during device
 # setup and per-command traffic. Quiet it to WARNING by default so
@@ -40,5 +43,8 @@ __all__ = [
     "ScanResult",
     "VerificationTank",
     "Hydrophone",
+    "OperatorPrefs",
+    "AcceptanceCriteria",
+    "DeviceInfo",
     "set_log_level",
 ]
