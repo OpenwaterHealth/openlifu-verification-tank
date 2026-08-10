@@ -1,0 +1,8 @@
+{
+  "arrival_time":       { "nominal_us": 33.3, "tol_pct": 10.0 },
+  "peak_offset":        { "max_mm": 3.0 },
+  "pnp_at_peak":        { "min_by_freq_kHz": { "155": 0.5, "400": 1.0 } },
+  "freq_response":      { "max_ripple_dB": 3.0 },
+  "voltage_linearity":  { "r2_min": 0.99 },
+  "temperature":        { "max_C": 35.0 }
+}

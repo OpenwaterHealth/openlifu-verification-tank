@@ -12,6 +12,9 @@ dependencies = [
     "matplotlib",
     "picosdk",
     "openlifu-sdk",
+    "tqdm",
+    "openpyxl",
+    "base58",
 ]
 
 [tool.setuptools]

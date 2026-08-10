@@ -8,6 +8,8 @@ from .hydrophone import Hydrophone
 from .operator_prefs import OperatorPrefs
 from .acceptance import AcceptanceCriteria
 from .device_info import DeviceInfo
+from .characterization import Characterization, TestReport, ReportRow
+from .dry_run import DryRunTank
 
 # The upstream openlifu_sdk logs a lot at INFO/DEBUG during device
 # setup and per-command traffic. Quiet it to WARNING by default so
@@ -46,5 +48,9 @@ __all__ = [
     "OperatorPrefs",
     "AcceptanceCriteria",
     "DeviceInfo",
+    "Characterization",
+    "TestReport",
+    "ReportRow",
+    "DryRunTank",
     "set_log_level",
 ]
