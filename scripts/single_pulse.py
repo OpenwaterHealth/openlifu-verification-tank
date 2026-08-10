@@ -32,8 +32,8 @@ def main():
     zInput = 50
 
     frequency_kHz = 400
-    voltage = 36.0
-    duration_msec = 5 / frequency_kHz
+    voltage = 12.0
+    duration_msec = 20 / frequency_kHz
     interval_msec = 10
     num_modules = 1
 
@@ -73,8 +73,8 @@ def main():
                 ver.run_trigger()
             else:
                 result = ver.run_capture(
-                    time_start_s=50e-6,
-                    time_stop_s=200e-6,
+                    time_start_s=100e-6,
+                    time_stop_s=220e-6,
                     sampling_interval_ns=100,
                     timeout_s=3.0,
                 )

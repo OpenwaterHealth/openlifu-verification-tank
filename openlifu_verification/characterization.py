@@ -673,7 +673,7 @@ class Characterization:
         """Run every phase in order and grade."""
         self.collect_test_info()
         self.warmup_and_arrival_check()
-        self.find_peak_xy()
+        self.find_peak_xy(x0=0,y0=0)
         self.run_beam_scans() if not skip_2d else logger.info("Skipping beam scans (--skip-2d).")
         self.measure_waveform_at_peak()
         if not skip_frequency:

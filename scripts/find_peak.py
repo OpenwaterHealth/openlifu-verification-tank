@@ -48,6 +48,13 @@ def main():
     parser.add_argument("--max-iter", type=int, default=40)
     parser.add_argument("--hysteresis", type=float, default=0.01,
                         help="Required fractional RMS improvement to accept a move.")
+    parser.add_argument("--probe-scale", type=float, default=0.5,
+                        help="Probe (finite-difference) distance as a fraction "
+                             "of the current step. <1 gives a local gradient "
+                             "estimate; ~0.5 is a good default.")
+    parser.add_argument("--min-line-step-scale", type=float, default=0.05,
+                        help="Smallest backtracking line-search step, as a "
+                             "fraction of the current step.")
     parser.add_argument("--no-rotate-basis", action="store_true",
                         help="Keep probes axis-aligned each iteration instead of "
                              "rotating along the accepted gradient direction.")
@@ -108,6 +115,8 @@ def main():
                 tol=args.tol,
                 max_iter=args.max_iter,
                 hysteresis=args.hysteresis,
+                probe_scale=args.probe_scale,
+                min_line_step_scale=args.min_line_step_scale,
                 rotate_basis=not args.no_rotate_basis,
                 time_start_s=args.time_start_us * 1e-6,
                 time_stop_s=args.time_stop_us * 1e-6,

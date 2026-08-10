@@ -27,10 +27,28 @@ def gradient_search(
     tol: float = 0.02,
     max_iter: int = 40,
     hysteresis: float = 0.01,
+    probe_scale: float = 0.5,
+    min_line_step_scale: float = 0.05,
     rotate_basis: bool = True,
     on_progress: Optional[Callable[..., None]] = None,
 ):
     """Walk toward the RMS peak from ``(x0, y0)``.
+
+    On each iteration:
+
+    1. Probe the RMS at ``\u00b1u`` and ``\u00b1v`` at distance
+       ``h = probe_scale * step`` in the local basis.
+    2. Estimate the gradient by central differences and pick the
+       search direction.
+    3. Do a backtracking line search along the gradient direction:
+       try ``step, step/2, step/4, ...`` down to
+       ``min_line_step_scale * step``, accepting the first trial that
+       beats the current best by ``hysteresis``. If one succeeds,
+       ``step`` is grown (up to a cap) for the next iteration.
+    4. If the line search fails, fall back to the best probe if it
+       beat the center by ``hysteresis``.
+    5. Only if both the line search and probe fallback fail, halve
+       ``step`` and iterate again.
 
     Args:
         measure_fn: ``measure_fn(x, y)`` fires one pulse at ``(x, y)``
@@ -45,6 +63,11 @@ def gradient_search(
         max_iter: Maximum iterations.
         hysteresis: Fractional RMS improvement required to accept a
             move (noise guard).
+        probe_scale: Probe distance as a fraction of ``step``. Must
+            be > 0. Values around 0.5 give a genuinely local gradient
+            estimate.
+        min_line_step_scale: Smallest backtracking line-search step,
+            as a fraction of the current ``step``. Must be > 0.
         rotate_basis: If ``True``, rotate the probe basis so ``u``
             aligns with each accepted gradient direction. If
             ``False``, probes stay axis-aligned.
@@ -58,6 +81,11 @@ def gradient_search(
         Dict with keys ``best_x, best_y, best_rms, units, converged,
         iterations, evaluations, xs, ys, rms_values``.
     """
+    if probe_scale <= 0:
+        raise ValueError("probe_scale must be > 0")
+    if min_line_step_scale <= 0 or min_line_step_scale > 1:
+        raise ValueError("min_line_step_scale must be in (0, 1]")
+
     xs: list[float] = []
     ys: list[float] = []
     rms_values: list[float] = []
@@ -93,16 +121,16 @@ def gradient_search(
     best_meas = center_meas
     _emit(best_meas, x0, y0, center_rms,
           best_x=best_x, best_y=best_y, best_rms=best_rms,
-          iteration=0, step=initial_step)
+          iteration=0, step=initial_step,
+          info_extra=f"start (RMS={center_rms:.4g} {units})")
 
     # Local probe basis. u is the "along-gradient" direction, v its
     # perpendicular. Starts axis-aligned; rotates to follow the
-    # accepted gradient direction after each successful step.
+    # accepted gradient direction after each successful gradient step.
     u = np.array([1.0, 0.0])
     v = np.array([0.0, 1.0])
 
     step = float(initial_step)
-    probe_scale = 1.0  # keep probe offset proportional to step
     iteration = 0
     converged = False
     grow_factor = 1.4
@@ -117,7 +145,11 @@ def gradient_search(
             ("+v", best_x + h * v[0], best_y + h * v[1]),
             ("-v", best_x - h * v[0], best_y - h * v[1]),
         ]
-        rvals = {}
+        rvals: dict[str, float] = {}
+        # Track the best probe (in case both the gradient step and
+        # its line search fail; we'd rather jump to a probe that
+        # actually improved than stay put and halve).
+        best_probe = None  # (label, x, y, r, meas)
         for label, px, py in probes:
             meas, r = _measure(px, py)
             if meas is None:
@@ -125,8 +157,10 @@ def gradient_search(
             _emit(meas, px, py, r,
                   best_x=best_x, best_y=best_y, best_rms=best_rms,
                   iteration=iteration, step=step,
-                  info_extra=f"probe {label}")
+                  info_extra=f"probe {label}  h={h:.4f} mm")
             rvals[label] = r
+            if best_probe is None or r > best_probe[3]:
+                best_probe = (label, px, py, r, meas)
         if len(rvals) < 4:
             step /= 2.0
             logger.info(
@@ -143,49 +177,78 @@ def gradient_search(
         g_v = (rvals["+v"] - rvals["-v"]) / (2.0 * h)
         grad_xy = g_u * u + g_v * v
         gnorm = float(np.linalg.norm(grad_xy))
-        if gnorm < 1e-12:
-            step /= 2.0
-            logger.info("iter %d: flat gradient \u2192 halve step to %.4f",
-                        iteration, step)
-            if step < tol:
-                converged = True
-                break
+        threshold = best_rms * (1.0 + hysteresis)
+
+        moved = False
+        if gnorm >= 1e-12:
+            direction = grad_xy / gnorm
+            # Backtracking line search along the gradient direction:
+            # start at step, then step/2, step/4, ..., down to
+            # step * min_line_step_scale.
+            trial_step = step
+            min_line_step = step * min_line_step_scale
+            while trial_step >= min_line_step:
+                trial_x = best_x + trial_step * direction[0]
+                trial_y = best_y + trial_step * direction[1]
+                trial_meas, trial_rms = _measure(trial_x, trial_y)
+                if trial_meas is not None:
+                    _emit(trial_meas, trial_x, trial_y, trial_rms,
+                          best_x=best_x, best_y=best_y, best_rms=best_rms,
+                          iteration=iteration, step=step,
+                          info_extra=(
+                              f"trial step={trial_step:.4f} "
+                              f"dir=({direction[0]:+.3f}, {direction[1]:+.3f}) "
+                              f"|g|={gnorm:.3g}"
+                          ))
+                if trial_meas is not None and trial_rms > threshold:
+                    prev_x, prev_y = best_x, best_y
+                    best_x, best_y, best_rms, best_meas = (
+                        trial_x, trial_y, trial_rms, trial_meas,
+                    )
+                    logger.info(
+                        "iter %d: gradient step %s(%+.4f, %+.4f) \u2192 "
+                        "(%.4f, %.4f)  RMS=%.4g %s  "
+                        "trial_step=%.4f  dir=(%+.3f, %+.3f)",
+                        iteration,
+                        "from (%.4f, %.4f) " % (prev_x, prev_y),
+                        trial_step * direction[0], trial_step * direction[1],
+                        best_x, best_y, best_rms, units,
+                        trial_step, direction[0], direction[1],
+                    )
+                    if rotate_basis:
+                        u = direction.copy()
+                        v = np.array([-u[1], u[0]])
+                    # Grow the step budget for next iteration, but
+                    # relative to the accepted trial size so we don't
+                    # keep overshooting.
+                    step = min(max(trial_step, step) * grow_factor, max_step)
+                    moved = True
+                    break
+                trial_step /= 2.0
+
+        if moved:
             continue
 
-        direction = grad_xy / gnorm
-        trial_x = best_x + step * direction[0]
-        trial_y = best_y + step * direction[1]
-        trial_meas, trial_rms = _measure(trial_x, trial_y)
-        if trial_meas is not None:
-            _emit(trial_meas, trial_x, trial_y, trial_rms,
-                  best_x=best_x, best_y=best_y, best_rms=best_rms,
-                  iteration=iteration, step=step,
-                  info_extra=(f"|g|={gnorm:.3g} "
-                              f"dir=({direction[0]:+.2f}, {direction[1]:+.2f})"))
-
-        threshold = best_rms * (1.0 + hysteresis)
-        if trial_meas is not None and trial_rms > threshold:
-            best_x, best_y, best_rms, best_meas = (
-                trial_x, trial_y, trial_rms, trial_meas,
-            )
+        # --- Fallback 1: best probe beats center by hysteresis ---
+        if best_probe is not None and best_probe[3] > threshold:
+            label, px, py, r, meas = best_probe
             logger.info(
-                "iter %d: moved to (%.4f, %.4f) along (%+.2f, %+.2f)  "
-                "RMS=%.4g %s  step=%.4f",
-                iteration, best_x, best_y, direction[0], direction[1],
-                best_rms, units, step,
+                "iter %d: line search failed, moving to best probe %s "
+                "(%.4f, %.4f)  RMS=%.4g %s  step held at %.4f",
+                iteration, label, px, py, r, units, step,
             )
-            if rotate_basis:
-                u = direction.copy()
-                v = np.array([-u[1], u[0]])
-            step = min(step * grow_factor, max_step)
-        else:
-            step /= 2.0
-            logger.info(
-                "iter %d: trial did not improve (%.4g \u2264 %.4g %s) \u2192 halve step to %.4f",
-                iteration, trial_rms if trial_meas is not None else float("nan"),
-                threshold, units, step,
-            )
+            best_x, best_y, best_rms, best_meas = px, py, r, meas
+            # No basis rotation on a probe fallback (we don't have a
+            # trustworthy gradient direction here).
+            continue
 
+        # --- Fallback 2: refine by halving step (probes get finer too) ---
+        step /= 2.0
+        reason = "flat gradient" if gnorm < 1e-12 else "no trial or probe improved"
+        logger.info(
+            "iter %d: %s \u2192 halve step to %.4f (best RMS=%.4g %s)",
+            iteration, reason, step, best_rms, units,
+        )
         if step < tol:
             converged = True
             if on_progress is not None:

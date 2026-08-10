@@ -1518,9 +1518,11 @@ class VerificationTank:
                   tol=0.02,
                   max_iter=40,
                   hysteresis=0.01,
+                  probe_scale=0.5,
+                  min_line_step_scale=0.05,
                   rotate_basis=True,
                   time_start_s=100e-6,
-                  time_stop_s=200e-6,
+                  time_stop_s=220e-6,
                   sampling_interval_ns=100,
                   plot=False,
                   store=True,
@@ -1529,12 +1531,15 @@ class VerificationTank:
         """Locate the true (x, y) hydrophone peak via 2-D gradient ascent.
 
         Estimates the RMS-pressure gradient by central differences on
-        a local ``(u, v)`` basis, steps along the (in general
-        diagonal) gradient direction, and backtracks (halves ``step``)
-        when a trial move fails to beat the current best by more than
-        ``hysteresis``. On success the basis rotates so ``u`` aligns
-        with the accepted gradient direction, which is more
-        informative on elongated peaks.
+        a local ``(u, v)`` basis whose probe distance is
+        ``probe_scale * step`` (smaller than the trial step so the FD
+        estimate is genuinely local), then does a backtracking line
+        search along the gradient direction. If no step size in the
+        gradient direction beats the current best by ``hysteresis``,
+        falls back to the best of the four probes if it beat the
+        center; only when that also fails is ``step`` halved. On a
+        genuine gradient acceptance the basis rotates so ``u`` aligns
+        with the accepted direction (helpful on elongated peaks).
 
         Starts at the current ``hydrophone_position`` unless
         ``x0``/``y0``/``z`` are passed. When ``store=True`` (default),
@@ -1553,6 +1558,13 @@ class VerificationTank:
             max_iter: Maximum iterations.
             hysteresis: Fractional RMS improvement required to accept
                 a move.
+            probe_scale: Probe distance as a fraction of the current
+                step (default 0.5). Smaller = more local gradient
+                estimate but noisier.
+            min_line_step_scale: Smallest backtracking line-search
+                step, as a fraction of the current step (default
+                0.05). The line search tries step, step/2, ..., down
+                to this fraction of step before giving up.
             rotate_basis: If ``True`` (default), rotate the probe
                 basis to align ``u`` with each accepted gradient
                 direction.
@@ -1613,6 +1625,8 @@ class VerificationTank:
             tol=tol,
             max_iter=max_iter,
             hysteresis=hysteresis,
+            probe_scale=probe_scale,
+            min_line_step_scale=min_line_step_scale,
             rotate_basis=rotate_basis,
             on_progress=on_progress,
         )
