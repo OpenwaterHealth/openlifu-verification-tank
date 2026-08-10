@@ -210,3 +210,9 @@ __marimo__/
 
 # Test Data
 scripts/data/
+
+# Local, per-machine test outputs and calibrations
+acceptance.json
+hydrophone_position.json
+test_reports/
+

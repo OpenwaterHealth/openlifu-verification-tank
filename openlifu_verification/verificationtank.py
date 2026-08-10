@@ -209,17 +209,30 @@ class VerificationTank:
             self.arr.sort_by_pin()
 
             # Auto-load a previously-calibrated hydrophone position if
-            # one has been saved to ``calibration_path``. Soft failure:
-            # a missing/malformed file just leaves the default position
-            # intact.
-            if self.calibration_path is not None and self.calibration_path.is_file():
-                try:
-                    self.load_calibration()
-                except Exception as e:
-                    logger.warning(
-                        "Failed to load hydrophone calibration from %s: %s",
-                        self.calibration_path, e,
-                    )
+            # one has been saved to ``calibration_path``. On first-time
+            # run the file is seeded with the current (default) position
+            # so the operator has an editable copy to tweak.
+            if self.calibration_path is not None:
+                if self.calibration_path.is_file():
+                    try:
+                        self.load_calibration()
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to load hydrophone calibration from %s: %s",
+                            self.calibration_path, e,
+                        )
+                else:
+                    try:
+                        self.save_calibration()
+                        logger.info(
+                            "Seeded default hydrophone calibration at %s",
+                            self.calibration_path,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Could not seed default hydrophone calibration at %s: %s",
+                            self.calibration_path, e,
+                        )
 
 
         except Exception as e:

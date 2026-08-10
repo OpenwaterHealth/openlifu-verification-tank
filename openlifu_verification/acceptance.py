@@ -91,6 +91,37 @@ class AcceptanceCriteria:
             temperature=Temperature(**data.get("temperature", {})),
         )
 
+    @classmethod
+    def load_or_create(cls, path: Path) -> "AcceptanceCriteria":
+        """Load criteria, seeding ``path`` with defaults if missing.
+
+        On first-time run the file is written from the built-in
+        defaults so the operator has an editable copy to tweak.
+        """
+        path = Path(path)
+        if path.is_file():
+            return cls.from_file(path)
+        crit = cls()
+        crit.save(path)
+        logger.info("Seeded default acceptance criteria at %s", path)
+        return crit
+
+    def save(self, path: Path) -> Path:
+        """Serialize criteria to ``path`` as JSON."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "arrival_time":     {"nominal_us": self.arrival_time.nominal_us,
+                                 "tol_pct":     self.arrival_time.tol_pct},
+            "peak_offset":      {"max_mm":      self.peak_offset.max_mm},
+            "pnp_at_peak":      {"min_by_freq_kHz": dict(self.pnp_at_peak.min_by_freq_kHz)},
+            "freq_response":    {"max_ripple_dB": self.freq_response.max_ripple_dB},
+            "voltage_linearity":{"r2_min":      self.voltage_linearity.r2_min},
+            "temperature":      {"max_C":       self.temperature.max_C},
+        }
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return path
+
     def pnp_min_for(self, freq_kHz: float) -> Optional[float]:
         """Look up the minimum PNP for a nominal frequency.
 
