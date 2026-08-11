@@ -68,6 +68,13 @@ def main():
     # --- Misc ---
     parser.add_argument("--chunk-size", type=int, default=0,
                         help="Rapid-block chunk size (0 = whole sweep).")
+    parser.add_argument("--n-averages", type=int, default=1,
+                        help="Repeat every scan point this many times and "
+                             "coherently average the traces.")
+    parser.add_argument("--align", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Cross-correlate repeats against the first "
+                             "before averaging (default on).")
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-data", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-plot", type=str, default="")
@@ -127,6 +134,8 @@ def main():
                 y=args.y,
                 absolute=args.absolute,
                 chunk_size=args.chunk_size,
+                n_averages=args.n_averages,
+                align=args.align,
                 progress=progress,
             )
             if args.z is not None:

@@ -11,7 +11,8 @@ from .device_info import DeviceInfo
 from .scan_config import ScanConfig
 from .characterization import Characterization, TestReport, ReportRow
 from .dry_run import DryRunTank
-from . import characterization, paths, report_io
+from .pulse_align import align_pulse_traces
+from . import characterization, paths, pulse_align, report_io
 
 # The upstream openlifu_sdk logs a lot at INFO/DEBUG during device
 # setup and per-command traffic. Quiet it to WARNING by default so
@@ -55,6 +56,7 @@ __all__ = [
     "TestReport",
     "ReportRow",
     "DryRunTank",
+    "align_pulse_traces",
     "characterization",
     "paths",
     "report_io",

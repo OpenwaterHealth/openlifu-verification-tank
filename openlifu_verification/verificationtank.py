@@ -11,6 +11,7 @@ from .qpx600dp import QPX600DP
 from .scan_results import ScanResult
 from .hydrophone import Hydrophone
 from .paths import HYDROPHONE_STATE_PATH
+from .pulse_align import align_pulse_traces
 
 from openlifu_sdk.io import LIFUInterface
 from openlifu_sdk.io.LIFUTXDevice import Tx7332DelayProfile, Tx7332PulseProfile
@@ -624,6 +625,59 @@ class VerificationTank:
             result["time_stop_s"] = plan["time_stop_s"]
         return result
 
+    def capture_pulse_train(self,
+                            n_pulses,
+                            time_start_s,
+                            time_stop_s,
+                            sampling_interval_ns,
+                            timeout_s=None):
+        """Capture a whole LIFU-generated pulse train in a single trigger.
+
+        Requires the LIFU to be configured via ``configure_lifu`` (or
+        :meth:`apply_pulse`) with ``pulse_count=n_pulses`` and
+        ``trigger_mode="single"``, and HV enabled. The scope is
+        armed for ``n_pulses`` rapid-block segments, then one
+        ``trigger_once()`` call fires the whole train; each internal
+        LIFU pulse re-triggers the scope, filling one segment.
+
+        Unlike :meth:`run_capture` (single pulse) and
+        :meth:`run_rapid_sweep` (many triggers, one per point), this
+        exercises the LIFU firmware's own inter-pulse timing, so the
+        returned segments are useful for inspecting pulse-to-pulse
+        jitter and amplitude drift.
+
+        Args:
+            n_pulses: Number of internal LIFU pulses to capture. Must
+                match the ``pulse_count`` used in the previous
+                ``configure_lifu`` call.
+            time_start_s, time_stop_s, sampling_interval_ns: Capture
+                window applied to every segment (relative to that
+                segment's trigger).
+            timeout_s: Max time to wait for all ``n_pulses`` triggers.
+
+        Returns:
+            Dict from :meth:`finish_rapid_capture` with:
+
+              - ``time``: 1-D sample-time axis (ns), zero at each
+                segment's trigger.
+              - one entry per enabled channel: ``(n_pulses, samples)``.
+              - ``overflow``: 1-D int16, one entry per segment.
+              - ``sampling_interval_ns, time_start_s, time_stop_s``.
+
+            Or ``None`` if the scope timed out.
+        """
+        if not self.scope:
+            raise ValueError("No Picoscope Connected")
+        plan = self.configure_rapid_capture(
+            n_captures=int(n_pulses),
+            time_start_s=time_start_s,
+            time_stop_s=time_stop_s,
+            sampling_interval_ns=sampling_interval_ns,
+        )
+        self.arm_rapid_capture(plan)
+        self.trigger_once()
+        return self.finish_rapid_capture(plan, timeout_s=timeout_s)
+
     # ------------------------------------------------------------------
     # Rapid-block capture (many triggers, one bulk transfer)
     # ------------------------------------------------------------------
@@ -762,6 +816,202 @@ class VerificationTank:
         result["time_start_s"] = plan["time_start_s"]
         result["time_stop_s"] = plan["time_stop_s"]
         return result
+
+    def run_averaged_sweep(self,
+                           points,
+                           apply_point,
+                           time_start_s,
+                           time_stop_s,
+                           sampling_interval_ns,
+                           n_averages=1,
+                           align=True,
+                           align_max_shift_samples=None,
+                           chunk_size=None,
+                           timeout_s=None,
+                           progress="bar",
+                           progress_label=None):
+        """Repeat-fire each sweep point and (optionally) coherently average.
+
+        Thin wrapper around :meth:`run_rapid_sweep`: expands ``points``
+        into ``n_averages`` back-to-back triggers per point (calling
+        ``apply_point`` only on the first repeat of each group, so the
+        HV rail / delay profile is not re-programmed for the repeats),
+        then folds the flat capture list back to per-point groups and
+        averages each channel across the repeats.
+
+        When ``align`` is ``True`` the hydrophone channel is aligned by
+        cross-correlation (via
+        :func:`openlifu_verification.pulse_align.align_pulse_traces`)
+        before averaging so sub-sample trigger jitter doesn't smear
+        the coherent sum. Non-hydrophone channels are averaged with
+        the same per-point lags so they stay coherent with the
+        hydrophone.
+
+        Args:
+            points, apply_point, time_start_s, time_stop_s,
+            sampling_interval_ns, chunk_size, timeout_s, progress,
+            progress_label: See :meth:`run_rapid_sweep`.
+            n_averages: Repeats per point. ``1`` (default) reduces to
+                a plain :meth:`run_rapid_sweep`.
+            align: If ``True`` (default), cross-correlate repeats
+                against the first repeat before averaging.
+            align_max_shift_samples: Optional cap on the lag search
+                (samples). ``None`` searches the full range.
+
+        Returns:
+            ``(outputs, timings, averaging)`` where ``outputs`` and
+            ``timings`` have the same shape as :meth:`run_rapid_sweep`
+            (one entry per input point, not per repeat) and
+            ``averaging`` is a list of per-point dicts with keys
+            ``n_averages``, ``lags_s`` (shape ``(n_averages,)``),
+            ``noise_rms`` (per-sample std RMS on the hydrophone
+            channel).
+        """
+        n_averages = int(n_averages)
+        if n_averages < 1:
+            raise ValueError("n_averages must be >= 1")
+        points = list(points)
+        n_points = len(points)
+        if n_points == 0:
+            return [], [], []
+
+        if n_averages == 1:
+            outputs, timings = self.run_rapid_sweep(
+                points=points,
+                apply_point=apply_point,
+                time_start_s=time_start_s,
+                time_stop_s=time_stop_s,
+                sampling_interval_ns=sampling_interval_ns,
+                chunk_size=chunk_size,
+                timeout_s=timeout_s,
+                progress=progress,
+                progress_label=progress_label,
+            )
+            averaging = [{"n_averages": 1,
+                          "lags_s": np.zeros(1),
+                          "noise_rms": float("nan")} for _ in outputs]
+            return outputs, timings, averaging
+
+        # Expand points -> (point, repeat_idx). apply_point is only
+        # called on repeat 0 of each group.
+        expanded = [(pt, r) for pt in points for r in range(n_averages)]
+
+        def _apply_once(pt_repeat):
+            pt, r = pt_repeat
+            if r == 0:
+                apply_point(pt)
+
+        # Chunk size, if given, applies to physical scope segments.
+        # We must ensure whole groups of ``n_averages`` land in the same
+        # chunk so a group is never split by an arm/xfer boundary
+        # (which would break within-group alignment). Round chunk_size
+        # DOWN to a multiple of n_averages.
+        if chunk_size is not None and chunk_size > 0:
+            eff_chunk = max(n_averages, (chunk_size // n_averages) * n_averages)
+        else:
+            eff_chunk = n_averages * n_points
+
+        raw_outputs, raw_timings = self.run_rapid_sweep(
+            points=expanded,
+            apply_point=_apply_once,
+            time_start_s=time_start_s,
+            time_stop_s=time_stop_s,
+            sampling_interval_ns=sampling_interval_ns,
+            chunk_size=eff_chunk,
+            timeout_s=timeout_s,
+            progress=progress,
+            progress_label=progress_label,
+        )
+
+        outputs = [None] * n_points
+        timings = []
+        averaging = []
+        hydro = self.hydrophone_channel
+
+        for i in range(n_points):
+            group = raw_outputs[i * n_averages:(i + 1) * n_averages]
+            group_timings = raw_timings[i * n_averages:(i + 1) * n_averages]
+            captured = [g for g in group if g is not None]
+            # Sum-of-timings so the caller sees the *actual* wall time
+            # spent on this point (all repeats combined).
+            agg_t = {
+                "apply_s": sum(t.get("apply_s", 0.0) for t in group_timings),
+                "trigger_s": sum(t.get("trigger_s", 0.0) for t in group_timings),
+                "iter_total_s": sum(t.get("iter_total_s", 0.0) for t in group_timings),
+                "arm_s": sum(t.get("arm_s", 0.0) for t in group_timings),
+                "xfer_s": sum(t.get("xfer_s", 0.0) for t in group_timings),
+                "captured": bool(captured),
+                "chunk_index": group_timings[0].get("chunk_index")
+                if group_timings else None,
+                "n_averages": n_averages,
+                "n_captured": len(captured),
+            }
+            timings.append(agg_t)
+
+            if not captured:
+                averaging.append({
+                    "n_averages": n_averages,
+                    "n_captured": 0,
+                    "lags_s": np.zeros(n_averages),
+                    "noise_rms": float("nan"),
+                })
+                continue
+
+            t_axis = captured[0]["time"]
+            sampling_interval_ns_actual = float(captured[0]["sampling_interval_ns"])
+            dt_s = sampling_interval_ns_actual * 1e-9
+
+            hydro_stack = np.stack(
+                [np.asarray(g[hydro], dtype=float) for g in captured], axis=0,
+            )
+            if align and hydro_stack.shape[0] >= 2:
+                aligned_hydro, lags_s = align_pulse_traces(
+                    hydro_stack,
+                    dt_s=dt_s,
+                    max_shift_samples=align_max_shift_samples,
+                    reference="first",
+                )
+            else:
+                aligned_hydro = hydro_stack
+                lags_s = np.zeros(hydro_stack.shape[0])
+
+            # Per-sample std across repeats -> a diagnostic noise floor.
+            noise_std = aligned_hydro.std(axis=0, ddof=0)
+            noise_rms = float(np.sqrt(np.mean(noise_std ** 2)))
+
+            per_point = {
+                "time": t_axis,
+                "sampling_interval_ns": sampling_interval_ns_actual,
+                "time_start_s": captured[0].get("time_start_s"),
+                "time_stop_s": captured[0].get("time_stop_s"),
+                "overflow": int(np.max([g.get("overflow", 0) for g in captured])),
+                hydro: aligned_hydro.mean(axis=0),
+            }
+            # Average any other enabled channels with the same lags so
+            # they stay coherent with the hydrophone (e.g. sync channel).
+            lag_samples = lags_s / dt_s if dt_s > 0 else np.zeros_like(lags_s)
+            for ch in self.scope.enabled_channels:
+                if ch == hydro:
+                    continue
+                ch_stack = [np.asarray(g[ch], dtype=float) for g in captured]
+                if align and len(ch_stack) >= 2:
+                    from .pulse_align import shift_trace
+                    aligned_ch = np.stack(
+                        [shift_trace(x, l) for x, l in zip(ch_stack, lag_samples)],
+                        axis=0,
+                    )
+                else:
+                    aligned_ch = np.stack(ch_stack, axis=0)
+                per_point[ch] = aligned_ch.mean(axis=0)
+            outputs[i] = per_point
+            averaging.append({
+                "n_averages": n_averages,
+                "n_captured": len(captured),
+                "lags_s": lags_s,
+                "noise_rms": noise_rms,
+            })
+
+        return outputs, timings, averaging
 
     def run_rapid_sweep(self,
                         points,
@@ -1159,6 +1409,9 @@ class VerificationTank:
                      sampling_interval_ns=100,
                      chunk_size=0,
                      timeout_s=None,
+                     n_averages=1,
+                     align=True,
+                     align_max_shift_samples=None,
                      progress="bar") -> ScanResult:
         """Sweep the focus over an (x, y) grid at a fixed z.
 
@@ -1216,12 +1469,15 @@ class VerificationTank:
             xi, yi, zi = point
             self.set_focus(xi, yi, zi)
 
-        outputs, timings = self.run_rapid_sweep(
+        outputs, timings, averaging = self.run_averaged_sweep(
             points=focus_points,
             apply_point=apply_point,
             time_start_s=time_start_s,
             time_stop_s=time_stop_s,
             sampling_interval_ns=sampling_interval_ns,
+            n_averages=n_averages,
+            align=align,
+            align_max_shift_samples=align_max_shift_samples,
             chunk_size=chunk_size or len(focus_points),
             timeout_s=timeout_s,
             progress=progress,
@@ -1256,6 +1512,9 @@ class VerificationTank:
                 "captured_mask": ok_mask,
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
                 "absolute": bool(absolute),
+                "n_averages": int(n_averages),
+                "align": bool(align),
+                "averaging": averaging,
             },
         )
 
@@ -1271,6 +1530,9 @@ class VerificationTank:
                 sampling_interval_ns=100,
                 chunk_size=0,
                 timeout_s=None,
+                n_averages=1,
+                align=True,
+                align_max_shift_samples=None,
                 progress="bar") -> ScanResult:
         """Convenience wrapper: 2-D focus grid.
 
@@ -1287,6 +1549,9 @@ class VerificationTank:
             sampling_interval_ns=sampling_interval_ns,
             chunk_size=chunk_size,
             timeout_s=timeout_s,
+            n_averages=n_averages,
+            align=align,
+            align_max_shift_samples=align_max_shift_samples,
             progress=progress,
         )
 
@@ -1298,6 +1563,9 @@ class VerificationTank:
                        sampling_interval_ns=100,
                        chunk_size=0,
                        timeout_s=None,
+                       n_averages=1,
+                       align=True,
+                       align_max_shift_samples=None,
                        progress="bar") -> ScanResult:
         """Sweep the TX pulse frequency at the current focus.
 
@@ -1325,12 +1593,15 @@ class VerificationTank:
         def apply_point(freq_kHz):
             self.set_pulse(frequency_kHz=freq_kHz, duration_msec=duration_msec)
 
-        outputs, timings = self.run_rapid_sweep(
+        outputs, timings, averaging = self.run_averaged_sweep(
             points=freqs.tolist(),
             apply_point=apply_point,
             time_start_s=time_start_s,
             time_stop_s=time_stop_s,
             sampling_interval_ns=sampling_interval_ns,
+            n_averages=n_averages,
+            align=align,
+            align_max_shift_samples=align_max_shift_samples,
             chunk_size=chunk_size or len(freqs),
             timeout_s=timeout_s,
             progress=progress,
@@ -1356,6 +1627,9 @@ class VerificationTank:
                 "duration_msec": float(duration_msec),
                 "captured_mask": ok_mask,
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
+                "n_averages": int(n_averages),
+                "align": bool(align),
+                "averaging": averaging,
             },
         )
 
@@ -1366,6 +1640,9 @@ class VerificationTank:
                      sampling_interval_ns=100,
                      chunk_size=0,
                      timeout_s=None,
+                     n_averages=1,
+                     align=True,
+                     align_max_shift_samples=None,
                      progress="bar") -> ScanResult:
         """Sweep the HV rail voltage at the current focus/pulse profile.
 
@@ -1392,12 +1669,15 @@ class VerificationTank:
         def apply_point(voltage):
             self.set_voltage(float(voltage), wait=True)
 
-        outputs, timings = self.run_rapid_sweep(
+        outputs, timings, averaging = self.run_averaged_sweep(
             points=voltages.tolist(),
             apply_point=apply_point,
             time_start_s=time_start_s,
             time_stop_s=time_stop_s,
             sampling_interval_ns=sampling_interval_ns,
+            n_averages=n_averages,
+            align=align,
+            align_max_shift_samples=align_max_shift_samples,
             chunk_size=chunk_size or len(voltages),
             timeout_s=timeout_s,
             progress=progress,
@@ -1420,6 +1700,9 @@ class VerificationTank:
                 "frequency_kHz": float(self.frequency),
                 "captured_mask": ok_mask,
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
+                "n_averages": int(n_averages),
+                "align": bool(align),
+                "averaging": averaging,
             },
         )
 

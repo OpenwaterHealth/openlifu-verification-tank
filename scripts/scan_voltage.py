@@ -47,6 +47,12 @@ def main():
                         help="Scope full-scale on the hydrophone channel (default 5000 mV).")
     # --- Misc ---
     parser.add_argument("--chunk-size", type=int, default=0)
+    parser.add_argument("--n-averages", type=int, default=1,
+                        help="Repeat every voltage this many times and "
+                             "coherently average.")
+    parser.add_argument("--align", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Cross-correlate repeats before averaging.")
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-data", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-plot", type=str, default="")
@@ -106,6 +112,8 @@ def main():
             result = ver.scan_voltage(
                 voltages_V=voltages,
                 chunk_size=args.chunk_size,
+                n_averages=args.n_averages,
+                align=args.align,
                 progress=progress,
             )
     except (ConnectionError, ValueError, Exception) as e:
