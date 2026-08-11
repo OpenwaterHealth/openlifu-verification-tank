@@ -166,6 +166,10 @@ def build_parser() -> argparse.ArgumentParser:
     # --- Misc ---
     p.add_argument("--dry-run", action="store_true",
                    help="Use DryRunTank instead of real hardware.")
+    p.add_argument("--plot-peak", action="store_true",
+                   help="Open a live matplotlib figure during the find_peak "
+                        "stage so the operator can visually verify the "
+                        "gradient-ascent search behavior.")
     p.add_argument("--log-file", type=Path, default=None,
                    help="Optional file to tee logs into.")
     verbosity = p.add_mutually_exclusive_group()
@@ -259,7 +263,7 @@ def main(argv=None) -> int:
             scan_config=scan_config,
             frequency_kHz=args.frequency_khz,
             voltage_V=args.voltage,
-            plot=False,
+            plot=args.plot_peak,
         )
         t_start = time.perf_counter()
         try:

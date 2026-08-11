@@ -1616,10 +1616,10 @@ class VerificationTank:
 
     def find_peak(self, *,
                   x0=None, y0=None, z=None,
-                  initial_step=0.5,
+                  initial_step=0.25,
                   tol=0.02,
                   max_iter=40,
-                  hysteresis=0.01,
+                  hysteresis=0.005,
                   probe_scale=0.5,
                   min_line_step_scale=0.05,
                   rotate_basis=True,

@@ -40,15 +40,20 @@ def gradient_search(
        ``h = probe_scale * step`` in the local basis.
     2. Estimate the gradient by central differences and pick the
        search direction.
-    3. Do a backtracking line search along the gradient direction:
-       try ``step, step/2, step/4, ...`` down to
-       ``min_line_step_scale * step``, accepting the first trial that
-       beats the current best by ``hysteresis``. If one succeeds,
-       ``step`` is grown (up to a cap) for the next iteration.
-    4. If the line search fails, fall back to the best probe if it
-       beat the center by ``hysteresis``.
-    5. Only if both the line search and probe fallback fail, halve
-       ``step`` and iterate again.
+    3. Backtracking line search along the gradient direction: sample
+       ``step, step/2, step/4, ...`` down to
+       ``min_line_step_scale * step`` and pick the best trial.
+    4. Pick a winner between the best gradient trial and the best
+       probe. Both must beat the current search-center RMS by
+       ``hysteresis`` to be accepted; if both qualify, the higher
+       RMS wins. Gradient wins ties (to preserve gradient dynamics).
+    5. If neither wins, halve ``step`` and iterate again.
+
+    Every measurement is also compared against a *global peak*
+    tracker, so the returned ``best_x, best_y, best_rms`` are the
+    highest-RMS point ever measured (not the point the walk happens
+    to settle on). This keeps the reported peak consistent with the
+    colorbar max on the live figure.
 
     Args:
         measure_fn: ``measure_fn(x, y)`` fires one pulse at ``(x, y)``
@@ -74,12 +79,19 @@ def gradient_search(
         on_progress: Optional callback invoked after every
             measurement, with kwargs ``(meas, x, y, r, xs, ys,
             rms_values, best_x, best_y, best_rms, units, iteration,
-            step, evaluations, converged, done, info_extra)``. Used by
-            the live-plot layer.
+            step, evaluations, converged, done, info_extra)``. The
+            ``best_*`` fields carry the *global peak* seen so far,
+            so the live-plot "best" marker sits on the highest-RMS
+            measurement.
 
     Returns:
-        Dict with keys ``best_x, best_y, best_rms, units, converged,
-        iterations, evaluations, xs, ys, rms_values``.
+        Dict with:
+          - ``best_x, best_y, best_rms``: global peak seen (the
+            highest RMS across every measurement made).
+          - ``center_x, center_y, center_rms``: final search-center
+            location and its RMS (where the walk settled).
+          - ``units, converged, iterations, evaluations``
+          - ``xs, ys, rms_values``: every measurement in order.
     """
     if probe_scale <= 0:
         raise ValueError("probe_scale must be > 0")
@@ -90,22 +102,41 @@ def gradient_search(
     ys: list[float] = []
     rms_values: list[float] = []
 
+    # Global peak seen so far. Independent of the *search center*
+    # (``center_x, center_y, center_rms``) so a probe or trial that
+    # measures higher than the center by less than ``hysteresis``
+    # (i.e. not enough to accept the move) still gets remembered and
+    # reported. This is what fixes the "colorbar max > reported best"
+    # confusion: the returned peak = highest RMS ever measured.
+    peak_x: float
+    peak_y: float
+    peak_rms: float = float("-inf")
+    peak_meas = None
+
     def _measure(x, y):
+        nonlocal peak_x, peak_y, peak_rms, peak_meas
         meas = measure_fn(x, y)
         if meas is None:
             return None, float("-inf")
-        return meas, meas["rms"]
+        r = meas["rms"]
+        if r > peak_rms:
+            peak_x, peak_y, peak_rms, peak_meas = x, y, r, meas
+        return meas, r
 
-    def _emit(meas, x, y, r, *, best_x, best_y, best_rms,
+    def _emit(meas, x, y, r, *,
               iteration, step, converged=False, done=False, info_extra=""):
         xs.append(x)
         ys.append(y)
         rms_values.append(r)
         if on_progress is not None:
+            # Report the global peak (not the search center) as
+            # ``best_*`` so the live figure's "best" marker sits at
+            # the highest-RMS measurement instead of wherever the
+            # walk happens to be centered.
             on_progress(
                 meas=meas, x=x, y=y, r=r,
                 xs=xs, ys=ys, rms_values=rms_values,
-                best_x=best_x, best_y=best_y, best_rms=best_rms,
+                best_x=peak_x, best_y=peak_y, best_rms=peak_rms,
                 units=units,
                 iteration=iteration, step=step,
                 evaluations=len(rms_values),
@@ -113,14 +144,15 @@ def gradient_search(
                 info_extra=info_extra,
             )
 
+    # Seed the peak with the starting point so ``_measure`` can safely
+    # compare against it on subsequent calls.
+    peak_x, peak_y = x0, y0
     center_meas, center_rms = _measure(x0, y0)
     if center_meas is None:
         raise RuntimeError("Scope timed out on initial measurement.")
     units = center_meas["units"]
-    best_x, best_y, best_rms = x0, y0, center_rms
-    best_meas = center_meas
-    _emit(best_meas, x0, y0, center_rms,
-          best_x=best_x, best_y=best_y, best_rms=best_rms,
+    center_x, center_y = x0, y0
+    _emit(center_meas, x0, y0, center_rms,
           iteration=0, step=initial_step,
           info_extra=f"start (RMS={center_rms:.4g} {units})")
 
@@ -140,22 +172,21 @@ def gradient_search(
         iteration += 1
         h = step * probe_scale
         probes = [
-            ("+u", best_x + h * u[0], best_y + h * u[1]),
-            ("-u", best_x - h * u[0], best_y - h * u[1]),
-            ("+v", best_x + h * v[0], best_y + h * v[1]),
-            ("-v", best_x - h * v[0], best_y - h * v[1]),
+            ("+u", center_x + h * u[0], center_y + h * u[1]),
+            ("-u", center_x - h * u[0], center_y - h * u[1]),
+            ("+v", center_x + h * v[0], center_y + h * v[1]),
+            ("-v", center_x - h * v[0], center_y - h * v[1]),
         ]
         rvals: dict[str, float] = {}
-        # Track the best probe (in case both the gradient step and
-        # its line search fail; we'd rather jump to a probe that
-        # actually improved than stay put and halve).
+        # Track the best probe. If it beats the accepted line-search
+        # trial (or the line search doesn't accept anything), we jump
+        # to the probe instead of leaving free RMS on the table.
         best_probe = None  # (label, x, y, r, meas)
         for label, px, py in probes:
             meas, r = _measure(px, py)
             if meas is None:
                 continue
             _emit(meas, px, py, r,
-                  best_x=best_x, best_y=best_y, best_rms=best_rms,
                   iteration=iteration, step=step,
                   info_extra=f"probe {label}  h={h:.4f} mm")
             rvals[label] = r
@@ -177,85 +208,94 @@ def gradient_search(
         g_v = (rvals["+v"] - rvals["-v"]) / (2.0 * h)
         grad_xy = g_u * u + g_v * v
         gnorm = float(np.linalg.norm(grad_xy))
-        threshold = best_rms * (1.0 + hysteresis)
+        threshold = center_rms * (1.0 + hysteresis)
 
-        moved = False
+        # Backtracking line search along the gradient. Unlike the
+        # previous greedy version, we now sample ALL backtracking
+        # step sizes and pick the highest RMS among them, so we
+        # don't accidentally accept a smaller improvement when a
+        # larger one is available.
+        best_trial = None  # (x, y, r, meas, trial_step)
+        direction = None
         if gnorm >= 1e-12:
             direction = grad_xy / gnorm
-            # Backtracking line search along the gradient direction:
-            # start at step, then step/2, step/4, ..., down to
-            # step * min_line_step_scale.
             trial_step = step
             min_line_step = step * min_line_step_scale
             while trial_step >= min_line_step:
-                trial_x = best_x + trial_step * direction[0]
-                trial_y = best_y + trial_step * direction[1]
+                trial_x = center_x + trial_step * direction[0]
+                trial_y = center_y + trial_step * direction[1]
                 trial_meas, trial_rms = _measure(trial_x, trial_y)
                 if trial_meas is not None:
                     _emit(trial_meas, trial_x, trial_y, trial_rms,
-                          best_x=best_x, best_y=best_y, best_rms=best_rms,
                           iteration=iteration, step=step,
                           info_extra=(
                               f"trial step={trial_step:.4f} "
                               f"dir=({direction[0]:+.3f}, {direction[1]:+.3f}) "
                               f"|g|={gnorm:.3g}"
                           ))
-                if trial_meas is not None and trial_rms > threshold:
-                    prev_x, prev_y = best_x, best_y
-                    best_x, best_y, best_rms, best_meas = (
-                        trial_x, trial_y, trial_rms, trial_meas,
-                    )
-                    logger.info(
-                        "iter %d: gradient step %s(%+.4f, %+.4f) \u2192 "
-                        "(%.4f, %.4f)  RMS=%.4g %s  "
-                        "trial_step=%.4f  dir=(%+.3f, %+.3f)",
-                        iteration,
-                        "from (%.4f, %.4f) " % (prev_x, prev_y),
-                        trial_step * direction[0], trial_step * direction[1],
-                        best_x, best_y, best_rms, units,
-                        trial_step, direction[0], direction[1],
-                    )
-                    if rotate_basis:
-                        u = direction.copy()
-                        v = np.array([-u[1], u[0]])
-                    # Grow the step budget for next iteration, but
-                    # relative to the accepted trial size so we don't
-                    # keep overshooting.
-                    step = min(max(trial_step, step) * grow_factor, max_step)
-                    moved = True
-                    break
+                    if best_trial is None or trial_rms > best_trial[2]:
+                        best_trial = (trial_x, trial_y, trial_rms,
+                                      trial_meas, trial_step)
                 trial_step /= 2.0
 
-        if moved:
-            continue
+        # --- Choose winner among (best_trial, best_probe) ---
+        trial_score = best_trial[2] if best_trial is not None else float("-inf")
+        probe_score = best_probe[3] if best_probe is not None else float("-inf")
 
-        # --- Fallback 1: best probe beats center by hysteresis ---
-        if best_probe is not None and best_probe[3] > threshold:
-            label, px, py, r, meas = best_probe
+        if best_trial is not None and trial_score > threshold and trial_score >= probe_score:
+            # Accept the gradient trial. Basis rotates so u aligns
+            # with the accepted direction for the next iteration.
+            trial_x, trial_y, trial_rms, trial_meas, trial_step = best_trial
+            prev_x, prev_y = center_x, center_y
+            center_x, center_y, center_rms = trial_x, trial_y, trial_rms
             logger.info(
-                "iter %d: line search failed, moving to best probe %s "
-                "(%.4f, %.4f)  RMS=%.4g %s  step held at %.4f",
-                iteration, label, px, py, r, units, step,
+                "iter %d: gradient step from (%.4f, %.4f) (%+.4f, %+.4f) \u2192 "
+                "(%.4f, %.4f)  RMS=%.4g %s  "
+                "trial_step=%.4f  dir=(%+.3f, %+.3f)  peak=%.4g %s",
+                iteration, prev_x, prev_y,
+                trial_step * direction[0], trial_step * direction[1],
+                center_x, center_y, center_rms, units,
+                trial_step, direction[0], direction[1],
+                peak_rms, units,
             )
-            best_x, best_y, best_rms, best_meas = px, py, r, meas
-            # No basis rotation on a probe fallback (we don't have a
-            # trustworthy gradient direction here).
+            if rotate_basis and direction is not None:
+                u = direction.copy()
+                v = np.array([-u[1], u[0]])
+            step = min(max(trial_step, step) * grow_factor, max_step)
             continue
 
-        # --- Fallback 2: refine by halving step (probes get finer too) ---
+        if best_probe is not None and probe_score > threshold:
+            # Line search didn't beat the best probe (or wasn't
+            # taken at all). Move to the probe instead. No basis
+            # rotation: we don't have a trustworthy gradient
+            # direction for probe-only moves.
+            label, px, py, r, meas = best_probe
+            reason = ("line search worse than probe"
+                      if best_trial is not None else "flat gradient")
+            logger.info(
+                "iter %d: %s \u2192 moving to best probe %s (%.4f, %.4f) "
+                "RMS=%.4g %s  step held at %.4f  peak=%.4g %s",
+                iteration, reason, label, px, py, r, units, step,
+                peak_rms, units,
+            )
+            center_x, center_y, center_rms = px, py, r
+            continue
+
+        # Neither trial nor probe improved on the center by more
+        # than ``hysteresis`` \u2014 refine by halving step.
         step /= 2.0
         reason = "flat gradient" if gnorm < 1e-12 else "no trial or probe improved"
         logger.info(
-            "iter %d: %s \u2192 halve step to %.4f (best RMS=%.4g %s)",
-            iteration, reason, step, best_rms, units,
+            "iter %d: %s \u2192 halve step to %.4f (center RMS=%.4g %s, peak RMS=%.4g %s)",
+            iteration, reason, step, center_rms, units, peak_rms, units,
         )
         if step < tol:
             converged = True
             if on_progress is not None:
                 on_progress(
-                    meas=best_meas, x=best_x, y=best_y, r=best_rms,
+                    meas=peak_meas, x=peak_x, y=peak_y, r=peak_rms,
                     xs=xs, ys=ys, rms_values=rms_values,
-                    best_x=best_x, best_y=best_y, best_rms=best_rms,
+                    best_x=peak_x, best_y=peak_y, best_rms=peak_rms,
                     units=units,
                     iteration=iteration, step=step,
                     evaluations=len(rms_values),
@@ -264,9 +304,16 @@ def gradient_search(
             break
 
     return {
-        "best_x": best_x,
-        "best_y": best_y,
-        "best_rms": best_rms,
+        # ``best_*`` == global peak seen (not the search center).
+        # The search center coordinates are also returned as
+        # ``center_*`` for callers that want to inspect where the
+        # walk settled.
+        "best_x": peak_x,
+        "best_y": peak_y,
+        "best_rms": peak_rms,
+        "center_x": center_x,
+        "center_y": center_y,
+        "center_rms": center_rms,
         "units": units,
         "converged": converged,
         "iterations": iteration,

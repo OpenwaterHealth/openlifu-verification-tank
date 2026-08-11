@@ -216,3 +216,4 @@ scan_config.json
 hydrophone_position.json
 test_reports/
 
+*.npz
