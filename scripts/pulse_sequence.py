@@ -30,10 +30,10 @@ def _configure_root_logger():
     root.setLevel(logging.INFO)
 
 
-def _find_arrival_us(t_ns, trace, *, skip_us, threshold_frac=0.25):
+def _find_arrival_us(t_us, trace, *, skip_us, threshold_frac=0.25):
     """Return the first time (µs) after ``skip_us`` where |trace| crosses
     ``threshold_frac * max(|trace|)``. ``None`` if the trace is flat."""
-    t_us = np.asarray(t_ns) * 1e-3
+    t_us = np.asarray(t_us, dtype=float)
     mask = t_us >= skip_us
     if not mask.any():
         return None
@@ -55,8 +55,8 @@ def main():
     parser.add_argument("--voltage", type=float, default=12.0,
                         help="HV rail (V). Defaults to 12 V for safety; "
                              "override to hit the full drive rail.")
-    parser.add_argument("--duration-msec", type=float, default=None,
-                        help="Per-pulse duration in ms (default: 20 cycles).")
+    parser.add_argument("--duration-usec", type=float, default=None,
+                        help="Per-pulse duration in µs (default: 20 cycles).")
     parser.add_argument("--interval-msec", type=float, default=None,
                         help="Interval between pulses in the train (ms). "
                              "Default: VerificationTank.DEFAULT_INTERVAL_MSEC.")
@@ -131,7 +131,7 @@ def main():
             resolved = ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
                 voltage=args.voltage,
-                duration_msec=args.duration_msec,
+                duration_usec=args.duration_usec,
                 interval_msec=args.interval_msec,
                 pulse_count=args.pulse_count,
                 trigger_mode="single",
@@ -179,7 +179,7 @@ def main():
                         "voltage_V": float(resolved["voltage"]),
                         "frequency_kHz": float(resolved["frequency_kHz"]),
                         "interval_msec": float(resolved["interval_msec"]),
-                        "duration_msec": float(resolved["duration_msec"]),
+                        "duration_usec": float(resolved["duration_usec"]),
                         "focus_mm": np.array([args.x, args.y, args.z], dtype=float),
                     },
                 )
@@ -193,13 +193,13 @@ def main():
         return
 
     # --- Per-pulse timing / amplitude analysis ---
-    t_ns = np.asarray(scan_result.t)
+    t_us = np.asarray(scan_result.t)
     traces = np.asarray(scan_result.traces)
     n_pulses = traces.shape[0]
     vpp = np.ptp(traces, axis=-1)
     rms = np.sqrt(np.mean(traces.astype(float)**2, axis=-1))
     arrivals_us = np.array([
-        _find_arrival_us(t_ns, traces[i], skip_us=0.0) or float("nan")
+        _find_arrival_us(t_us, traces[i], skip_us=0.0) or float("nan")
         for i in range(n_pulses)
     ])
 
@@ -232,7 +232,7 @@ def main():
     if args.aggregate and n_pulses >= 2:
         from openlifu_verification import align_pulse_traces
 
-        dt_s = float(t_ns[1] - t_ns[0]) * 1e-9
+        dt_s = float(t_us[1] - t_us[0]) * 1e-6
         if dt_s <= 0:
             logger.warning("Non-positive sample interval; skipping aggregation.")
         else:
@@ -289,7 +289,6 @@ def main():
         )
         ax_mean = None
 
-    t_us = t_ns * 1e-3
     cmap = plt.get_cmap("viridis")
     for i in range(n_pulses):
         ax_traces.plot(

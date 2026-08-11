@@ -127,14 +127,13 @@ class DryRunTank:
         v_scale = voltage_V / self._nominal_voltage
         return self._peak_amp_Pa * gauss * freq_gain * v_scale
 
-    def _synth_trace(self, amp_Pa, z_mm, t_ns):
+    def _synth_trace(self, amp_Pa, z_mm, t_us):
         """Return a synthetic trace: raised-cosine burst at expected arrival.
 
-        ``t_ns`` is the emission-referenced time axis, so the arrival
-        time is simply ``z_mm / SOS`` (SOS = 1.5 mm/µs in water) with
-        no transmit-delay offset applied.
+        ``t_us`` is the emission-referenced time axis (\u00b5s), so the
+        arrival time is simply ``z_mm / SOS`` (SOS = 1.5 mm/\u00b5s in
+        water) with no transmit-delay offset applied.
         """
-        t_us = t_ns * 1e-3
         arrival_us = float(z_mm) / 1.5
         # 20-cycle burst @ current frequency.
         cycles = 20.0
@@ -151,18 +150,19 @@ class DryRunTank:
         return trace
 
     def _make_time_axis(self, time_start_s, time_stop_s, sampling_interval_ns):
+        """Emission-referenced time axis in \u00b5s (matches VerificationTank)."""
         n = int(round((time_stop_s - time_start_s) / (sampling_interval_ns * 1e-9))) + 1
-        return np.linspace(time_start_s * 1e9, time_stop_s * 1e9, n)
+        return np.linspace(time_start_s * 1e6, time_stop_s * 1e6, n)
 
     # --- measurement APIs ---------------------------------------------
     def measure_pressure(self, x, y, z, *,
                          time_start_s=-14e-6, time_stop_s=86e-6,
                          sampling_interval_ns=100, timeout_s=2.0):
-        t_ns = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
+        t_us = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
         amp = self._amplitude_Pa(x, y)
-        trace = self._synth_trace(amp, z, t_ns)
+        trace = self._synth_trace(amp, z, t_us)
         return {
-            "t": t_ns,
+            "t": t_us,
             "trace": trace,
             "rms": float(np.sqrt(np.mean(trace ** 2))),
             "vpp": float(np.max(trace) - np.min(trace)),
@@ -182,13 +182,68 @@ class DryRunTank:
 
     # --- scan APIs -----------------------------------------------------
     def _scan_grid(self, xs, ys, z, time_start_s, time_stop_s, sampling_interval_ns):
-        t_ns = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
-        traces = np.empty((len(ys), len(xs), t_ns.size), dtype=float)
+        t_us = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
+        traces = np.empty((len(ys), len(xs), t_us.size), dtype=float)
         for iy, y in enumerate(ys):
             for ix, x in enumerate(xs):
                 amp = self._amplitude_Pa(x, y)
-                traces[iy, ix] = self._synth_trace(amp, z, t_ns)
-        return t_ns, traces
+                traces[iy, ix] = self._synth_trace(amp, z, t_us)
+        return t_us, traces
+
+    def scan_1d(self, *, dim, scan_range=(-10.0, 10.0), num=41,
+                absolute=False, x=0.0, y=0.0, z=None,
+                time_start_s=-14e-6, time_stop_s=86e-6,
+                sampling_interval_ns=100, chunk_size=0, timeout_s=None,
+                n_averages=1, align=True, align_max_shift_samples=None,
+                progress="bar") -> ScanResult:
+        """1-D synthetic scan along ``dim`` (``"x"``, ``"y"``, or ``"z"``).
+
+        Mirrors :meth:`VerificationTank.scan_1d`. The other two
+        coordinates are held fixed at the calibrated hydrophone
+        position (or at ``(x, y, z)`` when ``absolute=True``).
+        """
+        dim = str(dim).lower()
+        if dim not in ("x", "y", "z"):
+            raise ValueError(f"dim must be 'x', 'y', or 'z' (got {dim!r})")
+        if absolute:
+            x_origin = y_origin = z_origin = 0.0
+        else:
+            x_origin = float(self.hydrophone_position[0])
+            y_origin = float(self.hydrophone_position[1])
+            z_origin = float(self.hydrophone_position[2])
+        z_fixed = z_origin if z is None else float(z)
+
+        coord_axis = np.linspace(scan_range[0], scan_range[1], num)
+        t_us = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
+        traces = np.empty((num, t_us.size), dtype=float)
+        for i, v in enumerate(coord_axis):
+            if dim == "x":
+                xi, yi, zi = float(v) + x_origin, float(y) + y_origin, z_fixed
+            elif dim == "y":
+                xi, yi, zi = float(x) + x_origin, float(v) + y_origin, z_fixed
+            else:  # "z"
+                xi, yi, zi = float(x) + x_origin, float(y) + y_origin, float(v) + z_origin
+            amp = self._amplitude_Pa(xi, yi)
+            traces[i] = self._synth_trace(amp, zi, t_us)
+
+        coord_key = {"x": "xfoci", "y": "yfoci", "z": "zfoci"}[dim]
+        return ScanResult(
+            scan_type="1d",
+            t=t_us,
+            traces=traces,
+            coords={coord_key: coord_axis},
+            hydrophone_channel=self.hydrophone_channel,
+            chunk_size=chunk_size or num,
+            units="Pa",
+            metadata={
+                "dim": dim,
+                "z_mm": float(z_fixed),
+                "frequency_kHz": float(self.frequency),
+                "voltage_V": float(self.hv_voltage) if self.hv_voltage else float("nan"),
+                "hydrophone_position_mm": self.hydrophone_position.copy(),
+                "absolute": bool(absolute),
+            },
+        )
 
     def scan_lateral(self, *, x_range=(-10.0, 10.0), num_x=41,
                      y_range=None, num_y=1, y=0.0, z=None, absolute=False,
@@ -209,7 +264,7 @@ class DryRunTank:
             ys = np.array([float(y)])
         xs_abs = xs + x_off
         ys_abs = ys + y_off
-        t_ns, grid = self._scan_grid(xs_abs, ys_abs, z, time_start_s,
+        t_us, grid = self._scan_grid(xs_abs, ys_abs, z, time_start_s,
                                      time_stop_s, sampling_interval_ns)
         if num_y > 1:
             coords = {"yfoci": ys, "xfoci": xs}
@@ -221,7 +276,7 @@ class DryRunTank:
             scan_type = "lateral"
         return ScanResult(
             scan_type=scan_type,
-            t=t_ns,
+            t=t_us,
             traces=traces,
             coords=coords,
             hydrophone_channel=self.hydrophone_channel,
@@ -250,25 +305,25 @@ class DryRunTank:
             chunk_size=chunk_size, timeout_s=timeout_s, progress=progress,
         )
 
-    def scan_frequency(self, *, frequencies_kHz, duration_msec,
+    def scan_frequency(self, *, frequencies_kHz, duration_usec,
                        time_start_s=-14e-6, time_stop_s=86e-6,
                        sampling_interval_ns=100, chunk_size=0,
                        timeout_s=None, progress="bar") -> ScanResult:
         freqs = np.asarray(list(frequencies_kHz), dtype=float)
-        t_ns = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
-        traces = np.empty((freqs.size, t_ns.size), dtype=float)
+        t_us = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
+        traces = np.empty((freqs.size, t_us.size), dtype=float)
         x, y, z = self.hydrophone_position
         original_freq = self.frequency
         try:
             for i, f in enumerate(freqs):
                 self.frequency = float(f)
                 amp = self._amplitude_Pa(x, y, freq_kHz=f)
-                traces[i] = self._synth_trace(amp, z, t_ns)
+                traces[i] = self._synth_trace(amp, z, t_us)
         finally:
             self.frequency = original_freq
         return ScanResult(
             scan_type="frequency",
-            t=t_ns,
+            t=t_us,
             traces=traces,
             coords={"freq_kHz": freqs},
             hydrophone_channel=self.hydrophone_channel,
@@ -276,7 +331,7 @@ class DryRunTank:
             units="Pa",
             metadata={
                 "voltage_V": float(self.hv_voltage) if self.hv_voltage else float("nan"),
-                "duration_msec": float(duration_msec),
+                "duration_usec": float(duration_usec),
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
             },
         )
@@ -286,20 +341,20 @@ class DryRunTank:
                      sampling_interval_ns=100, chunk_size=0,
                      timeout_s=None, progress="bar") -> ScanResult:
         voltages = np.asarray(list(voltages_V), dtype=float)
-        t_ns = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
-        traces = np.empty((voltages.size, t_ns.size), dtype=float)
+        t_us = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
+        traces = np.empty((voltages.size, t_us.size), dtype=float)
         x, y, z = self.hydrophone_position
         original_v = self.hv_voltage
         try:
             for i, v in enumerate(voltages):
                 self.hv_voltage = float(v)
                 amp = self._amplitude_Pa(x, y)
-                traces[i] = self._synth_trace(amp, z, t_ns)
+                traces[i] = self._synth_trace(amp, z, t_us)
         finally:
             self.hv_voltage = original_v
         return ScanResult(
             scan_type="voltage",
-            t=t_ns,
+            t=t_us,
             traces=traces,
             coords={"voltage_V": voltages},
             hydrophone_channel=self.hydrophone_channel,

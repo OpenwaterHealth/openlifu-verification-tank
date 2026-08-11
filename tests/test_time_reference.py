@@ -88,8 +88,8 @@ def test_run_capture_shifts_scope_by_transmit_delay(monkeypatch):
     assert result["time_start_s"] == pytest.approx(-14e-6, abs=1e-12)
     assert result["time_stop_s"] == pytest.approx(86e-6, abs=1e-12)
 
-    # And the sample times start at -14 us (in ns), NOT at +100 us.
-    assert result["time"][0] == pytest.approx(-14_000.0, abs=1.0)
+    # And the sample times start at -14 us, NOT at +100 us.
+    assert result["time"][0] == pytest.approx(-14.0, abs=1e-3)
 
 
 def test_run_capture_zero_delay_is_identity(monkeypatch):
@@ -142,8 +142,8 @@ def test_configure_and_finish_rapid_capture_shift_both_boundaries():
     # way finish_rapid_capture does. This mirrors the production code
     # path we care about.
     delay_s = tank.system_transmit_delay_us * 1e-6
-    time_ns = np.arange(n, dtype=float) + (plan["time_start_s"] - delay_s) * 1e9
-    assert time_ns[0] == pytest.approx(-14_000.0, abs=1.0)
+    time_us = (np.arange(n, dtype=float) + (plan["time_start_s"] - delay_s) * 1e9) * 1e-3
+    assert time_us[0] == pytest.approx(-14.0, abs=1e-3)
 
 
 def test_dry_run_tank_arrival_is_emission_relative():
@@ -161,7 +161,7 @@ def test_dry_run_tank_arrival_is_emission_relative():
         time_start_s=-14e-6, time_stop_s=86e-6,
         sampling_interval_ns=100,
     )
-    t_us = meas["t"] * 1e-3
+    t_us = meas["t"]
     trace = np.asarray(meas["trace"])
     peak_idx = int(np.argmax(np.abs(trace)))
     peak_time_us = float(t_us[peak_idx])

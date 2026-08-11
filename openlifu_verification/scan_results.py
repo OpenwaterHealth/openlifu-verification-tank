@@ -35,7 +35,7 @@ class ScanResult:
     Attributes:
         scan_type: One of ``"lateral"``, ``"2d"``, ``"frequency"``,
             ``"voltage"`` (or ``"generic"`` for anything else).
-        t: 1-D time axis in ns, shared by every trace.
+        t: 1-D time axis in µs, shared by every trace.
         traces: N-D array of hydrophone traces. The last axis is the
             sample axis; the leading axes correspond to the coord axes
             in ``coords`` in the same order.
@@ -147,17 +147,21 @@ class ScanResult:
         if ax is None:
             fig, ax = plt.subplots()
 
+        # Display convention: calibrated (Pa) scans are shown in kPa
+        # (closer to the working scale). Raw mV traces are left alone.
+        y_scale, y_unit = self._display_scale_unit()
+
         if kind == "line":
             if n_coord_axes != 1:
                 raise ValueError(
                     f"kind='line' needs 1 coord axis, got {n_coord_axes} ({coord_names})."
                 )
-            values = self.reduce(reduce)
+            values = self.reduce(reduce) * y_scale
             xname = coord_names[0]
             x = self.coords[xname]
             ax.plot(x, values, ".-", **kwargs)
-            ax.set_xlabel(_axis_label(xname))
-            ax.set_ylabel(self._reduction_label(reduce))
+            ax.set_xlabel(self._coord_axis_label(xname))
+            ax.set_ylabel(self._reduction_label(reduce, y_unit))
             ax.grid(True)
 
         elif kind == "heatmap":
@@ -165,7 +169,7 @@ class ScanResult:
                 raise ValueError(
                     f"kind='heatmap' needs 2 coord axes, got {n_coord_axes} ({coord_names})."
                 )
-            values = self.reduce(reduce)  # shape (rows, cols)
+            values = self.reduce(reduce) * y_scale  # shape (rows, cols)
             row_name, col_name = coord_names  # dict is insertion-ordered
             rows = self.coords[row_name]
             cols = self.coords[col_name]
@@ -175,16 +179,16 @@ class ScanResult:
                         float(rows[0]), float(rows[-1])],
                 **kwargs,
             )
-            ax.set_xlabel(_axis_label(col_name))
-            ax.set_ylabel(_axis_label(row_name))
-            fig.colorbar(im, ax=ax, label=self._reduction_label(reduce))
+            ax.set_xlabel(self._coord_axis_label(col_name))
+            ax.set_ylabel(self._coord_axis_label(row_name))
+            fig.colorbar(im, ax=ax, label=self._reduction_label(reduce, y_unit))
 
         elif kind == "trace":
             idx = self._resolve_trace_index(index)
-            trace = self.traces[idx]
+            trace = self.traces[idx] * y_scale
             ax.plot(self.t, trace, **kwargs)
-            ax.set_xlabel("time (ns)")
-            ax.set_ylabel(self._trace_label())
+            ax.set_xlabel("time (\u00b5s)")
+            ax.set_ylabel(self._trace_label(y_unit))
             ax.grid(True)
 
         elif kind == "trace_image":
@@ -192,7 +196,7 @@ class ScanResult:
                 raise ValueError(
                     f"kind='trace_image' needs 1 coord axis, got {n_coord_axes}."
                 )
-            traces = self.traces  # (N, samples)
+            traces = self.traces * y_scale  # (N, samples)
             xname = coord_names[0]
             x = self.coords[xname]
             im = ax.imshow(
@@ -201,9 +205,9 @@ class ScanResult:
                         float(x[0]), float(x[-1])],
                 **kwargs,
             )
-            ax.set_xlabel("time (ns)")
-            ax.set_ylabel(_axis_label(xname))
-            fig.colorbar(im, ax=ax, label=self._trace_label())
+            ax.set_xlabel("time (\u00b5s)")
+            ax.set_ylabel(self._coord_axis_label(xname))
+            fig.colorbar(im, ax=ax, label=self._trace_label(y_unit))
 
         else:
             raise ValueError(
@@ -330,14 +334,49 @@ class ScanResult:
             base += " (" + ", ".join(meta_bits) + ")"
         return base
 
-    def _reduction_label(self, reduction: str) -> str:
+    def _reduction_label(self, reduction: str, unit: str | None = None) -> str:
         """Human-readable label for a reduction, respecting ``self.units``."""
         base = _REDUCTION_BASES.get(reduction.lower(), reduction)
-        return f"{base} ({self.units})"
+        if unit is None:
+            unit = self._display_scale_unit()[1]
+        return f"{base} ({unit})"
 
-    def _trace_label(self) -> str:
+    def _trace_label(self, unit: str | None = None) -> str:
         """Y-axis label for a raw trace plot."""
-        return f"hydrophone ({self.units})"
+        if unit is None:
+            unit = self._display_scale_unit()[1]
+        return f"hydrophone ({unit})"
+
+    def _display_scale_unit(self) -> tuple[float, str]:
+        """Return ``(scale, display_unit)`` for plot y-values.
+
+        Pa scans are rendered in kPa (closer to the working range for
+        LIFU output); mV and any other units pass through unchanged.
+        """
+        if self.units == "Pa":
+            return 1e-3, "kPa"
+        return 1.0, self.units
+
+    def _coord_axis_label(self, name: str) -> str:
+        """X/Y axis label for a coord axis.
+
+        For ``scan_type == "1d"`` sweeps we render the axis as
+        ``Δ<dim> (<dim>_0 = <val> mm)`` where ``<val>`` is the
+        calibrated origin (hydrophone position) in relative mode or
+        0 in absolute mode.
+        """
+        if self.scan_type == "1d" and name in _1D_COORD_TO_DIM:
+            dim = _1D_COORD_TO_DIM[name]
+            axis_index = _DIM_TO_INDEX[dim]
+            meta = self.metadata or {}
+            if meta.get("absolute", False):
+                origin = 0.0
+            else:
+                pos = meta.get("hydrophone_position_mm")
+                origin = float(np.asarray(pos)[axis_index]) if pos is not None else 0.0
+            subscript = "\u2080"  # unicode subscript zero
+            return f"\u0394{dim} ({dim}{subscript} = {origin:.2f} mm)"
+        return _axis_label(name)
 
 
 # ----------------------------------------------------------------------
@@ -352,6 +391,10 @@ _AXIS_LABELS = {
     "voltages": "input voltage (V)",
     "voltage_V": "input voltage (V)",
 }
+# Coord-name → axis letter used by scan_1d and DryRunTank.scan_1d. Used
+# by ``ScanResult._coord_axis_label`` to render the "Δ<dim>" label.
+_1D_COORD_TO_DIM = {"xfoci": "x", "yfoci": "y", "zfoci": "z"}
+_DIM_TO_INDEX = {"x": 0, "y": 1, "z": 2}
 _REDUCTION_LABELS = {
     "vpp": "Vpp (mV)",
     "vmin": "V min (mV)",

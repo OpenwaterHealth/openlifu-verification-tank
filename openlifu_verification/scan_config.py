@@ -104,6 +104,7 @@ class ScanConfig:
     scope: ScopeCapture = field(default_factory=ScopeCapture)
     lateral_1d: Scan1D = field(default_factory=Scan1D)
     elevation_1d: Scan1D = field(default_factory=Scan1D)
+    axial_1d: Scan1D = field(default_factory=Scan1D)
     scan_2d: Scan2D = field(default_factory=Scan2D)
     frequency_sweep: FrequencySweep = field(default_factory=FrequencySweep)
     voltage_sweep: VoltageSweep = field(default_factory=VoltageSweep)
@@ -131,6 +132,7 @@ class ScanConfig:
             scope=ScopeCapture(**data.get("scope", {})),
             lateral_1d=Scan1D(**data.get("lateral_1d", {})),
             elevation_1d=Scan1D(**data.get("elevation_1d", {})),
+            axial_1d=Scan1D(**data.get("axial_1d", {})),
             scan_2d=Scan2D(**data.get("scan_2d", {})),
             frequency_sweep=FrequencySweep(**data.get("frequency_sweep", {})),
             voltage_sweep=VoltageSweep(**data.get("voltage_sweep", {})),

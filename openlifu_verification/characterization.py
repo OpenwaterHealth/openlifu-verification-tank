@@ -67,10 +67,11 @@ ROW = {
     "scan_2d_image":     "D.2",
     "lateral_image":     "D.3",
     "elevation_image":   "D.4",
-    "waveform_image":    "D.5",
-    "pnp_at_peak_MPa":   "D.6",
-    "axial_depth_mm":    "D.7",
-    "arrival_us":        "D.8",
+    "axial_image":       "D.5",
+    "waveform_image":    "D.6",
+    "pnp_at_peak_MPa":   "D.7",
+    "axial_depth_mm":    "D.8",
+    "arrival_us":        "D.9",
 }
 
 # Scan geometry defaults kept as module constants for backward compat;
@@ -144,7 +145,7 @@ class TestReport:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
-def _find_arrival_us(t_ns: np.ndarray, trace: np.ndarray,
+def _find_arrival_us(t_us: np.ndarray, trace: np.ndarray,
                      *, envelope_frac: float = 0.15,
                      skip_us: float = 0.0) -> Optional[float]:
     """First-arrival time (\u00b5s) via Hilbert-envelope threshold crossing.
@@ -152,7 +153,7 @@ def _find_arrival_us(t_ns: np.ndarray, trace: np.ndarray,
     Returns ``None`` if no sample of the envelope exceeds ``envelope_frac``
     of the peak envelope (i.e. no clear signal).
     """
-    t_us = np.asarray(t_ns, dtype=float) * 1e-3
+    t_us = np.asarray(t_us, dtype=float)
     if skip_us > 0:
         mask = t_us >= skip_us
         if not mask.any():
@@ -373,30 +374,39 @@ class Characterization:
         return float(x), float(y)
 
     def run_beam_scans(self) -> dict:
-        """Run 1-D lateral, 1-D elevation, and the 2-D grid scan.
+        """Run 1-D lateral, 1-D elevation, 1-D axial, and 2-D scans.
 
         Geometry (extents / point counts) comes from
         :attr:`scan_config`; results are stored under
-        ``"lateral_1d"``, ``"elevation_1d"``, ``"scan_2d"``.
+        ``"lateral_1d"``, ``"elevation_1d"``, ``"axial_1d"``,
+        ``"scan_2d"``.
         """
         cfg = self.scan_config
         scope_kw = cfg.scope_kwargs()
         ext = cfg.lateral_1d.extent_mm
         pts = cfg.lateral_1d.points
 
-        logger.info("Running 1-D lateral scan (\u00b1%.1f mm, %d pts)...", ext, pts)
-        lat = self.ver.scan_lateral(
-            x_range=(-ext, ext), num_x=pts, num_y=1, y=0.0,
+        logger.info("Running 1-D lateral (x) scan (\u00b1%.1f mm, %d pts)...", ext, pts)
+        lat = self.ver.scan_1d(
+            dim="x", scan_range=(-ext, ext), num=pts,
             absolute=False, **scope_kw,
         )
 
         ext_e = cfg.elevation_1d.extent_mm
         pts_e = cfg.elevation_1d.points
-        logger.info("Running 1-D elevation scan (\u00b1%.1f mm, %d pts)...", ext_e, pts_e)
-        # Elevation scan = single-x, multiple-y "lateral" call.
-        elev = self.ver.scan_lateral(
-            x_range=(0.0, 0.0), num_x=1,
-            y_range=(-ext_e, ext_e), num_y=pts_e,
+        logger.info("Running 1-D elevation (y) scan (\u00b1%.1f mm, %d pts)...",
+                    ext_e, pts_e)
+        elev = self.ver.scan_1d(
+            dim="y", scan_range=(-ext_e, ext_e), num=pts_e,
+            absolute=False, **scope_kw,
+        )
+
+        ext_a = cfg.axial_1d.extent_mm
+        pts_a = cfg.axial_1d.points
+        logger.info("Running 1-D axial (z) scan (\u00b1%.1f mm, %d pts)...",
+                    ext_a, pts_a)
+        axial = self.ver.scan_1d(
+            dim="z", scan_range=(-ext_a, ext_a), num=pts_a,
             absolute=False, **scope_kw,
         )
 
@@ -411,8 +421,10 @@ class Characterization:
 
         self.report.scans["lateral_1d"] = lat
         self.report.scans["elevation_1d"] = elev
+        self.report.scans["axial_1d"] = axial
         self.report.scans["scan_2d"] = two_d
-        return {"lateral_1d": lat, "elevation_1d": elev, "scan_2d": two_d}
+        return {"lateral_1d": lat, "elevation_1d": elev,
+                "axial_1d": axial, "scan_2d": two_d}
 
     def measure_waveform_at_peak(self) -> dict:
         """Fire one pulse at the peak; compute PNP + axial depth.
@@ -455,13 +467,14 @@ class Characterization:
         }
         self.report.waveform_at_peak = result
 
-        # D.2 - D.5 are figure cross-references so the row grid isn't
+        # D.2 - D.6 are figure cross-references so the row grid isn't
         # sparse in the PDF/XLSX. The figures themselves are still
         # embedded on the "Figures" sheet / PDF pages.
         self.report.set_row(ROW["scan_2d_image"],   "2-D XY Scan",       "see Figure 1")
         self.report.set_row(ROW["lateral_image"],   "1-D Lateral Scan",  "see Figure 2")
         self.report.set_row(ROW["elevation_image"], "1-D Elevation Scan","see Figure 3")
-        self.report.set_row(ROW["waveform_image"],  "Waveform at Peak",  "see Figure 4")
+        self.report.set_row(ROW["axial_image"],     "1-D Axial Scan",    "see Figure 4")
+        self.report.set_row(ROW["waveform_image"],  "Waveform at Peak",  "see Figure 5")
 
         self.report.set_row(ROW["pnp_at_peak_MPa"], "PNP at Peak", pnp_MPa, unit="MPa")
         self.report.set_row(ROW["axial_depth_mm"], "Axial Depth of Peak",
@@ -478,18 +491,20 @@ class Characterization:
         )
         return result
 
-    def sweep_frequency(self, *, duration_msec: Optional[float] = None) -> ScanResult:
+    def sweep_frequency(self, *, duration_usec: Optional[float] = None) -> ScanResult:
         """Sweep pulse frequency around nominal; fill E.2 - E.9."""
         cfg = self.scan_config
         freqs = self.frequency_kHz + np.asarray(cfg.frequency_sweep.offsets_kHz,
                                                 dtype=float)
-        if duration_msec is None:
-            duration_msec = float(cfg.frequency_sweep.cycles_per_burst) / self.frequency_kHz
+        if duration_usec is None:
+            # cycles / freq_kHz => ms; ×1000 => µs.
+            duration_usec = (float(cfg.frequency_sweep.cycles_per_burst)
+                             / self.frequency_kHz) * 1000.0
         self._apply_baseline_range()
         logger.info("Frequency sweep across %s kHz...", freqs.tolist())
         result = self.ver.scan_frequency(
             frequencies_kHz=freqs,
-            duration_msec=duration_msec,
+            duration_usec=duration_usec,
             **cfg.scope_kwargs(),
         )
         # Per-freq PNP.

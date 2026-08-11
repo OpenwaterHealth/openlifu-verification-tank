@@ -29,7 +29,7 @@ def main():
     settings = {
         "frequency_kHz": VerificationTank.DEFAULT_FREQUENCY_KHZ,
         "voltage": 10.0,
-        "duration_msec": 10 / VerificationTank.DEFAULT_FREQUENCY_KHZ,
+        "duration_usec": (10 / VerificationTank.DEFAULT_FREQUENCY_KHZ) * 1000.0,
         "interval_msec": 50,
         "pulse_count": 3,
         "pulse_train_interval_msec": 0,
@@ -77,7 +77,7 @@ def main():
                 "  stop                              - stop_sonication + HV off\n"
                 "  single                            - switch to single mode, fire one pulse train, stop\n"
                 "  <param>=<value>                   - update a configure_lifu setting, e.g. voltage=12,\n"
-                "                                      trigger_mode=single, duration_msec=0.05,\n"
+                "                                      trigger_mode=single, duration_usec=50,\n"
                 "                                      frequency_kHz=400, pulse_count=1, ...\n"
                 "  x=<mm> / y=<mm> / z=<mm>          - update one focus coordinate\n"
                 "  x,y,z                             - set focus in mm (three comma-separated values)\n"

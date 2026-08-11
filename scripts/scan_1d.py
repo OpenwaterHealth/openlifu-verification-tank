@@ -1,16 +1,19 @@
-"""CLI wrapper: lateral (x) focus scan.
+"""CLI wrapper: generic 1-D focus scan.
 
 Delegates all the heavy lifting to
-:meth:`openlifu_verification.VerificationTank.scan_lateral`. Use
-``--num-y`` and ``--y-range`` to promote it to a 2-D grid; if you know
-you want a 2-D grid, prefer ``scan_2d.py`` for the more natural
-defaults.
+:meth:`openlifu_verification.VerificationTank.scan_1d`. Sweeps the
+focus along a single axis (``--dim x``, ``y``, or ``z``) with the other
+two coords held fixed at either the calibrated hydrophone position
+(default) or absolute values.
+
+If you want a 2-D grid, use ``scan_2d.py``.
 
 Examples::
 
-    python scripts/scan_lat.py --num-x 41
-    python scripts/scan_lat.py --num-x 41 --save-plot lat.png
-    python scripts/scan_lat.py --no-plot            # data-only headless run
+    python scripts/scan_1d.py --dim x --num 41
+    python scripts/scan_1d.py --dim y --num 41 --range -5 5
+    python scripts/scan_1d.py --dim z --num 21 --range -10 10 --save-plot axial.png
+    python scripts/scan_1d.py --dim x --no-plot            # data-only headless run
 """
 import argparse
 import logging
@@ -39,24 +42,32 @@ def main():
     parser.add_argument("--voltage", type=float, default=None,
                         help="HV rail in V "
                              "(default: VerificationTank.DEFAULT_VOLTAGE_V).")
-    parser.add_argument("--duration-msec", type=float, default=None,
-                        help="Pulse duration in ms "
+    parser.add_argument("--duration-usec", type=float, default=None,
+                        help="Pulse duration in µs "
                              "(default: cycles / frequency).")
     parser.add_argument("--interval-msec", type=float, default=None,
                         help="Pulse interval in ms "
                              "(default: VerificationTank.DEFAULT_INTERVAL_MSEC).")
     # --- Scan geometry ---
-    parser.add_argument("--num-x", type=int, default=41)
-    parser.add_argument("--x-range", type=float, nargs=2, default=[-10.0, 10.0])
-    parser.add_argument("--num-y", type=int, default=1)
-    parser.add_argument("--y-range", type=float, nargs=2, default=None,
-                        help="y range in mm; required if num-y > 1.")
+    parser.add_argument("--dim", type=str, choices=["x", "y", "z"], default="x",
+                        help="Which axis to sweep.")
+    parser.add_argument("--range", type=float, nargs=2, default=[-10.0, 10.0],
+                        dest="scan_range",
+                        help="(min, max) in mm along the swept axis.")
+    parser.add_argument("--num", type=int, default=41,
+                        help="Number of samples across --range.")
+    parser.add_argument("--x", type=float, default=0.0,
+                        help="Fixed x offset when --dim is y or z. "
+                             "Ignored when --dim x.")
     parser.add_argument("--y", type=float, default=0.0,
-                        help="y coordinate when num-y == 1.")
+                        help="Fixed y offset when --dim is x or z. "
+                             "Ignored when --dim y.")
     parser.add_argument("--z", type=float, default=None,
-                        help="Depth in mm. Defaults to the calibrated hydrophone_position[2].")
+                        help="Fixed depth in mm when --dim is x or y. "
+                             "Defaults to the calibrated hydrophone_position[2]. "
+                             "Ignored when --dim z.")
     parser.add_argument("--absolute", action="store_true",
-                        help="Treat x/y as absolute coords (skip offset by the hydrophone position).")
+                        help="Treat x/y/z as absolute coords (skip offset by the hydrophone position).")
     # --- Hydrophone / calibration ---
     parser.add_argument("--hydrophone", type=str, default="",
                         help="Hydrophone calibration file or bare ID. "
@@ -120,17 +131,17 @@ def main():
             ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
                 voltage=args.voltage,
-                duration_msec=args.duration_msec,
+                duration_usec=args.duration_usec,
                 interval_msec=args.interval_msec,
             )
             ver.enable_hv_output(wait=True)
             input("Press Enter to start")
 
             scan_kwargs = dict(
-                x_range=tuple(args.x_range),
-                num_x=args.num_x,
-                y_range=tuple(args.y_range) if args.y_range is not None else None,
-                num_y=args.num_y,
+                dim=args.dim,
+                scan_range=tuple(args.scan_range),
+                num=args.num,
+                x=args.x,
                 y=args.y,
                 absolute=args.absolute,
                 chunk_size=args.chunk_size,
@@ -140,13 +151,13 @@ def main():
             )
             if args.z is not None:
                 scan_kwargs["z"] = args.z
-            result = ver.scan_lateral(**scan_kwargs)
+            result = ver.scan_1d(**scan_kwargs)
     except (ConnectionError, ValueError, Exception) as e:
         logger.error("Scan aborted: %s", e)
         raise
 
     if args.save_data:
-        out = Path(__file__).parent.resolve() / "data" / "scan_lat_data.npz"
+        out = Path(__file__).parent.resolve() / "data" / f"scan_1d_{args.dim}_data.npz"
         result.save(out)
 
     if args.plot or args.save_plot:

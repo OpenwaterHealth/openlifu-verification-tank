@@ -45,9 +45,10 @@ def test_defaults_when_nothing_passed():
     r = _call_apply_pulse()
     assert r["frequency_kHz"] == VerificationTank.DEFAULT_FREQUENCY_KHZ
     assert r["voltage"] == VerificationTank.DEFAULT_VOLTAGE_V
+    # cycles / freq_kHz => ms; \u00d71000 => \u00b5s.
     expected_duration = (VerificationTank.DEFAULT_CYCLES_PER_BURST
-                         / VerificationTank.DEFAULT_FREQUENCY_KHZ)
-    assert r["duration_msec"] == expected_duration
+                         / VerificationTank.DEFAULT_FREQUENCY_KHZ) * 1000.0
+    assert r["duration_usec"] == expected_duration
     assert r["interval_msec"] == VerificationTank.DEFAULT_INTERVAL_MSEC
     assert r["pulse_count"] == VerificationTank.DEFAULT_PULSE_COUNT
     assert r["trigger_mode"] == VerificationTank.DEFAULT_TRIGGER_MODE
@@ -56,32 +57,32 @@ def test_defaults_when_nothing_passed():
 def test_explicit_kwargs_override_defaults():
     r = _call_apply_pulse(
         frequency_kHz=155.0, voltage=42.5,
-        duration_msec=0.5, interval_msec=100.0,
+        duration_usec=500.0, interval_msec=100.0,
         pulse_count=8, trigger_mode="single",
     )
     assert r["frequency_kHz"] == 155.0
     assert r["voltage"] == 42.5
-    assert r["duration_msec"] == 0.5
+    assert r["duration_usec"] == 500.0
     assert r["interval_msec"] == 100.0
     assert r["pulse_count"] == 8
     assert r["trigger_mode"] == "single"
 
 
 def test_duration_derived_from_cycles_when_omitted():
-    """When ``duration_msec`` is not passed but ``cycles_per_burst`` is,
-    duration should track cycles / freq."""
+    """When ``duration_usec`` is not passed but ``cycles_per_burst`` is,
+    duration should track cycles / freq * 1000."""
     r = _call_apply_pulse(frequency_kHz=200.0, cycles_per_burst=40.0)
-    assert r["duration_msec"] == 40.0 / 200.0
+    assert r["duration_usec"] == (40.0 / 200.0) * 1000.0
 
 
 def test_explicit_duration_wins_over_cycles():
-    """Explicit ``duration_msec`` must not be overwritten by the
+    """Explicit ``duration_usec`` must not be overwritten by the
     cycles/frequency derivation."""
     r = _call_apply_pulse(
         frequency_kHz=200.0, cycles_per_burst=40.0,
-        duration_msec=0.123,
+        duration_usec=123.0,
     )
-    assert r["duration_msec"] == 0.123
+    assert r["duration_usec"] == 123.0
 
 
 def test_pulse_count_and_trigger_mode_forwarded():

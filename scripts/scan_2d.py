@@ -32,7 +32,8 @@ def main():
     parser.add_argument("--frequency-khz", type=float, default=None)
     parser.add_argument("--voltage", type=float, default=None,
                         help="HV rail in V (default: VerificationTank.DEFAULT_VOLTAGE_V).")
-    parser.add_argument("--duration-msec", type=float, default=None)
+    parser.add_argument("--duration-usec", type=float, default=None,
+                        help="Pulse duration in µs (default: cycles / frequency).")
     parser.add_argument("--interval-msec", type=float, default=None)
     # --- Scan geometry ---
     parser.add_argument("--num-x", type=int, default=9)
@@ -98,7 +99,7 @@ def main():
             ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
                 voltage=args.voltage,
-                duration_msec=args.duration_msec,
+                duration_usec=args.duration_usec,
                 interval_msec=args.interval_msec,
             )
             ver.enable_hv_output(wait=True)

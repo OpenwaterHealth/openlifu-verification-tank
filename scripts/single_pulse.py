@@ -31,7 +31,8 @@ def main():
     parser.add_argument("--voltage", type=float, default=12.0,
                         help="HV rail (V). Single-pulse defaults to 12 V for "
                              "safety; override to hit the full drive rail.")
-    parser.add_argument("--duration-msec", type=float, default=None)
+    parser.add_argument("--duration-usec", type=float, default=None,
+                        help="Pulse duration in µs (default: cycles / frequency).")
     parser.add_argument("--interval-msec", type=float, default=None)
     # --- Focus ---
     parser.add_argument("--x", type=float, default=0.0)
@@ -82,7 +83,7 @@ def main():
             resolved = ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
                 voltage=args.voltage,
-                duration_msec=args.duration_msec,
+                duration_usec=args.duration_usec,
                 interval_msec=args.interval_msec,
             )
             ver.set_focus(args.x, args.y, args.z)

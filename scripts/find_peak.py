@@ -38,8 +38,8 @@ def main():
                              "typically wants a lower voltage than the full "
                              "sweep, so this defaults to 12 V rather than "
                              "VerificationTank.DEFAULT_VOLTAGE_V.")
-    parser.add_argument("--duration-msec", type=float, default=None,
-                        help="Pulse duration (ms). Defaults to 20 cycles.")
+    parser.add_argument("--duration-usec", type=float, default=None,
+                        help="Pulse duration (µs). Defaults to 20 cycles.")
     parser.add_argument("--interval-msec", type=float, default=None)
     # --- Search geometry ---
     parser.add_argument("--z", type=float, default=None,
@@ -106,7 +106,7 @@ def main():
             ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
                 voltage=args.voltage,
-                duration_msec=args.duration_msec,
+                duration_usec=args.duration_usec,
                 interval_msec=args.interval_msec,
             )
             ver.enable_hv_output(wait=True)

@@ -176,14 +176,26 @@ def build_figures(report: TestReport) -> dict:
     figs: dict = {}
     scans = report.scans
 
+    # Helper: figure out the origin for a 1-D scan's Δ-axis label. In
+    # relative mode (Characterization always runs relative) the origin
+    # is the calibrated hydrophone position; in absolute mode it's 0.
+    def _scan_origin(s, axis_index: int) -> float:
+        meta = getattr(s, "metadata", {}) or {}
+        if meta.get("absolute", False):
+            return 0.0
+        pos = meta.get("hydrophone_position_mm")
+        if pos is None:
+            return 0.0
+        return float(np.asarray(pos)[axis_index])
+
     # Figure 1: 2-D XY heatmap.
     s2d = scans.get("scan_2d")
     if s2d is not None:
         xs = s2d.coords.get("xfoci")
         ys = s2d.coords.get("yfoci")
-        pnp = _pnp_MPa_grid(s2d.traces)
+        pnp_kPa = _pnp_MPa_grid(s2d.traces) * 1000.0
         fig, ax = plt.subplots(figsize=(5, 4.2))
-        im = ax.imshow(pnp,
+        im = ax.imshow(pnp_kPa,
                        extent=(float(xs[0]), float(xs[-1]),
                                float(ys[0]), float(ys[-1])),
                        origin="lower", aspect="equal", cmap="viridis")
@@ -192,7 +204,7 @@ def build_figures(report: TestReport) -> dict:
         ax.set_ylabel("Y offset (mm)")
         ax.set_title(f"Figure 1: 2-D XY PNP map @ {report.frequency_kHz:.0f} kHz, "
                      f"{report.voltage_V:.0f} V")
-        fig.colorbar(im, ax=ax, label="PNP (MPa)")
+        fig.colorbar(im, ax=ax, label="PNP (kPa)")
         fig.tight_layout()
         figs["scan_2d"] = fig
 
@@ -201,12 +213,13 @@ def build_figures(report: TestReport) -> dict:
     if lat is not None:
         xs = lat.coords.get("xfoci")
         traces = lat.traces
-        pnp = _pnp_MPa_grid(traces)
+        pnp_kPa = _pnp_MPa_grid(traces) * 1000.0
+        x0 = _scan_origin(lat, 0)
         fig, ax = plt.subplots(figsize=(6, 3.2))
-        ax.plot(xs, pnp, "o-", lw=1.5)
+        ax.plot(xs, pnp_kPa, "o-", lw=1.5)
         ax.axvline(0.0, color="0.7", lw=0.7)
-        ax.set_xlabel("X offset from peak (mm)")
-        ax.set_ylabel("PNP (MPa)")
+        ax.set_xlabel(f"\u0394x (x\u2080 = {x0:.2f} mm)")
+        ax.set_ylabel("PNP (kPa)")
         ax.set_title(f"Figure 2: 1-D Lateral scan @ {report.frequency_kHz:.0f} kHz, "
                      f"{report.voltage_V:.0f} V")
         ax.grid(True, alpha=0.3)
@@ -218,30 +231,53 @@ def build_figures(report: TestReport) -> dict:
     if elev is not None:
         ys = elev.coords.get("yfoci")
         traces = elev.traces
-        # traces from scan_lateral with num_x=1, num_y=N is shape (N, 1, T)
+        # scan_1d returns (N, T); older scan_lateral (num_x=1, num_y=N)
+        # returned (N, 1, T). Handle both.
         traces_2d = np.atleast_2d(traces)
         if traces_2d.ndim == 3 and traces_2d.shape[1] == 1:
             traces_2d = traces_2d[:, 0, :]
-        pnp = _pnp_MPa_grid(traces_2d)
+        pnp_kPa = _pnp_MPa_grid(traces_2d) * 1000.0
+        y0 = _scan_origin(elev, 1)
         fig, ax = plt.subplots(figsize=(6, 3.2))
-        ax.plot(ys, pnp, "o-", lw=1.5, color="tab:orange")
+        ax.plot(ys, pnp_kPa, "o-", lw=1.5, color="tab:orange")
         ax.axvline(0.0, color="0.7", lw=0.7)
-        ax.set_xlabel("Y offset from peak (mm)")
-        ax.set_ylabel("PNP (MPa)")
+        ax.set_xlabel(f"\u0394y (y\u2080 = {y0:.2f} mm)")
+        ax.set_ylabel("PNP (kPa)")
         ax.set_title(f"Figure 3: 1-D Elevation scan @ {report.frequency_kHz:.0f} kHz, "
                      f"{report.voltage_V:.0f} V")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         figs["elevation_1d"] = fig
 
-    # Figure 4: Waveform at peak.
+    # Figure 4: 1-D axial (z sweep).
+    axi = scans.get("axial_1d")
+    if axi is not None:
+        zs = axi.coords.get("zfoci")
+        traces = axi.traces
+        traces_2d = np.atleast_2d(traces)
+        if traces_2d.ndim == 3 and traces_2d.shape[1] == 1:
+            traces_2d = traces_2d[:, 0, :]
+        pnp_kPa = _pnp_MPa_grid(traces_2d) * 1000.0
+        z0 = _scan_origin(axi, 2)
+        fig, ax = plt.subplots(figsize=(6, 3.2))
+        ax.plot(zs, pnp_kPa, "o-", lw=1.5, color="tab:green")
+        ax.axvline(0.0, color="0.7", lw=0.7)
+        ax.set_xlabel(f"\u0394z (z\u2080 = {z0:.2f} mm)")
+        ax.set_ylabel("PNP (kPa)")
+        ax.set_title(f"Figure 4: 1-D Axial scan @ {report.frequency_kHz:.0f} kHz, "
+                     f"{report.voltage_V:.0f} V")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        figs["axial_1d"] = fig
+
+    # Figure 5: Waveform at peak.
     wf = report.waveform_at_peak
     if wf:
-        t_us = np.asarray(wf["t"], dtype=float) * 1e-3
+        t_us = np.asarray(wf["t"], dtype=float)
         trace = np.asarray(wf["trace"], dtype=float)
         if wf.get("units", "Pa") == "Pa":
-            y = trace / 1e6
-            ylabel = "Pressure (MPa)"
+            y = trace / 1e3
+            ylabel = "Pressure (kPa)"
         else:
             y = trace
             ylabel = f"Amplitude ({wf.get('units', 'a.u.')})"
@@ -254,46 +290,48 @@ def build_figures(report: TestReport) -> dict:
             ax.legend(loc="upper right", fontsize=8)
         ax.set_xlabel("Time (\u00b5s)")
         ax.set_ylabel(ylabel)
+        pnp_kPa = float(wf.get("pnp_MPa", float("nan"))) * 1000.0
         ax.set_title(
-            f"Figure 4: Waveform at peak "
-            f"(PNP = {wf.get('pnp_MPa', float('nan')):.3f} MPa)"
+            f"Figure 5: Waveform at peak "
+            f"(PNP = {pnp_kPa:.1f} kPa)"
         )
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         figs["waveform_at_peak"] = fig
 
-    # Figure 5: Frequency response.
+    # Figure 6: Frequency response.
     fr = report.freq_response
     if fr:
         freqs = np.asarray(fr["frequencies_kHz"], dtype=float)
-        pnp = np.asarray(fr["pnp_MPa"], dtype=float)
+        pnp_kPa = np.asarray(fr["pnp_MPa"], dtype=float) * 1000.0
         fig, ax = plt.subplots(figsize=(6, 3.2))
-        ax.plot(freqs, pnp, "o-", lw=1.5)
+        ax.plot(freqs, pnp_kPa, "o-", lw=1.5)
         ax.axvline(report.frequency_kHz, color="0.6", lw=0.7,
                    label=f"nominal {report.frequency_kHz:.0f} kHz")
         ax.set_xlabel("Frequency (kHz)")
-        ax.set_ylabel("PNP (MPa)")
-        ax.set_title(f"Figure 5: Frequency response @ {report.voltage_V:.0f} V")
+        ax.set_ylabel("PNP (kPa)")
+        ax.set_title(f"Figure 6: Frequency response @ {report.voltage_V:.0f} V")
         ax.grid(True, alpha=0.3)
         ax.legend()
         fig.tight_layout()
         figs["freq_response"] = fig
 
-    # Figure 6: Voltage linearity.
+    # Figure 7: Voltage linearity.
     vr = report.voltage_response
     if vr:
         volts = np.asarray(vr["voltages_V"], dtype=float)
-        pnp = np.asarray(vr["pnp_MPa"], dtype=float)
-        slope = vr.get("slope_MPa_per_V", 0.0)
-        intercept = vr.get("intercept_MPa", 0.0)
+        pnp_kPa = np.asarray(vr["pnp_MPa"], dtype=float) * 1000.0
+        # Report stores slope/intercept in MPa; scale to kPa for display.
+        slope_kPa_per_V = float(vr.get("slope_MPa_per_V", 0.0)) * 1000.0
+        intercept_kPa = float(vr.get("intercept_MPa", 0.0)) * 1000.0
         r2 = vr.get("r2", float("nan"))
-        fit = slope * volts + intercept
+        fit = slope_kPa_per_V * volts + intercept_kPa
         fig, ax = plt.subplots(figsize=(6, 3.2))
-        ax.plot(volts, pnp, "o", label="measured")
+        ax.plot(volts, pnp_kPa, "o", label="measured")
         ax.plot(volts, fit, "-", lw=1, label=f"fit (R\u00b2={r2:.4f})")
         ax.set_xlabel("HV rail (V)")
-        ax.set_ylabel("PNP (MPa)")
-        ax.set_title(f"Figure 6: Voltage linearity @ {report.frequency_kHz:.0f} kHz")
+        ax.set_ylabel("PNP (kPa)")
+        ax.set_title(f"Figure 7: Voltage linearity @ {report.frequency_kHz:.0f} kHz")
         ax.grid(True, alpha=0.3)
         ax.legend()
         fig.tight_layout()
@@ -570,7 +608,7 @@ def write_csv_bundle(report: TestReport, out_dir: Path,
         wf_path = out_dir / "waveform_at_peak.csv"
         with wf_path.open("w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
-            w.writerow(["t_ns", f"trace_{wf.get('units', 'a.u.')}"])
+            w.writerow(["t_us", f"trace_{wf.get('units', 'a.u.')}"])
             for t_i, v_i in zip(wf["t"], wf["trace"]):
                 w.writerow([float(t_i), float(v_i)])
         np.savez_compressed(

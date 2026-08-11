@@ -271,7 +271,7 @@ class VerificationTank:
     def configure_lifu(self, 
                        frequency_kHz, 
                        voltage, 
-                       duration_msec, 
+                       duration_usec, 
                        interval_msec, 
                        pulse_count=1,
                        pulse_train_interval_msec = 0,
@@ -288,7 +288,7 @@ class VerificationTank:
 
         pulse = {
             "frequency": frequency_kHz * 1e3,
-            "duration": duration_msec * 1e-3,
+            "duration": duration_usec * 1e-6,
             "amplitude": 1.0,
         }
 
@@ -357,7 +357,7 @@ class VerificationTank:
                     frequency_kHz: float | None = None,
                     voltage: float | None = None,
                     cycles_per_burst: float | None = None,
-                    duration_msec: float | None = None,
+                    duration_usec: float | None = None,
                     interval_msec: float | None = None,
                     pulse_count: int | None = None,
                     pulse_train_interval_msec: float | None = None,
@@ -371,9 +371,9 @@ class VerificationTank:
         (``DEFAULT_FREQUENCY_KHZ``, ``DEFAULT_VOLTAGE_V``, ...) for
         anything the operator didn't explicitly override.
 
-        ``duration_msec`` is derived from ``cycles_per_burst /
-        frequency_kHz`` when not passed explicitly, so callers can
-        just specify "20 cycles" instead of computing the ms.
+        ``duration_usec`` is derived from ``cycles_per_burst /
+        frequency_kHz * 1000`` when not passed explicitly, so callers
+        can just specify "20 cycles" instead of computing the µs.
 
         Returns the fully-resolved keyword dict actually sent to
         :meth:`configure_lifu` (useful for logging / metadata).
@@ -381,12 +381,13 @@ class VerificationTank:
         freq = float(frequency_kHz if frequency_kHz is not None
                      else self.DEFAULT_FREQUENCY_KHZ)
         volt = float(voltage if voltage is not None else self.DEFAULT_VOLTAGE_V)
-        if duration_msec is None:
+        if duration_usec is None:
             cyc = float(cycles_per_burst if cycles_per_burst is not None
                         else self.DEFAULT_CYCLES_PER_BURST)
-            duration = cyc / freq
+            # cycles / freq_kHz => milliseconds; ×1000 => microseconds.
+            duration = cyc / freq * 1000.0
         else:
-            duration = float(duration_msec)
+            duration = float(duration_usec)
         interval = float(interval_msec if interval_msec is not None
                          else self.DEFAULT_INTERVAL_MSEC)
         pc = int(pulse_count if pulse_count is not None else self.DEFAULT_PULSE_COUNT)
@@ -395,7 +396,7 @@ class VerificationTank:
         ptc = int(pulse_train_count if pulse_train_count is not None else 1)
         tm = str(trigger_mode if trigger_mode is not None else self.DEFAULT_TRIGGER_MODE)
         resolved = dict(
-            frequency_kHz=freq, voltage=volt, duration_msec=duration,
+            frequency_kHz=freq, voltage=volt, duration_usec=duration,
             interval_msec=interval, pulse_count=pc,
             pulse_train_interval_msec=pti, pulse_train_count=ptc,
             trigger_mode=tm,
@@ -452,11 +453,11 @@ class VerificationTank:
                 if not self.lifu.txdevice.write_block(identifier=txi, start_address=addr, reg_values=reg_values):
                     logger.error(f"Error applying TX CHIP ID: {txi} registers")
 
-    def set_pulse(self, frequency_kHz, duration_msec):
+    def set_pulse(self, frequency_kHz, duration_usec):
         pulse_profile = Tx7332PulseProfile(
             profile=1,
             frequency=frequency_kHz*1e3,
-            cycles=int(duration_msec * frequency_kHz)
+            cycles=int(duration_usec * frequency_kHz / 1000.0)
         )
         self.lifu.txdevice.tx_registers.add_pulse_profile(pulse_profile)
         logger.debug("writing pulse registers...")
@@ -587,7 +588,7 @@ class VerificationTank:
 
         Returns:
             The scope data dict with:
-              - ``time``: sample times relative to emission (ns).
+              - ``time``: sample times relative to emission (µs).
               - one array per enabled channel (mV).
               - ``sampling_interval_ns``, ``time_start_s``,
                 ``time_stop_s``: actual applied values (emission frame).
@@ -630,10 +631,12 @@ class VerificationTank:
             # Shift the scope's zero-based time axis into the emission
             # frame: scope-relative start = plan["time_start_s"], then
             # subtract the transmit delay to expose emission-relative
-            # times to the caller.
+            # times to the caller. Convert ns → µs at the same step so
+            # everything downstream (ScanResult.t, waveform plots, ...)
+            # is in µs.
             interval_ns = plan["sampling_interval_ns"]
             offset_ns = (plan["time_start_s"] - delay_s) * 1e9
-            result["time"] = result["time"] + offset_ns
+            result["time"] = (result["time"] + offset_ns) * 1e-3
             result["sampling_interval_ns"] = interval_ns
             result["time_start_s"] = plan["time_start_s"] - delay_s
             result["time_stop_s"] = plan["time_stop_s"] - delay_s
@@ -672,7 +675,7 @@ class VerificationTank:
         Returns:
             Dict from :meth:`finish_rapid_capture` with:
 
-              - ``time``: 1-D sample-time axis (ns), zero at each
+              - ``time``: 1-D sample-time axis (µs), zero at each
                 segment's trigger.
               - one entry per enabled channel: ``(n_pulses, samples)``.
               - ``overflow``: 1-D int16, one entry per segment.
@@ -830,11 +833,12 @@ class VerificationTank:
                     logger.warning("reset_rapid_block raised: %s", e)
 
         # Shift time axis into the emission frame (see run_capture for
-        # details) and expose the actual applied window.
+        # details) and convert to µs so downstream ScanResult.t is in
+        # µs. Also expose the actual applied window.
         delay_s = self.system_transmit_delay_us * 1e-6
         interval_ns = plan["sampling_interval_ns"]
         offset_ns = (plan["time_start_s"] - delay_s) * 1e9
-        result["time"] = result["time"] + offset_ns
+        result["time"] = (result["time"] + offset_ns) * 1e-3
         result["sampling_interval_ns"] = interval_ns
         result["time_start_s"] = plan["time_start_s"] - delay_s
         result["time_stop_s"] = plan["time_stop_s"] - delay_s
@@ -1419,6 +1423,154 @@ class VerificationTank:
     # ------------------------------------------------------------------
     # High-level scans
     # ------------------------------------------------------------------
+    def scan_1d(self, *,
+                dim,
+                scan_range=(-10.0, 10.0),
+                num=41,
+                absolute=False,
+                x=0.0,
+                y=0.0,
+                z=None,
+                time_start_s=-14e-6,
+                time_stop_s=86e-6,
+                sampling_interval_ns=100,
+                chunk_size=0,
+                timeout_s=None,
+                n_averages=1,
+                align=True,
+                align_max_shift_samples=None,
+                progress="bar") -> ScanResult:
+        """Sweep the focus along a single spatial axis.
+
+        Generic 1-D scan along ``dim`` (``"x"``, ``"y"``, or ``"z"``).
+        The other two coordinates are held fixed at the values given
+        by ``x``, ``y``, ``z`` (or, when ``None`` / ``0``, at the
+        calibrated hydrophone position).
+
+        Requires the tank to be already configured
+        (:meth:`configure_lifu`) and HV enabled
+        (:meth:`enable_hv_output` with ``wait=True``).
+
+        Args:
+            dim: Which axis to sweep. One of ``"x"``, ``"y"``, ``"z"``.
+            scan_range: ``(min, max)`` in mm along ``dim``.
+            num: Number of samples across ``scan_range``.
+            absolute: If ``False`` (default), all three coordinates are
+                interpreted relative to the calibrated
+                ``hydrophone_position`` so a sweep of e.g. -1..+1 mm
+                lands on the true peak. If ``True``, coordinates are
+                absolute in the transducer frame.
+            x, y: Fixed offsets on the non-swept lateral axes.
+                Ignored for the corresponding swept dimension.
+            z: Fixed depth on the non-swept axial axis (mm). ``None``
+                means "at the calibrated hydrophone depth"
+                (``hydrophone_position[2]``). Ignored when
+                ``dim == "z"``. Always interpreted as an *absolute*
+                depth when it is a fixed coord; when it is the swept
+                coord and ``absolute=False``, ``scan_range`` is added
+                to the calibrated ``hydrophone_position[2]``.
+            time_start_s, time_stop_s, sampling_interval_ns: Capture
+                window for each pulse (see :meth:`run_capture` for the
+                emission-relative time-base convention).
+            chunk_size: Rapid-block chunk size (0 = whole sweep).
+            timeout_s: Passed through to
+                :meth:`finish_rapid_capture`.
+            n_averages, align, align_max_shift_samples: Passed through
+                to :meth:`run_averaged_sweep`.
+            progress: See :meth:`run_rapid_sweep`.
+
+        Returns:
+            A :class:`ScanResult` with ``scan_type="1d"``, ``metadata["dim"]``
+            giving the swept axis, and a single coord axis named
+            ``"xfoci"`` / ``"yfoci"`` / ``"zfoci"``. Units are ``"Pa"``
+            if a hydrophone calibration is attached, otherwise ``"mV"``.
+        """
+        dim = str(dim).lower()
+        if dim not in ("x", "y", "z"):
+            raise ValueError(f"dim must be 'x', 'y', or 'z' (got {dim!r})")
+
+        # Origin for the "relative" mode is the calibrated peak; in
+        # absolute mode the origin is (0, 0, 0). The z coord treats the
+        # ``z=`` kwarg as absolute either way (matches scan_lateral).
+        if absolute:
+            x_origin = y_origin = z_origin = 0.0
+        else:
+            x_origin = float(self.hydrophone_position[0])
+            y_origin = float(self.hydrophone_position[1])
+            z_origin = float(self.hydrophone_position[2])
+        z_fixed = z_origin if z is None else float(z)
+
+        coord_axis = np.linspace(scan_range[0], scan_range[1], num)
+        if dim == "x":
+            focus_points = [
+                (float(v) + x_origin, float(y) + y_origin, z_fixed)
+                for v in coord_axis
+            ]
+            coord_key = "xfoci"
+            progress_label = "scan_1d_x"
+        elif dim == "y":
+            focus_points = [
+                (float(x) + x_origin, float(v) + y_origin, z_fixed)
+                for v in coord_axis
+            ]
+            coord_key = "yfoci"
+            progress_label = "scan_1d_y"
+        else:  # dim == "z"
+            focus_points = [
+                (float(x) + x_origin, float(y) + y_origin, float(v) + z_origin)
+                for v in coord_axis
+            ]
+            coord_key = "zfoci"
+            progress_label = "scan_1d_z"
+
+        def apply_point(point):
+            xi, yi, zi = point
+            self.set_focus(xi, yi, zi)
+
+        outputs, timings, averaging = self.run_averaged_sweep(
+            points=focus_points,
+            apply_point=apply_point,
+            time_start_s=time_start_s,
+            time_stop_s=time_stop_s,
+            sampling_interval_ns=sampling_interval_ns,
+            n_averages=n_averages,
+            align=align,
+            align_max_shift_samples=align_max_shift_samples,
+            chunk_size=chunk_size or len(focus_points),
+            timeout_s=timeout_s,
+            progress=progress,
+            progress_label=progress_label,
+        )
+        traces, t_axis, ok_mask = self._stack_hydrophone_traces(outputs)
+        if traces is None:
+            raise RuntimeError(f"No points captured in scan_1d(dim={dim!r}).")
+
+        traces, units = self._convert_to_pressure(traces, self.frequency * 1e3)
+        traces = traces.reshape(num, -1)
+
+        return ScanResult(
+            scan_type="1d",
+            t=t_axis,
+            traces=traces,
+            coords={coord_key: coord_axis},
+            hydrophone_channel=self.hydrophone_channel,
+            chunk_size=chunk_size or len(focus_points),
+            timings=_collect_timings(timings),
+            units=units,
+            metadata={
+                "dim": dim,
+                "z_mm": float(z_fixed),
+                "frequency_kHz": float(self.frequency),
+                "voltage_V": float(self.hv_voltage) if self.hv_voltage is not None else float("nan"),
+                "captured_mask": ok_mask,
+                "hydrophone_position_mm": self.hydrophone_position.copy(),
+                "absolute": bool(absolute),
+                "n_averages": int(n_averages),
+                "align": bool(align),
+                "averaging": averaging,
+            },
+        )
+
     def scan_lateral(self, *,
                      x_range=(-10.0, 10.0),
                      num_x=41,
@@ -1580,7 +1732,7 @@ class VerificationTank:
 
     def scan_frequency(self, *,
                        frequencies_kHz,
-                       duration_msec,
+                       duration_usec,
                        time_start_s=-14e-6,
                        time_stop_s=86e-6,
                        sampling_interval_ns=100,
@@ -1597,9 +1749,9 @@ class VerificationTank:
 
         Args:
             frequencies_kHz: 1-D iterable of frequencies to sweep.
-            duration_msec: Pulse duration (ms) reused at every point;
+            duration_usec: Pulse duration (\u00b5s) reused at every point;
                 the number of cycles per pulse is
-                ``int(duration_msec * frequency_kHz)``.
+                ``int(duration_usec * frequency_kHz / 1000)``.
             time_start_s, time_stop_s, sampling_interval_ns: Capture
                 window.
             chunk_size: Rapid-block chunk size (0 = whole sweep).
@@ -1614,7 +1766,7 @@ class VerificationTank:
         freqs = np.asarray(list(frequencies_kHz), dtype=float)
 
         def apply_point(freq_kHz):
-            self.set_pulse(frequency_kHz=freq_kHz, duration_msec=duration_msec)
+            self.set_pulse(frequency_kHz=freq_kHz, duration_usec=duration_usec)
 
         outputs, timings, averaging = self.run_averaged_sweep(
             points=freqs.tolist(),
@@ -1647,7 +1799,7 @@ class VerificationTank:
             units=units,
             metadata={
                 "voltage_V": float(self.hv_voltage) if self.hv_voltage is not None else float("nan"),
-                "duration_msec": float(duration_msec),
+                "duration_usec": float(duration_usec),
                 "captured_mask": ok_mask,
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
                 "n_averages": int(n_averages),
@@ -1734,7 +1886,7 @@ class VerificationTank:
 
         Returns:
             ``(traces, t_axis, mask)``. ``traces`` has shape ``(n_ok,
-            samples)``, ``t_axis`` is the common time axis in ns, and
+            samples)``, ``t_axis`` is the common time axis in µs, and
             ``mask`` is a bool array over the input ``outputs``. All
             three are ``None`` if nothing was captured.
         """
@@ -1785,7 +1937,7 @@ class VerificationTank:
         Returns:
             Dict with:
 
-            - ``t``: 1-D time axis (ns), zero at trigger.
+            - ``t``: 1-D time axis (\u00b5s), zero at emission.
             - ``trace``: 1-D signal, in ``units``.
             - ``rms``: scalar RMS over the whole window.
             - ``vpp``: scalar peak-to-peak amplitude.

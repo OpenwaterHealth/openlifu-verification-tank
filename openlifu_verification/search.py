@@ -388,7 +388,7 @@ def update_live_figure(handles, *, meas, xs, ys, rms_values, units,
     import matplotlib.pyplot as plt
 
     if meas is not None:
-        handles["trace_line"].set_data(meas["t"] * 1e-3, meas["trace"])
+        handles["trace_line"].set_data(meas["t"], meas["trace"])
         handles["ax_trace"].relim()
         handles["ax_trace"].autoscale_view()
         handles["ax_trace"].set_ylabel(f"hydrophone ({units})")

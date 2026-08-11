@@ -31,8 +31,8 @@ def main():
                              "pinmap and configure the base pulse. Sweep is "
                              "independent (--f-start/--f-stop/--f-step).")
     parser.add_argument("--voltage", type=float, default=None)
-    parser.add_argument("--duration-msec", type=float, default=None,
-                        help="Base pulse duration in ms. Also used as the "
+    parser.add_argument("--duration-usec", type=float, default=None,
+                        help="Base pulse duration in µs. Also used as the "
                              "per-point pulse duration during the sweep.")
     parser.add_argument("--interval-msec", type=float, default=None)
     # --- Sweep grid ---
@@ -102,7 +102,7 @@ def main():
             resolved = ver.apply_pulse(
                 frequency_kHz=args.center_frequency_khz,
                 voltage=args.voltage,
-                duration_msec=args.duration_msec,
+                duration_usec=args.duration_usec,
                 interval_msec=args.interval_msec,
             )
             focus = args.focus if args.focus is not None else ver.hydrophone_position.tolist()
@@ -112,7 +112,7 @@ def main():
 
             result = ver.scan_frequency(
                 frequencies_kHz=frequencies,
-                duration_msec=resolved["duration_msec"],
+                duration_usec=resolved["duration_usec"],
                 chunk_size=args.chunk_size,
                 n_averages=args.n_averages,
                 align=args.align,
