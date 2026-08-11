@@ -65,8 +65,8 @@ def main():
     parser.add_argument("--no-rotate-basis", action="store_true",
                         help="Keep probes axis-aligned each iteration instead of "
                              "rotating along the accepted gradient direction.")
-    parser.add_argument("--time-start-us", type=float, default=100.0)
-    parser.add_argument("--time-stop-us", type=float, default=200.0)
+    parser.add_argument("--time-start-us", type=float, default=-14.0)
+    parser.add_argument("--time-stop-us", type=float, default=86.0)
     parser.add_argument("--sampling-interval-ns", type=float, default=100.0)
     # --- Hydrophone / calibration ---
     parser.add_argument("--hydrophone", type=str, default="",

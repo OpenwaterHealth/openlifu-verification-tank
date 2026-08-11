@@ -19,14 +19,14 @@ from openlifu_sdk.io.LIFUTXDevice import Tx7332DelayProfile, Tx7332PulseProfile
 logger = logging.getLogger(__name__)
 _PACKAGE_LOGGER = logging.getLogger("openlifu_verification")
 PICOSCOPE_RESOLUTION = "15BIT"
-SPEED_OF_SOUND = 1500  # m/s in water
+SPEED_OF_SOUND = 1490  # m/s in water
 # Fixed electrical delay between the scope trigger's rising edge and
 # the actual start of ultrasound emission (visible in traces as a
 # small burst of EM pickup at t=0). Used to convert measured
 # time-of-arrival into an axial depth. Hard-coded from calibration on
 # current TX7332 firmware; override via ``VerificationTank(
 # system_transmit_delay_us=...)`` if a future firmware changes it.
-SYSTEM_TRANSMIT_DELAY_US = 114.0
+SYSTEM_TRANSMIT_DELAY_US = 115.0
 HYDROPHONE_CHANNEL = 'A'
 TRIGGER_CHANNEL = 'B'
 
@@ -543,63 +543,74 @@ class VerificationTank:
                     timeout_s=2.0):
         """Fire a single TX trigger and capture a time-based scope block.
 
-        The window is specified relative to the scope trigger event:
+        ``time_start_s`` and ``time_stop_s`` are given relative to the
+        **start of ultrasound emission** (``t=0`` == first sample the
+        transducer emits), *not* relative to the scope trigger. The
+        fixed ``system_transmit_delay_us`` between trigger and emission
+        is added internally when programming the scope, and subtracted
+        back out of the returned ``time`` axis / ``time_start_s`` /
+        ``time_stop_s`` fields. This makes arrivals easy to interpret:
+        the time-of-arrival ``t`` at depth ``z`` mm is simply
+        ``t = z / SOS`` (µs when SOS is mm/µs).
 
-        - ``time_start_s < 0`` → pre-trigger capture; the scope buffers
-          data from ``time_start_s`` up through ``time_stop_s``.
-        - ``time_start_s >= 0`` → delayed (advanced-trigger) capture;
-          the scope waits ``time_start_s`` after the trigger before it
-          starts collecting samples. This lets you skim the front of
-          long captures without wasting samples/RAM.
+        - ``time_start_s < 0`` → capture a pre-emission window; the
+          scope still sees this as post-trigger up to the transmit
+          delay.
+        - ``time_start_s >= system_transmit_delay_us`` → delayed
+          capture: the scope waits the extra time after the trigger
+          before it starts collecting samples.
 
         The scope only supports discrete sampling intervals and integer
         sample counts, so what actually gets used may differ from what
         was requested. The returned data dict includes
         ``sampling_interval_ns``, ``time_start_s``, and ``time_stop_s``
-        so you know what was really applied.
-
-        This method assumes the trigger has already been configured via
-        ``self.scope.set_trigger(channel=self.trigger_channel, ...)``.
-        The ``delay_samples`` field of that trigger is re-applied here
-        based on ``time_start_s``.
+        (all in the emission frame) so you know what was really
+        applied.
 
         Example::
 
-            # samples every 100 ns for 100 us, starting 10 us before trigger
+            # 100 us window straddling the expected 33 us arrival at
+            # z=50 mm; sampled every 100 ns.
             data = ver.run_capture(
-                time_start_s=-10e-6,
-                time_stop_s=100e-6,
+                time_start_s=-14e-6,
+                time_stop_s=86e-6,
                 sampling_interval_ns=100,
             )
 
         Args:
-            time_start_s: Start of the capture window relative to trigger.
-            time_stop_s: End of the capture window relative to trigger.
+            time_start_s: Start of the capture window relative to
+                emission.
+            time_stop_s: End of the capture window relative to
+                emission.
             sampling_interval_ns: Requested time between samples in ns.
             timeout_s: Max time to wait for the scope trigger to fire.
 
         Returns:
             The scope data dict with:
-              - ``time``: sample times relative to the trigger (ns).
+              - ``time``: sample times relative to emission (ns).
               - one array per enabled channel (mV).
               - ``sampling_interval_ns``, ``time_start_s``,
-                ``time_stop_s``: actual applied values.
+                ``time_stop_s``: actual applied values (emission frame).
             Or ``None`` if the scope's trigger timed out.
         """
         if not self.scope:
             raise ValueError("No Picoscope Connected")
+        delay_s = self.system_transmit_delay_us * 1e-6
         plan = self.scope.plan_capture(
             sampling_interval_ns=sampling_interval_ns,
-            time_start_s=time_start_s,
-            time_stop_s=time_stop_s,
+            time_start_s=time_start_s + delay_s,
+            time_stop_s=time_stop_s + delay_s,
         )
         logger.debug(
-            "run_capture: requested %.1f ns / start %.3f us / stop %.3f us; "
-            "actual %.3f ns / start %.3f us / stop %.3f us "
-            "(timebase=%d, pre=%d, post=%d, delay=%d)",
+            "run_capture: requested %.1f ns / start %.3f us / stop %.3f us "
+            "(emission frame); scope start %.3f us / stop %.3f us "
+            "(trigger frame); actual %.3f ns / start %.3f us / stop %.3f us "
+            "(emission), timebase=%d, pre=%d, post=%d, delay=%d",
             sampling_interval_ns, time_start_s * 1e6, time_stop_s * 1e6,
-            plan["sampling_interval_ns"],
             plan["time_start_s"] * 1e6, plan["time_stop_s"] * 1e6,
+            plan["sampling_interval_ns"],
+            (plan["time_start_s"] - delay_s) * 1e6,
+            (plan["time_stop_s"] - delay_s) * 1e6,
             plan["timebase"],
             plan["pre_trigger_samples"], plan["post_trigger_samples"],
             plan["delay_samples"],
@@ -616,13 +627,16 @@ class VerificationTank:
             timeout_s=timeout_s,
         )
         if result is not None:
-            # Shift the scope's zero-based time axis so t=0 is the trigger.
+            # Shift the scope's zero-based time axis into the emission
+            # frame: scope-relative start = plan["time_start_s"], then
+            # subtract the transmit delay to expose emission-relative
+            # times to the caller.
             interval_ns = plan["sampling_interval_ns"]
-            offset_ns = plan["time_start_s"] * 1e9
+            offset_ns = (plan["time_start_s"] - delay_s) * 1e9
             result["time"] = result["time"] + offset_ns
             result["sampling_interval_ns"] = interval_ns
-            result["time_start_s"] = plan["time_start_s"]
-            result["time_stop_s"] = plan["time_stop_s"]
+            result["time_start_s"] = plan["time_start_s"] - delay_s
+            result["time_stop_s"] = plan["time_stop_s"] - delay_s
         return result
 
     def capture_pulse_train(self,
@@ -698,20 +712,27 @@ class VerificationTank:
         Args:
             n_captures: Number of triggers/segments to capture in one
                 block. Must be <= ``scope.get_max_segments()``.
-            time_start_s: Start of the capture window relative to each trigger.
-            time_stop_s: End of the capture window relative to each trigger.
+            time_start_s: Start of the capture window relative to
+                emission (see :meth:`run_capture` for the emission-frame
+                convention).
+            time_stop_s: End of the capture window relative to emission.
             sampling_interval_ns: Requested time between samples in ns.
 
         Returns:
-            The plan dict from ``scope.plan_capture`` plus
-            ``n_captures`` and ``samples_per_segment`` fields.
+            The plan dict from ``scope.plan_capture`` (with
+            ``time_start_s`` / ``time_stop_s`` still stored in the
+            scope's own trigger frame so :meth:`finish_rapid_capture`
+            can reconstruct the time axis correctly) plus
+            ``n_captures``, ``samples_per_segment``, and
+            ``system_transmit_delay_us`` fields.
         """
         if not self.scope:
             raise ValueError("No Picoscope Connected")
+        delay_s = self.system_transmit_delay_us * 1e-6
         plan = self.scope.plan_capture(
             sampling_interval_ns=sampling_interval_ns,
-            time_start_s=time_start_s,
-            time_stop_s=time_stop_s,
+            time_start_s=time_start_s + delay_s,
+            time_stop_s=time_stop_s + delay_s,
         )
         samples_per_segment = plan["pre_trigger_samples"] + plan["post_trigger_samples"]
         max_per_seg = self.scope.configure_rapid_block(n_captures)
@@ -808,13 +829,15 @@ class VerificationTank:
                 except Exception as e:
                     logger.warning("reset_rapid_block raised: %s", e)
 
-        # Shift time axis so t=0 is the trigger, and expose the actual plan.
+        # Shift time axis into the emission frame (see run_capture for
+        # details) and expose the actual applied window.
+        delay_s = self.system_transmit_delay_us * 1e-6
         interval_ns = plan["sampling_interval_ns"]
-        offset_ns = plan["time_start_s"] * 1e9
+        offset_ns = (plan["time_start_s"] - delay_s) * 1e9
         result["time"] = result["time"] + offset_ns
         result["sampling_interval_ns"] = interval_ns
-        result["time_start_s"] = plan["time_start_s"]
-        result["time_stop_s"] = plan["time_stop_s"]
+        result["time_start_s"] = plan["time_start_s"] - delay_s
+        result["time_stop_s"] = plan["time_stop_s"] - delay_s
         return result
 
     def run_averaged_sweep(self,
@@ -1404,8 +1427,8 @@ class VerificationTank:
                      y=0.0,
                      z=None,
                      absolute=False,
-                     time_start_s=100e-6,
-                     time_stop_s=200e-6,
+                     time_start_s=-14e-6,
+                     time_stop_s=86e-6,
                      sampling_interval_ns=100,
                      chunk_size=0,
                      timeout_s=None,
@@ -1525,8 +1548,8 @@ class VerificationTank:
                 num_y=9,
                 z=None,
                 absolute=False,
-                time_start_s=100e-6,
-                time_stop_s=200e-6,
+                time_start_s=-14e-6,
+                time_stop_s=86e-6,
                 sampling_interval_ns=100,
                 chunk_size=0,
                 timeout_s=None,
@@ -1558,8 +1581,8 @@ class VerificationTank:
     def scan_frequency(self, *,
                        frequencies_kHz,
                        duration_msec,
-                       time_start_s=100e-6,
-                       time_stop_s=200e-6,
+                       time_start_s=-14e-6,
+                       time_stop_s=86e-6,
                        sampling_interval_ns=100,
                        chunk_size=0,
                        timeout_s=None,
@@ -1635,8 +1658,8 @@ class VerificationTank:
 
     def scan_voltage(self, *,
                      voltages_V,
-                     time_start_s=100e-6,
-                     time_stop_s=200e-6,
+                     time_start_s=-14e-6,
+                     time_stop_s=86e-6,
                      sampling_interval_ns=100,
                      chunk_size=0,
                      timeout_s=None,
@@ -1725,8 +1748,8 @@ class VerificationTank:
         return traces, t_axis, mask
 
     def get_peak_voltage(self, x, y, z,
-                         time_start_s=-10e-6,
-                         time_stop_s=200e-6,
+                         time_start_s=-30e-6,
+                         time_stop_s=90e-6,
                          sampling_interval_ns=100):
         """
         Sets the focus to the given coordinates and returns the peak-to-peak
@@ -1743,8 +1766,8 @@ class VerificationTank:
         return peak_to_peak
 
     def measure_pressure(self, x, y, z, *,
-                         time_start_s=100e-6,
-                         time_stop_s=200e-6,
+                         time_start_s=-14e-6,
+                         time_stop_s=86e-6,
                          sampling_interval_ns=100,
                          timeout_s=2.0):
         """Fire one pulse at ``(x, y, z)`` and return the trace + RMS.
@@ -1906,8 +1929,8 @@ class VerificationTank:
                   probe_scale=0.5,
                   min_line_step_scale=0.05,
                   rotate_basis=True,
-                  time_start_s=100e-6,
-                  time_stop_s=220e-6,
+                  time_start_s=-14e-6,
+                  time_stop_s=106e-6,
                   sampling_interval_ns=100,
                   plot=False,
                   store=True,
@@ -2049,8 +2072,8 @@ class VerificationTank:
                      step_size=0.5,
                      iterations=10,
                      learning_rate=0.1,
-                     time_start_s=-10e-6,
-                     time_stop_s=200e-6,
+                     time_start_s=-30e-6,
+                     time_stop_s=90e-6,
                      sampling_interval_ns=100,
                      store=True,
                      save=False):

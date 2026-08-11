@@ -44,9 +44,14 @@ def choose_range_mv(expected_pk_mV: float, *,
 
 @dataclass
 class ScopeCapture:
-    """Scope capture window applied to every phase."""
-    time_start_us: float = 100.0
-    time_stop_us: float = 200.0
+    """Scope capture window applied to every phase.
+
+    ``time_start_us`` / ``time_stop_us`` are given relative to the
+    start of ultrasound emission (t=0 = emission), so a pulse arriving
+    at depth ``z`` mm shows up at ``t = z / SOS`` (\u00b5s in water).
+    """
+    time_start_us: float = -14.0
+    time_stop_us: float = 86.0
     sampling_interval_ns: float = 100.0
     #: Default vertical range on the hydrophone channel (mV, +/-). Used
     #: for the arrival check + peak search + 1D/2D scans + freq sweep.

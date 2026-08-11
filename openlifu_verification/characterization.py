@@ -328,14 +328,15 @@ class Characterization:
             logger.error("Arrival check: scope timed out")
             return result
 
-        # Skip past the electrical transient so we detect the acoustic
-        # arrival, not the pickup at t=0.
-        skip_us = float(self.ver.system_transmit_delay_us) - 5.0
+        # In the emission-referenced time frame the pulse arrives at
+        # ``t = z / SOS`` (>= 0 for any real target), so no skip is
+        # required to reject the electrical crosstalk (which now sits
+        # at t = -system_transmit_delay_us and is outside the window).
+        skip_us = 0.0
         arrival_us = _find_arrival_us(meas["t"], meas["trace"], skip_us=skip_us)
-        # sos in mm/\u00b5s = m/s / 1000.
+        # sos in mm/µs = m/s / 1000.
         sos_mm_per_us = float(self.scan_config.sos_water_m_per_s) / 1000.0
-        expected_us = (float(self.ver.system_transmit_delay_us)
-                       + float(pos[2]) / sos_mm_per_us)
+        expected_us = float(pos[2]) / sos_mm_per_us
         tol_us = expected_us * self.criteria.arrival_time.tol_pct / 100.0
 
         passed = (arrival_us is not None
@@ -434,11 +435,12 @@ class Characterization:
 
         # Compute axial depth from time-of-flight so the reported
         # value is the *measured* depth, not the commanded z.
-        skip_us = float(self.ver.system_transmit_delay_us) - 5.0
+        # Traces are emission-relative, so t == time-of-flight directly.
+        skip_us = 0.0
         arrival_us = _find_arrival_us(meas["t"], meas["trace"], skip_us=skip_us)
         sos_m_per_s = float(self.scan_config.sos_water_m_per_s)
         if arrival_us is not None:
-            tof_us = arrival_us - float(self.ver.system_transmit_delay_us)
+            tof_us = arrival_us
             # \u00b5s * m/s / 1000  =  mm
             axial_depth_mm = tof_us * sos_m_per_s / 1000.0
         else:

@@ -41,8 +41,8 @@ def main():
     parser.add_argument("--no-scope", action="store_true",
                         help="Do not open the Picoscope. Fire the TX pulse only "
                              "so an external scope application can capture it.")
-    parser.add_argument("--time-start-us", type=float, default=100.0)
-    parser.add_argument("--time-stop-us", type=float, default=220.0)
+    parser.add_argument("--time-start-us", type=float, default=-14.0)
+    parser.add_argument("--time-stop-us", type=float, default=106.0)
     parser.add_argument("--sampling-interval-ns", type=float, default=100.0)
     parser.add_argument("--hydro-range-mv", type=int, default=100)
     parser.add_argument("--timeout-s", type=float, default=3.0)

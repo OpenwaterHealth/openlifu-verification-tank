@@ -11,7 +11,9 @@ hardware.
 Every measurement is a rotated-anisotropic 2-D Gaussian in ``(x, y)``,
 scaled by voltage and modulated by a low-Q frequency-response curve
 centered on ``nominal_frequency_kHz``. Traces are single-cycle
-raised-cosine bursts arriving at ``system_transmit_delay_us + z / 1.5``.
+raised-cosine bursts arriving at ``z / 1.5`` µs in the
+emission-relative time frame that :class:`VerificationTank` also
+exposes.
 """
 from __future__ import annotations
 
@@ -126,9 +128,14 @@ class DryRunTank:
         return self._peak_amp_Pa * gauss * freq_gain * v_scale
 
     def _synth_trace(self, amp_Pa, z_mm, t_ns):
-        """Return a synthetic trace: raised-cosine burst at expected arrival."""
+        """Return a synthetic trace: raised-cosine burst at expected arrival.
+
+        ``t_ns`` is the emission-referenced time axis, so the arrival
+        time is simply ``z_mm / SOS`` (SOS = 1.5 mm/µs in water) with
+        no transmit-delay offset applied.
+        """
         t_us = t_ns * 1e-3
-        arrival_us = self.system_transmit_delay_us + float(z_mm) / 1.5
+        arrival_us = float(z_mm) / 1.5
         # 20-cycle burst @ current frequency.
         cycles = 20.0
         f_Hz = self.frequency * 1e3
@@ -149,7 +156,7 @@ class DryRunTank:
 
     # --- measurement APIs ---------------------------------------------
     def measure_pressure(self, x, y, z, *,
-                         time_start_s=100e-6, time_stop_s=200e-6,
+                         time_start_s=-14e-6, time_stop_s=86e-6,
                          sampling_interval_ns=100, timeout_s=2.0):
         t_ns = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
         amp = self._amplitude_Pa(x, y)
@@ -185,7 +192,7 @@ class DryRunTank:
 
     def scan_lateral(self, *, x_range=(-10.0, 10.0), num_x=41,
                      y_range=None, num_y=1, y=0.0, z=None, absolute=False,
-                     time_start_s=100e-6, time_stop_s=200e-6,
+                     time_start_s=-14e-6, time_stop_s=86e-6,
                      sampling_interval_ns=100, chunk_size=0, timeout_s=None,
                      progress="bar") -> ScanResult:
         if z is None:
@@ -231,7 +238,7 @@ class DryRunTank:
 
     def scan_2d(self, *, x_range=(-4.0, 4.0), num_x=9,
                 y_range=(-4.0, 4.0), num_y=9, z=None, absolute=False,
-                time_start_s=100e-6, time_stop_s=200e-6,
+                time_start_s=-14e-6, time_stop_s=86e-6,
                 sampling_interval_ns=100, chunk_size=0, timeout_s=None,
                 progress="bar") -> ScanResult:
         return self.scan_lateral(
@@ -244,7 +251,7 @@ class DryRunTank:
         )
 
     def scan_frequency(self, *, frequencies_kHz, duration_msec,
-                       time_start_s=100e-6, time_stop_s=200e-6,
+                       time_start_s=-14e-6, time_stop_s=86e-6,
                        sampling_interval_ns=100, chunk_size=0,
                        timeout_s=None, progress="bar") -> ScanResult:
         freqs = np.asarray(list(frequencies_kHz), dtype=float)
@@ -275,7 +282,7 @@ class DryRunTank:
         )
 
     def scan_voltage(self, *, voltages_V,
-                     time_start_s=100e-6, time_stop_s=200e-6,
+                     time_start_s=-14e-6, time_stop_s=86e-6,
                      sampling_interval_ns=100, chunk_size=0,
                      timeout_s=None, progress="bar") -> ScanResult:
         voltages = np.asarray(list(voltages_V), dtype=float)
