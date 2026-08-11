@@ -54,12 +54,10 @@ ROW = {
     # B. Transmit Module
     "txm_sn":            "B.1",
     "txm_freq_kHz":      "B.2",
-    "txm_hw_rev":        "B.3",
     "txm_hwid":          "B.4",
     "txm_fw_version":    "B.5",
     # C. Console
     "console_sn":        "C.1",
-    "console_hw_rev":    "C.2",
     "console_hwid":      "C.3",
     "console_fw_version":"C.4",
     # D. Peak Scans
@@ -242,7 +240,7 @@ class Characterization:
     Args:
         ver: A live :class:`VerificationTank` (or :class:`DryRunTank`).
         prefs: :class:`OperatorPrefs` \u2014 supplies tester name, serial
-            numbers, hydrophone S/N, hardware revs.
+            numbers, hydrophone S/N.
         criteria: :class:`AcceptanceCriteria`. If ``None``, defaults
             are used and every graded row will still get a threshold
             attached.
@@ -301,12 +299,10 @@ class Characterization:
 
         r.set_row(ROW["txm_sn"],           "Serial Number",       p.txm_sn)
         r.set_row(ROW["txm_freq_kHz"],     "Frequency",           self.frequency_kHz,   unit="kHz")
-        r.set_row(ROW["txm_hw_rev"],       "Hardware Rev",        p.txm_hw_rev)
         r.set_row(ROW["txm_hwid"],         "Hardware ID",         info.txm_hwid)
         r.set_row(ROW["txm_fw_version"],   "Firmware Version",    info.txm_fw_version)
 
         r.set_row(ROW["console_sn"],       "Serial Number",       p.console_sn)
-        r.set_row(ROW["console_hw_rev"],   "Hardware Rev",        p.console_hw_rev)
         r.set_row(ROW["console_hwid"],     "Hardware ID",         info.console_hwid)
         r.set_row(ROW["console_fw_version"],"Firmware Version",   info.console_fw_version)
 
@@ -667,7 +663,19 @@ class Characterization:
         # Arrival time.
         arr = r.arrival_check
         if arr:
-            summary["arrival_time"] = arr.get("passed", False)
+            passed = bool(arr.get("passed", False))
+            summary["arrival_time"] = passed
+            expected_us = arr.get("expected_us")
+            tol_us = arr.get("tol_us")
+            if expected_us is not None and tol_us is not None:
+                threshold = f"{expected_us:.2f} \u00b1 {tol_us:.2f} \u00b5s"
+                note = f"tol = \u00b1{c.arrival_time.tol_pct:g}%"
+            else:
+                threshold = None
+                note = arr.get("reason", "")
+            if ROW["arrival_us"] in r.rows:
+                r.grade_row(ROW["arrival_us"], passed=passed,
+                            threshold=threshold, note=note)
 
         # Peak offset from nominal (0, 0).
         if r.peak_xy_mm:

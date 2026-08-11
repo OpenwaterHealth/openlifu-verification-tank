@@ -1,8 +1,8 @@
 """Operator-preferences cache.
 
 Persists the last-entered values for interactive test-report prompts
-(tester name, TXM serial, console serial, hydrophone S/N, hardware revs,
-etc.) so a subsequent run can pre-fill them.
+(tester name, TXM serial, console serial, hydrophone S/N, etc.) so a
+subsequent run can pre-fill them.
 
 Stored as JSON at ``~/.openlifu_verification/operator_prefs.json``.
 """
@@ -27,19 +27,17 @@ class OperatorPrefs:
     valid. Only string-typed fields are supported so the cache round-
     trips cleanly through JSON.
 
-    ``test_app_version`` and ``hydrophone_sn`` are *not* prompted —
-    they are populated by the CLI from ``openlifu_verification``'s
-    installed version and from the loaded :class:`Hydrophone` metadata
-    respectively. They live on this dataclass so downstream code
-    (``DeviceInfo`` / report writers) has a single place to look.
+    ``test_app_version`` is *not* prompted — it is populated by the
+    CLI from ``openlifu_verification``'s installed version.
+    ``hydrophone_sn`` is pre-filled from the loaded
+    :class:`Hydrophone` metadata (when a calibration is available) and
+    the operator is asked to confirm or override it.
     """
     tester_name: str = ""
     test_app_version: str = ""
     hydrophone_sn: str = ""
     txm_sn: str = ""
-    txm_hw_rev: str = ""
     console_sn: str = ""
-    console_hw_rev: str = ""
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "OperatorPrefs":
@@ -80,9 +78,6 @@ class OperatorPrefs:
         Enter accepts it. Empty response *and* empty cache re-prompts
         for required fields.
 
-        ``txm_hw_rev`` / ``console_hw_rev`` accept only EVT2A / EVT2B
-        / DVT / PVT (case-insensitive).
-
         ``freq_kHz`` is displayed but not stored (it comes from the CLI
         flag) \u2014 shown so the operator can double-check they set the
         right label.
@@ -93,16 +88,12 @@ class OperatorPrefs:
             print("\n--- Test-report metadata ---")
         self.tester_name    = _ask("Tester name",     self.tester_name,     required=True)
         # test_app_version is set by the CLI from the installed package
-        # version, and hydrophone_sn is read from the loaded Hydrophone
-        # calibration file — don't prompt for either.
+        # version — don't prompt for it. hydrophone_sn is pre-filled by
+        # the CLI from the loaded Hydrophone calibration; we still
+        # prompt so the operator can confirm or correct it.
+        self.hydrophone_sn  = _ask("Hydrophone S/N",  self.hydrophone_sn,   required=True)
         self.txm_sn         = _ask("TXM S/N",         self.txm_sn,          required=True)
-        self.txm_hw_rev     = _ask_choice("TXM hardware rev",
-                                         self.txm_hw_rev,
-                                         choices=("EVT2A", "EVT2B", "DVT", "PVT"))
         self.console_sn     = _ask("Console S/N",     self.console_sn,      required=True)
-        self.console_hw_rev = _ask_choice("Console hardware rev",
-                                         self.console_hw_rev,
-                                         choices=("EVT2A", "EVT2B", "DVT", "PVT"))
 
 
 def _ask(label: str, default: str, *, required: bool) -> str:
@@ -114,16 +105,3 @@ def _ask(label: str, default: str, *, required: bool) -> str:
         if value or not required:
             return value
         print("    (required)")
-
-
-def _ask_choice(label: str, default: str, *, choices) -> str:
-    """Prompt for one of ``choices`` (case-insensitive)."""
-    upper_choices = [c.upper() for c in choices]
-    default_upper = default.upper() if default else ""
-    while True:
-        shown = f" [{default}]" if default else ""
-        raw = input(f"  {label} ({'/'.join(choices)}){shown}: ").strip()
-        value = (raw if raw else default_upper).upper()
-        if value in upper_choices:
-            return value
-        print(f"    Choose one of: {', '.join(choices)}")

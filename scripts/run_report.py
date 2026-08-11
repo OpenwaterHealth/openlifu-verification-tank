@@ -188,9 +188,9 @@ def main(argv=None) -> int:
 
     # --- Prefs ---
     prefs = OperatorPrefs.load(args.prefs)
-    # Auto-populate the two fields we don't prompt for:
-    # (1) test_app_version = version of this library, and
-    # (2) hydrophone_sn    = read from the loaded Hydrophone calibration.
+    # Auto-populate test_app_version (never prompted) and pre-fill
+    # hydrophone_sn from the loaded calibration so the operator can
+    # confirm or override it at the prompt.
     try:
         prefs.test_app_version = _pkg_version("openlifu-verification")
     except PackageNotFoundError:

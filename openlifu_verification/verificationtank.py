@@ -401,6 +401,12 @@ class VerificationTank:
             pulse_train_interval_msec=pti, pulse_train_count=ptc,
             trigger_mode=tm,
         )
+        logger.info(
+            "apply_pulse: frequency=%g kHz, voltage=%g V, duration=%g \u00b5s "
+            "(%d cycles), interval=%g ms, pulse_count=%d, trigger_mode=%s",
+            freq, volt, duration, int(round(duration * freq / 1000.0)),
+            interval, pc, tm,
+        )
         self.configure_lifu(**resolved)
         return resolved
 
@@ -1501,6 +1507,15 @@ class VerificationTank:
         z_fixed = z_origin if z is None else float(z)
 
         coord_axis = np.linspace(scan_range[0], scan_range[1], num)
+        logger.info(
+            "scan_1d: dim=%s, range=[%g, %g] mm (%s), num=%d, fixed x=%g mm, "
+            "y=%g mm, z=%g mm; capture [%g, %g] µs @ %g ns; n_averages=%d",
+            dim, scan_range[0], scan_range[1],
+            "absolute" if absolute else "relative to hydrophone",
+            num, float(x) + x_origin, float(y) + y_origin, z_fixed,
+            time_start_s * 1e6, time_stop_s * 1e6, sampling_interval_ns,
+            n_averages,
+        )
         if dim == "x":
             focus_points = [
                 (float(v) + x_origin, float(y) + y_origin, z_fixed)
@@ -1637,6 +1652,26 @@ class VerificationTank:
         else:
             yfoci = np.array([float(y)])
 
+        if num_y > 1:
+            logger.info(
+                "scan_2d: x=[%g, %g] mm (%d), y=[%g, %g] mm (%d), z=%g mm "
+                "(%s); capture [%g, %g] µs @ %g ns; n_averages=%d",
+                x_range[0], x_range[1], num_x,
+                y_range[0], y_range[1], num_y, float(z),
+                "absolute" if absolute else "relative to hydrophone",
+                time_start_s * 1e6, time_stop_s * 1e6, sampling_interval_ns,
+                n_averages,
+            )
+        else:
+            logger.info(
+                "scan_lateral: x=[%g, %g] mm (%d) at y=%g mm, z=%g mm (%s); "
+                "capture [%g, %g] µs @ %g ns; n_averages=%d",
+                x_range[0], x_range[1], num_x, float(y), float(z),
+                "absolute" if absolute else "relative to hydrophone",
+                time_start_s * 1e6, time_stop_s * 1e6, sampling_interval_ns,
+                n_averages,
+            )
+
         focus_points = [(float(xi) + x_off, float(yi) + y_off, float(z))
                         for yi in yfoci for xi in xfoci]
 
@@ -1764,6 +1799,15 @@ class VerificationTank:
             coord ``freq_kHz``.
         """
         freqs = np.asarray(list(frequencies_kHz), dtype=float)
+        if freqs.size:
+            logger.info(
+                "scan_frequency: %d freqs from %g to %g kHz, duration=%g µs; "
+                "capture [%g, %g] µs @ %g ns; n_averages=%d",
+                freqs.size, float(freqs.min()), float(freqs.max()),
+                float(duration_usec),
+                time_start_s * 1e6, time_stop_s * 1e6, sampling_interval_ns,
+                n_averages,
+            )
 
         def apply_point(freq_kHz):
             self.set_pulse(frequency_kHz=freq_kHz, duration_usec=duration_usec)
@@ -1840,6 +1884,14 @@ class VerificationTank:
             coord ``voltage_V``.
         """
         voltages = np.asarray(list(voltages_V), dtype=float)
+        if voltages.size:
+            logger.info(
+                "scan_voltage: %d voltages from %g to %g V; capture [%g, %g] "
+                "µs @ %g ns; n_averages=%d",
+                voltages.size, float(voltages.min()), float(voltages.max()),
+                time_start_s * 1e6, time_stop_s * 1e6, sampling_interval_ns,
+                n_averages,
+            )
 
         def apply_point(voltage):
             self.set_voltage(float(voltage), wait=True)

@@ -91,8 +91,7 @@ def test_characterization_run_beam_scans_includes_axial(clean_cwd):
     tank = _fresh_tank()
     prefs = OperatorPrefs(tester_name="dry", test_app_version="dry",
                           hydrophone_sn="dry", txm_sn="dry",
-                          txm_hw_rev="dry", console_sn="dry",
-                          console_hw_rev="dry")
+                          console_sn="dry")
     # Keep the scan geometry tiny so the test stays snappy.
     cfg = ScanConfig()
     cfg.lateral_1d.points = 5
