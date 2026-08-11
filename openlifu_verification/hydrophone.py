@@ -12,6 +12,8 @@ from typing import Union, Dict, Any, Tuple
 from scipy import signal
 from scipy.interpolate import interp1d
 
+from .paths import CALIBRATIONS_DIR, REPO_CALIBRATIONS_DIR
+
 
 class Hydrophone:
     """
@@ -29,10 +31,10 @@ class Hydrophone:
     #: hydrophones (e.g. ``"HGL0200"``).
     model = "HNR0500"
 
-    #: Default directory searched when resolving a bare ID. Points at the
-    #: ``hydrophone_calibrations/`` folder next to the package's
-    #: workspace root; callers can pass ``search_dirs=`` to override.
-    default_search_dir = Path(__file__).resolve().parent.parent / "hydrophone_calibrations"
+    #: Default directory searched when resolving a bare ID. Points at
+    #: the ``config/hydrophone_calibrations/`` folder shipped inside the
+    #: repo; callers can pass ``search_dirs=`` to override.
+    default_search_dir = REPO_CALIBRATIONS_DIR
 
     def __init__(self,
                  calibration: Union[str, Path],
@@ -47,13 +49,15 @@ class Hydrophone:
                 a bare hydrophone ID (e.g. ``"2246"``). When it's an ID,
                 the file is looked up as ``{model}-{id}*.txt`` under
                 ``search_dirs`` (defaulting to the workspace
-                ``hydrophone_calibrations/`` folder).
+                ``config/hydrophone_calibrations/`` folder).
             model: Optional override for the hydrophone model prefix
                 used to resolve a bare ID (defaults to
                 :attr:`Hydrophone.model`).
             search_dirs: Optional iterable of directories to search for
                 the calibration file when ``calibration`` is a bare ID.
-                Defaults to ``[cwd/hydrophone_calibrations,
+                Defaults to
+                ``[cwd/config/hydrophone_calibrations,
+                cwd/hydrophone_calibrations (legacy),
                 Hydrophone.default_search_dir]``.
         """
         self.calibration_file_path = self._resolve_calibration_path(
@@ -80,7 +84,11 @@ class Hydrophone:
         model = model or cls.model
         if search_dirs is None:
             search_dirs = [
+                # Preferred layout: <cwd>/config/hydrophone_calibrations/
+                Path.cwd() / CALIBRATIONS_DIR,
+                # Legacy layout (pre-refactor): <cwd>/hydrophone_calibrations/
                 Path.cwd() / "hydrophone_calibrations",
+                # Repo-shipped fallback.
                 cls.default_search_dir,
             ]
         else:

@@ -16,7 +16,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from openlifu_verification import VerificationTank, set_log_level
+from openlifu_verification import VerificationTank, paths, set_log_level
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,20 @@ def _configure_root_logger():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--voltage", type=float, default=20.0)
+    # --- Pulse / drive (defaults live on VerificationTank; None = use default) ---
+    parser.add_argument("--frequency-khz", type=float, default=None,
+                        help="TX frequency in kHz "
+                             "(default: VerificationTank.DEFAULT_FREQUENCY_KHZ).")
+    parser.add_argument("--voltage", type=float, default=None,
+                        help="HV rail in V "
+                             "(default: VerificationTank.DEFAULT_VOLTAGE_V).")
+    parser.add_argument("--duration-msec", type=float, default=None,
+                        help="Pulse duration in ms "
+                             "(default: cycles / frequency).")
+    parser.add_argument("--interval-msec", type=float, default=None,
+                        help="Pulse interval in ms "
+                             "(default: VerificationTank.DEFAULT_INTERVAL_MSEC).")
+    # --- Scan geometry ---
     parser.add_argument("--num-x", type=int, default=41)
     parser.add_argument("--x-range", type=float, nargs=2, default=[-10.0, 10.0])
     parser.add_argument("--num-y", type=int, default=1)
@@ -44,10 +57,15 @@ def main():
                         help="Depth in mm. Defaults to the calibrated hydrophone_position[2].")
     parser.add_argument("--absolute", action="store_true",
                         help="Treat x/y as absolute coords (skip offset by the hydrophone position).")
+    # --- Hydrophone / calibration ---
     parser.add_argument("--hydrophone", type=str, default="",
-                        help="Path to a hydrophone calibration .txt to convert scan traces from mV to Pa.")
-    parser.add_argument("--calibration-path", type=str, default="hydrophone_position.json",
-                        help="JSON file storing the calibrated hydrophone_position (auto-loaded if present).")
+                        help="Hydrophone calibration file or bare ID. "
+                             "Falls back to the last-used ID stored in --calibration-path.")
+    parser.add_argument("--calibration-path", type=str,
+                        default=str(paths.HYDROPHONE_STATE_PATH),
+                        help="JSON file storing hydrophone position + last-used ID "
+                             "(auto-loaded if present).")
+    # --- Misc ---
     parser.add_argument("--chunk-size", type=int, default=0,
                         help="Rapid-block chunk size (0 = whole sweep).")
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
@@ -76,27 +94,27 @@ def main():
             logger.info("Aborted.")
             return
 
-    frequency_kHz = 400
-    duration_msec = 20 / 400
-    interval_msec = 20
-
     progress = None if args.progress == "none" else args.progress
 
+    # VerificationTank(frequency=...) picks the pinmap; if the operator
+    # didn't override, fall back to the class default.
+    tank_frequency = int(args.frequency_khz
+                         if args.frequency_khz is not None
+                         else VerificationTank.DEFAULT_FREQUENCY_KHZ)
+
     try:
-        with VerificationTank(frequency=frequency_kHz,
+        with VerificationTank(frequency=tank_frequency,
                               num_modules=1,
                               ext_power_supply=False,
                               hydrophone=args.hydrophone or None,
                               calibration_path=args.calibration_path or None) as ver:
             if args.log_file:
                 ver.add_log_file(args.log_file)
-            ver.configure_lifu(
-                frequency_kHz=frequency_kHz,
+            ver.apply_pulse(
+                frequency_kHz=args.frequency_khz,
                 voltage=args.voltage,
-                duration_msec=duration_msec,
-                interval_msec=interval_msec,
-                pulse_count=1,
-                trigger_mode="single",
+                duration_msec=args.duration_msec,
+                interval_msec=args.interval_msec,
             )
             ver.enable_hv_output(wait=True)
             input("Press Enter to start")

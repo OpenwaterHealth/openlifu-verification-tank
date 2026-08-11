@@ -4,10 +4,11 @@ Holds everything about *how* the sweep runs \u2014 spatial extents /
 point counts, scope capture window + sampling, frequency & voltage
 sweep grids, and the PicoScope range plan for the voltage sweep.
 
-Loaded from an editable JSON file (default: ``scan_config.json`` in
-the CWD). Missing fields fall back to the built-in defaults; a
-missing file is seeded on first-time run so the operator has a copy
-to tweak.
+Loaded from an editable JSON file (default:
+``config/scan_config.json`` in the CWD, see
+:mod:`openlifu_verification.paths`). Missing fields fall back to the
+built-in defaults; a missing file is seeded on first-time run so the
+operator has a copy to tweak.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from .acceptance import AcceptanceCriteria
+from .paths import SCAN_CONFIG_PATH  # re-exported convenience
 
 logger = logging.getLogger(__name__)
 

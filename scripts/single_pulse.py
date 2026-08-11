@@ -1,70 +1,91 @@
+"""Fire a single TX pulse and (optionally) capture it on the PicoScope.
+
+Thin wrapper around :class:`VerificationTank`. All pulse / capture
+defaults live on :class:`VerificationTank` — anything unspecified on
+the command line falls back to those.
+"""
 import argparse
 import logging
-from pathlib import Path
+
 import numpy as np
-from openlifu_verification import VerificationTank, ScanResult
 import matplotlib.pyplot as plt
 
-# Configure logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+from openlifu_verification import ScanResult, VerificationTank, paths, set_log_level
 
-# Prevent duplicate handlers and cluttered terminal output
-if not logger.hasHandlers():
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-    logger.addHandler(handler)
-    logger.propagate = False
+logger = logging.getLogger(__name__)
+
+
+def _configure_root_logger():
+    root = logging.getLogger()
+    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        root.addHandler(h)
+    root.setLevel(logging.INFO)
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Fire a single TX pulse.")
-    parser.add_argument(
-        "--no-scope",
-        action="store_true",
-        help="Do not open the Picoscope. Fire the TX pulse only so an "
-             "external scope application can capture it.",
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    # --- Pulse / drive (None => VerificationTank class defaults) ---
+    parser.add_argument("--frequency-khz", type=float, default=None)
+    parser.add_argument("--voltage", type=float, default=12.0,
+                        help="HV rail (V). Single-pulse defaults to 12 V for "
+                             "safety; override to hit the full drive rail.")
+    parser.add_argument("--duration-msec", type=float, default=None)
+    parser.add_argument("--interval-msec", type=float, default=None)
+    # --- Focus ---
+    parser.add_argument("--x", type=float, default=0.0)
+    parser.add_argument("--y", type=float, default=0.0)
+    parser.add_argument("--z", type=float, default=50.0)
+    # --- Capture ---
+    parser.add_argument("--no-scope", action="store_true",
+                        help="Do not open the Picoscope. Fire the TX pulse only "
+                             "so an external scope application can capture it.")
+    parser.add_argument("--time-start-us", type=float, default=100.0)
+    parser.add_argument("--time-stop-us", type=float, default=220.0)
+    parser.add_argument("--sampling-interval-ns", type=float, default=100.0)
+    parser.add_argument("--hydro-range-mv", type=int, default=100)
+    parser.add_argument("--timeout-s", type=float, default=3.0)
+    # --- Hydrophone ---
+    parser.add_argument("--hydrophone", type=str, default="",
+                        help="Hydrophone calibration file or bare ID. Falls "
+                             "back to the last-used ID stored in --calibration-path.")
+    parser.add_argument("--calibration-path", type=str,
+                        default=str(paths.HYDROPHONE_STATE_PATH))
+    parser.add_argument("--num-modules", type=int, default=1)
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument("--verbose", "-v", action="store_true")
+    verbosity.add_argument("--quiet", "-q", action="store_true")
     args = parser.parse_args()
 
-    # Parameters
-    xInput = 0
-    yInput = 0
-    zInput = 50
+    _configure_root_logger()
+    if args.verbose:
+        set_log_level("DEBUG", sdk_level="DEBUG")
+    elif args.quiet:
+        set_log_level("WARNING")
 
-    frequency_kHz = 400
-    voltage = 12.0
-    duration_msec = 20 / frequency_kHz
-    interval_msec = 10
-    num_modules = 1
-
-    result = None
-    scan_result = None
+    tank_frequency = int(args.frequency_khz
+                         if args.frequency_khz is not None
+                         else VerificationTank.DEFAULT_FREQUENCY_KHZ)
 
     logger.info("Starting Single Pulse Script...")
+    result = None
+    scan_result = None
     try:
-        with VerificationTank(frequency=frequency_kHz,
-                              num_modules=num_modules,
+        with VerificationTank(frequency=tank_frequency,
+                              num_modules=args.num_modules,
                               use_picoscope=not args.no_scope,
-                              hydrophone='2246',
+                              hydrophone=args.hydrophone or None,
+                              calibration_path=args.calibration_path or None,
+                              hydrophone_range_mv=args.hydro_range_mv,
                               ext_power_supply=False) as ver:
-            # Configure LIFU and HVPS
-            ver.configure_lifu(
-                frequency_kHz=frequency_kHz,
-                voltage=voltage,
-                duration_msec=duration_msec,
-                interval_msec=interval_msec,
-                pulse_count=1,
-                trigger_mode="single",
+            resolved = ver.apply_pulse(
+                frequency_kHz=args.frequency_khz,
+                voltage=args.voltage,
+                duration_msec=args.duration_msec,
+                interval_msec=args.interval_msec,
             )
-            ver.set_focus(xInput, yInput, zInput)
-
-            if not args.no_scope:
-                # Scope channels + trigger are auto-configured with
-                # sensible defaults during VerificationTank.__enter__.
-                # Override the hydrophone vertical range here if needed.
-                ver.set_hydrophone_range(range_mv=100)
-
-            # Enable power supply
+            ver.set_focus(args.x, args.y, args.z)
             ver.enable_hv_output(wait=True)
 
             input("Press Enter to start")
@@ -73,20 +94,15 @@ def main():
                 ver.run_trigger()
             else:
                 result = ver.run_capture(
-                    time_start_s=100e-6,
-                    time_stop_s=220e-6,
-                    sampling_interval_ns=100,
-                    timeout_s=3.0,
+                    time_start_s=args.time_start_us * 1e-6,
+                    time_stop_s=args.time_stop_us * 1e-6,
+                    sampling_interval_ns=args.sampling_interval_ns,
+                    timeout_s=args.timeout_s,
                 )
                 if result is not None:
-                    # Wrap the single capture as a ScanResult so the
-                    # units-aware .plot() picks Pa when a hydrophone
-                    # calibration is attached and mV otherwise.
                     trace_mv = np.asarray(result[ver.hydrophone_channel])
                     if ver.hydrophone is not None:
-                        trace = ver.hydrophone.mv_to_pa(
-                            trace_mv, ver.frequency * 1e3
-                        )
+                        trace = ver.hydrophone.mv_to_pa(trace_mv, ver.frequency * 1e3)
                         units = "Pa"
                     else:
                         trace = trace_mv
@@ -99,25 +115,22 @@ def main():
                         hydrophone_channel=ver.hydrophone_channel,
                         units=units,
                         metadata={
-                            "voltage_V": float(voltage),
-                            "frequency_kHz": float(frequency_kHz),
-                            "focus_mm": np.array([xInput, yInput, zInput], dtype=float),
+                            "voltage_V": float(resolved["voltage"]),
+                            "frequency_kHz": float(resolved["frequency_kHz"]),
+                            "focus_mm": np.array([args.x, args.y, args.z], dtype=float),
                         },
                     )
-
     except (ConnectionError, ValueError, Exception) as e:
         logger.error(f"An error occurred: {e}")
-        return  # Exit gracefully
+        return
 
     logger.info("Finished Single Pulse.")
 
     if args.no_scope:
         return
-
     if result is None or scan_result is None:
         logger.warning("No pulse captured within the timeout window.")
         return
-
     scan_result.plot(kind="trace", show=True)
 
 

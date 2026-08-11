@@ -10,6 +10,7 @@ from .picoscope import Picoscope
 from .qpx600dp import QPX600DP
 from .scan_results import ScanResult
 from .hydrophone import Hydrophone
+from .paths import HYDROPHONE_STATE_PATH
 
 from openlifu_sdk.io import LIFUInterface
 from openlifu_sdk.io.LIFUTXDevice import Tx7332DelayProfile, Tx7332PulseProfile
@@ -90,6 +91,18 @@ class VerificationTank:
     A context manager to simplify OpenLIFU verification tasks.
     """
 
+    # -- Pulse / drive defaults --------------------------------------
+    # Class-level defaults consumed by :meth:`apply_pulse` when the
+    # caller passes ``None``. Scripts should keep argparse defaults as
+    # ``None`` and pass them through so operator can rely on these
+    # values without hunting for hard-coded numbers in every script.
+    DEFAULT_FREQUENCY_KHZ: float = 400.0
+    DEFAULT_VOLTAGE_V: float = 20.0
+    DEFAULT_CYCLES_PER_BURST: float = 20.0
+    DEFAULT_INTERVAL_MSEC: float = 20.0
+    DEFAULT_PULSE_COUNT: int = 1
+    DEFAULT_TRIGGER_MODE: str = "single"
+
     def __init__(self,
                  frequency=400,
                  use_picoscope=True,
@@ -105,7 +118,7 @@ class VerificationTank:
                  trigger_direction="rising",
                  hydrophone=None,
                  hydrophone_position=(0.0, 0.0, 50.0),
-                 calibration_path="hydrophone_position.json",
+                 calibration_path=HYDROPHONE_STATE_PATH,
                  system_transmit_delay_us=SYSTEM_TRANSMIT_DELAY_US):
         self.use_picoscope = use_picoscope
         self.resolution = resolution
@@ -212,10 +225,12 @@ class VerificationTank:
             # one has been saved to ``calibration_path``. On first-time
             # run the file is seeded with the current (default) position
             # so the operator has an editable copy to tweak.
+            cal_source = None
             if self.calibration_path is not None:
                 if self.calibration_path.is_file():
                     try:
                         self.load_calibration()
+                        cal_source = f"loaded from {self.calibration_path}"
                     except Exception as e:
                         logger.warning(
                             "Failed to load hydrophone calibration from %s: %s",
@@ -224,16 +239,26 @@ class VerificationTank:
                 else:
                     try:
                         self.save_calibration()
-                        logger.info(
-                            "Seeded default hydrophone calibration at %s",
-                            self.calibration_path,
-                        )
+                        cal_source = f"seeded default at {self.calibration_path}"
                     except Exception as e:
                         logger.warning(
                             "Could not seed default hydrophone calibration at %s: %s",
                             self.calibration_path, e,
                         )
 
+            # Consolidated summary of the actual final hydrophone state:
+            # what device is attached (if any) + the position that
+            # subsequent relative scans will use as their origin.
+            hydro_id = self._current_hydrophone_id()
+            if self.hydrophone is not None:
+                hydro_desc = f"attached (id={hydro_id!r})" if hydro_id else "attached"
+            else:
+                hydro_desc = "not attached (traces will be reported in mV)"
+            src_desc = f" [{cal_source}]" if cal_source else ""
+            logger.info(
+                "Hydrophone: %s; position=%s mm%s",
+                hydro_desc, self.hydrophone_position.tolist(), src_desc,
+            )
 
         except Exception as e:
             logger.error(f"Error during initialization: {e}")
@@ -326,7 +351,57 @@ class VerificationTank:
             profile_index=profile_index,
             profile_increment=profile_increment,
             trigger_mode=trigger_mode)
-        
+
+    def apply_pulse(self, *,
+                    frequency_kHz: float | None = None,
+                    voltage: float | None = None,
+                    cycles_per_burst: float | None = None,
+                    duration_msec: float | None = None,
+                    interval_msec: float | None = None,
+                    pulse_count: int | None = None,
+                    pulse_train_interval_msec: float | None = None,
+                    pulse_train_count: int | None = None,
+                    trigger_mode: str | None = None) -> dict:
+        """Configure the LIFU with sensible defaults for any ``None`` kwarg.
+
+        Thin wrapper around :meth:`configure_lifu` that lets scripts
+        pass their argparse args through unchanged (``default=None``)
+        and rely on class-level defaults
+        (``DEFAULT_FREQUENCY_KHZ``, ``DEFAULT_VOLTAGE_V``, ...) for
+        anything the operator didn't explicitly override.
+
+        ``duration_msec`` is derived from ``cycles_per_burst /
+        frequency_kHz`` when not passed explicitly, so callers can
+        just specify "20 cycles" instead of computing the ms.
+
+        Returns the fully-resolved keyword dict actually sent to
+        :meth:`configure_lifu` (useful for logging / metadata).
+        """
+        freq = float(frequency_kHz if frequency_kHz is not None
+                     else self.DEFAULT_FREQUENCY_KHZ)
+        volt = float(voltage if voltage is not None else self.DEFAULT_VOLTAGE_V)
+        if duration_msec is None:
+            cyc = float(cycles_per_burst if cycles_per_burst is not None
+                        else self.DEFAULT_CYCLES_PER_BURST)
+            duration = cyc / freq
+        else:
+            duration = float(duration_msec)
+        interval = float(interval_msec if interval_msec is not None
+                         else self.DEFAULT_INTERVAL_MSEC)
+        pc = int(pulse_count if pulse_count is not None else self.DEFAULT_PULSE_COUNT)
+        pti = float(pulse_train_interval_msec if pulse_train_interval_msec is not None
+                    else 0.0)
+        ptc = int(pulse_train_count if pulse_train_count is not None else 1)
+        tm = str(trigger_mode if trigger_mode is not None else self.DEFAULT_TRIGGER_MODE)
+        resolved = dict(
+            frequency_kHz=freq, voltage=volt, duration_msec=duration,
+            interval_msec=interval, pulse_count=pc,
+            pulse_train_interval_msec=pti, pulse_train_count=ptc,
+            trigger_mode=tm,
+        )
+        self.configure_lifu(**resolved)
+        return resolved
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """
         Disconnects from all instruments and cleans up resources.
@@ -1464,7 +1539,11 @@ class VerificationTank:
         return hydrophone
 
     def save_calibration(self, path=None):
-        """Persist ``hydrophone_position`` to a small JSON file.
+        """Persist hydrophone state (position + last-used ID) to JSON.
+
+        Writes both ``hydrophone_position_mm`` and, when a
+        :class:`Hydrophone` is attached, ``hydrophone_id`` so the next
+        run can auto-instantiate the same device.
 
         Args:
             path: Destination path; defaults to
@@ -1482,15 +1561,24 @@ class VerificationTank:
         payload = {
             "hydrophone_position_mm": self.hydrophone_position.tolist(),
         }
+        hydro_id = self._current_hydrophone_id()
+        if hydro_id:
+            payload["hydrophone_id"] = hydro_id
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         logger.info(
-            "Saved hydrophone calibration to %s (position=%s)",
-            path, self.hydrophone_position.tolist(),
+            "Saved hydrophone state to %s (position=%s, id=%r)",
+            path, self.hydrophone_position.tolist(), hydro_id or "",
         )
         return path
 
     def load_calibration(self, path=None):
-        """Load ``hydrophone_position`` from a JSON file.
+        """Load hydrophone state (position + optional ID) from JSON.
+
+        If the file carries a ``hydrophone_id`` and no hydrophone is
+        currently attached, this method attempts to auto-instantiate
+        a :class:`Hydrophone` from that ID and assigns it to
+        ``self.hydrophone`` so subsequent scans convert traces from mV
+        to Pa without the caller having to pass ``--hydrophone`` again.
 
         Args:
             path: Source path; defaults to ``self.calibration_path``.
@@ -1506,11 +1594,25 @@ class VerificationTank:
         data = json.loads(path.read_text(encoding="utf-8"))
         pos = np.array(data["hydrophone_position_mm"], dtype=float).reshape(3)
         self.hydrophone_position = pos
-        logger.info(
-            "Loaded hydrophone calibration from %s (position=%s)",
-            path, pos.tolist(),
-        )
+        hydro_id = data.get("hydrophone_id")
+        if hydro_id and self.hydrophone is None:
+            try:
+                self.hydrophone = Hydrophone(str(hydro_id))
+            except Exception as e:
+                logger.warning(
+                    "Could not auto-attach hydrophone %r from %s: %s",
+                    hydro_id, path, e,
+                )
         return pos
+
+    def _current_hydrophone_id(self) -> str:
+        """Best-effort hydrophone ID for the currently-attached device."""
+        if self.hydrophone is None:
+            return ""
+        try:
+            return str(self.hydrophone.metadata.get("HYD_SN", ""))
+        except Exception:
+            return ""
 
     def find_peak(self, *,
                   x0=None, y0=None, z=None,

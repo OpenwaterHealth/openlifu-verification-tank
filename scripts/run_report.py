@@ -39,6 +39,7 @@ from openlifu_verification import (
     ScanConfig,
     VerificationTank,
     characterization,
+    paths,
     report_io,
     set_log_level,
 )
@@ -46,8 +47,8 @@ from openlifu_verification import (
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_SCAN_CONFIG_PATH = Path("scan_config.json")
-DEFAULT_CALIBRATION_PATH = Path("hydrophone_position.json")
+DEFAULT_SCAN_CONFIG_PATH = paths.SCAN_CONFIG_PATH
+DEFAULT_CALIBRATION_PATH = paths.HYDROPHONE_STATE_PATH
 DEFAULT_OUTPUT_DIR = Path("test_reports")
 
 
@@ -124,10 +125,12 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     # --- Device / measurement ---
-    p.add_argument("--frequency-khz", type=float, default=400.0,
+    p.add_argument("--frequency-khz", type=float,
+                   default=VerificationTank.DEFAULT_FREQUENCY_KHZ,
                    choices=[155.0, 400.0],
                    help="Nominal center frequency of the TXM.")
-    p.add_argument("--voltage", type=float, default=20.0,
+    p.add_argument("--voltage", type=float,
+                   default=VerificationTank.DEFAULT_VOLTAGE_V,
                    help="HV rail (V) for peak scans + freq sweep.")
     p.add_argument("--num-modules", type=int, default=1)
     p.add_argument("--ext-power", action="store_true",
@@ -240,14 +243,9 @@ def main(argv=None) -> int:
 
         # Configure the LIFU pulse + HV rail so scans start off correct.
         if not args.dry_run:
-            duration_msec = 20.0 / args.frequency_khz
-            ver.configure_lifu(
+            ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
                 voltage=args.voltage,
-                duration_msec=duration_msec,
-                interval_msec=20,
-                pulse_count=1,
-                trigger_mode="single",
             )
             ver.enable_hv_output(wait=True)
         else:

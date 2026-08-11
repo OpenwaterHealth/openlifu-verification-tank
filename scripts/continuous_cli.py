@@ -20,12 +20,16 @@ VALID_MODES = ("single", "continuous", "sequence")
 def main():
     # All configure_lifu parameters live here so `param=<value>` commands
     # can update them uniformly. num_modules is a VerificationTank ctor
-    # arg (not a configure_lifu arg) so it's kept separate.
+    # arg (not a configure_lifu arg) so it's kept separate. Initial
+    # values come from the shared VerificationTank defaults so that a
+    # single source of truth drives all scripts; continuous_cli tweaks
+    # only where its use case diverges (lower voltage, longer interval,
+    # continuous trigger, 3 pulses / burst).
     num_modules = 1
     settings = {
-        "frequency_kHz": 400,
+        "frequency_kHz": VerificationTank.DEFAULT_FREQUENCY_KHZ,
         "voltage": 10.0,
-        "duration_msec": 10 / 400,
+        "duration_msec": 10 / VerificationTank.DEFAULT_FREQUENCY_KHZ,
         "interval_msec": 50,
         "pulse_count": 3,
         "pulse_train_interval_msec": 0,

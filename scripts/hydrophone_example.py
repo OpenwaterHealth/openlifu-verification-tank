@@ -21,9 +21,11 @@ def main():
     """Main example function."""
     print("=== Hydrophone Calibration Example ===\n")
     
-    # 1. Load the hydrophone calibration
-    cal_file = Path(__file__).parent.parent / "hydrophone_calibrations" / "HNR0500-2246_xxxxxx-xxxx-xx_xx_20221219 (1).txt"
-    hydrophone = Hydrophone(cal_file)
+    # 1. Load the hydrophone calibration. Passing a bare ID lets
+    # Hydrophone locate the file under ``config/hydrophone_calibrations/``
+    # in the current working directory (with a fallback to the copy
+    # shipped in the repo).
+    hydrophone = Hydrophone("2246")
     
     print(f"Loaded hydrophone: {hydrophone}")
     print()

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from openlifu_verification import VerificationTank, set_log_level
+from openlifu_verification import VerificationTank, paths, set_log_level
 
 logger = logging.getLogger(__name__)
 
@@ -25,16 +25,31 @@ def _configure_root_logger():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--voltage", type=float, default=20.0)
-    parser.add_argument("--f-start", type=float, default=370.0)
-    parser.add_argument("--f-stop", type=float, default=430.0)
-    parser.add_argument("--f-step", type=float, default=5.0)
+    # --- Pulse / drive (None => VerificationTank class defaults) ---
+    parser.add_argument("--center-frequency-khz", type=float, default=None,
+                        help="Nominal TX frequency (kHz) used to pick the "
+                             "pinmap and configure the base pulse. Sweep is "
+                             "independent (--f-start/--f-stop/--f-step).")
+    parser.add_argument("--voltage", type=float, default=None)
+    parser.add_argument("--duration-msec", type=float, default=None,
+                        help="Base pulse duration in ms. Also used as the "
+                             "per-point pulse duration during the sweep.")
+    parser.add_argument("--interval-msec", type=float, default=None)
+    # --- Sweep grid ---
+    parser.add_argument("--f-start", type=float, default=370.0,
+                        help="Start frequency in kHz.")
+    parser.add_argument("--f-stop", type=float, default=430.0,
+                        help="Stop frequency in kHz.")
+    parser.add_argument("--f-step", type=float, default=5.0,
+                        help="Frequency step in kHz.")
     parser.add_argument("--focus", type=float, nargs=3, default=None,
                         help="x y z in mm (default: calibrated hydrophone_position).")
-    parser.add_argument("--hydrophone", type=str, default="",
-                        help="Path to a hydrophone calibration .txt to convert scan traces from mV to Pa.")
-    parser.add_argument("--calibration-path", type=str, default="hydrophone_position.json",
-                        help="JSON file storing the calibrated hydrophone_position (auto-loaded if present).")
+    # --- Hydrophone / calibration ---
+    parser.add_argument("--hydrophone", type=str, default="")
+    parser.add_argument("--calibration-path", type=str,
+                        default=str(paths.HYDROPHONE_STATE_PATH),
+                        help="JSON file storing hydrophone position + last-used ID.")
+    # --- Misc ---
     parser.add_argument("--chunk-size", type=int, default=0)
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-data", action=argparse.BooleanOptionalAction, default=True)
@@ -61,30 +76,28 @@ def main():
             logger.info("Aborted.")
             return
 
-    center_frequency_kHz = 400
-    duration_msec = 20 / 400
-    interval_msec = 20
     frequencies = np.arange(args.f_start,
                             args.f_stop + 0.5 * args.f_step,
                             args.f_step)
 
     progress = None if args.progress == "none" else args.progress
+    tank_frequency = int(args.center_frequency_khz
+                         if args.center_frequency_khz is not None
+                         else VerificationTank.DEFAULT_FREQUENCY_KHZ)
 
     try:
-        with VerificationTank(frequency=center_frequency_kHz,
+        with VerificationTank(frequency=tank_frequency,
                               num_modules=1,
                               ext_power_supply=False,
                               hydrophone=args.hydrophone or None,
                               calibration_path=args.calibration_path or None) as ver:
             if args.log_file:
                 ver.add_log_file(args.log_file)
-            ver.configure_lifu(
-                frequency_kHz=center_frequency_kHz,
+            resolved = ver.apply_pulse(
+                frequency_kHz=args.center_frequency_khz,
                 voltage=args.voltage,
-                duration_msec=duration_msec,
-                interval_msec=interval_msec,
-                pulse_count=1,
-                trigger_mode="single",
+                duration_msec=args.duration_msec,
+                interval_msec=args.interval_msec,
             )
             focus = args.focus if args.focus is not None else ver.hydrophone_position.tolist()
             ver.set_focus(*focus)
@@ -93,7 +106,7 @@ def main():
 
             result = ver.scan_frequency(
                 frequencies_kHz=frequencies,
-                duration_msec=duration_msec,
+                duration_msec=resolved["duration_msec"],
                 chunk_size=args.chunk_size,
                 progress=progress,
             )
