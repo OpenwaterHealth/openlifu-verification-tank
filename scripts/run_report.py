@@ -2,8 +2,9 @@
 
 Prompts (with cached defaults) for tester name + serial numbers,
 connects to the hardware, runs every characterization phase, grades
-the results against ``acceptance.json``, and writes the report bundle
-to ``test_reports/<TXM-SN>/<YYYYMMDD>_<HHMMSS>/``.
+the results against the criteria in ``scan_config.json``, and writes
+the report bundle to
+``test_reports/<TXM-SN>/<YYYYMMDD>_<HHMMSS>/``.
 
 Examples::
 
@@ -31,13 +32,13 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
 from openlifu_verification import (
-    AcceptanceCriteria,
     Characterization,
     DryRunTank,
     Hydrophone,
     OperatorPrefs,
     ScanConfig,
     VerificationTank,
+    characterization,
     report_io,
     set_log_level,
 )
@@ -45,7 +46,6 @@ from openlifu_verification import (
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_ACCEPTANCE_PATH = Path("acceptance.json")
 DEFAULT_SCAN_CONFIG_PATH = Path("scan_config.json")
 DEFAULT_CALIBRATION_PATH = Path("hydrophone_position.json")
 DEFAULT_OUTPUT_DIR = Path("test_reports")
@@ -139,10 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
                    default=DEFAULT_CALIBRATION_PATH,
                    help="Auto-load / save destination for hydrophone_position.")
     # --- Report inputs / outputs ---
-    p.add_argument("--acceptance", type=Path, default=DEFAULT_ACCEPTANCE_PATH,
-                   help="Path to acceptance.json (seeded from defaults if missing).")
     p.add_argument("--scan-config", type=Path, default=DEFAULT_SCAN_CONFIG_PATH,
-                   help="Path to scan_config.json (seeded from defaults if missing).")
+                   help="Path to scan_config.json (seeded from defaults if missing; "
+                        "contains acceptance criteria + scan geometry + scope settings).")
     p.add_argument("--prefs", type=Path, default=None,
                    help="Path to operator prefs JSON (defaults to ~/.openlifu_verification/operator_prefs.json).")
     p.add_argument("--output-dir", type=Path, default=None,
@@ -212,11 +211,10 @@ def main(argv=None) -> int:
                 prefs.tester_name, prefs.txm_sn, prefs.hydrophone_sn,
                 prefs.test_app_version)
 
-    # --- Acceptance criteria (seed if missing) ---
-    criteria = AcceptanceCriteria.load_or_create(args.acceptance)
-
     # --- Scan configuration (seed if missing) ---
+    # Bundles acceptance criteria + scan geometry + scope capture.
     scan_config = ScanConfig.load_or_create(args.scan_config)
+    criteria = scan_config.acceptance
 
     # --- Tank ---
     if args.dry_run:
@@ -287,11 +285,13 @@ def main(argv=None) -> int:
             args.output_dir,
             write_device_config_json=not args.skip_frequency,
         )
+        sn = report.rows[characterization.ROW["txm_sn"]].value or "unknown"
+        sn_stem = report_io._sanitize_stem(sn)
         print(f"\nReport directory: {run_dir}")
-        print(f"  XLSX : {run_dir / 'report.xlsx'}")
-        print(f"  PDF  : {run_dir / 'report.pdf'}")
+        print(f"  XLSX : {run_dir / f'{sn_stem}_Report.xlsx'}")
+        print(f"  PDF  : {run_dir / f'{sn_stem}_Report.pdf'}")
         if not args.skip_frequency:
-            print(f"  JSON : {run_dir / 'device_config.json'}")
+            print(f"  JSON : {run_dir / f'{sn_stem}_device_config.json'}")
         print(f"  Verdict: {'PASS' if report.overall_pass else 'FAIL'}")
 
         # --- Optionally push config back onto the device ---
@@ -299,7 +299,7 @@ def main(argv=None) -> int:
             if args.skip_frequency:
                 logger.warning("--skip-frequency set; no device_config.json to write.")
             else:
-                config_path = run_dir / "device_config.json"
+                config_path = run_dir / f"{sn_stem}_device_config.json"
                 do_write = True
                 if args.confirm_write_config:
                     do_write = _prompt_yes_no(

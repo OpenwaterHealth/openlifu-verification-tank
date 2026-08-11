@@ -64,12 +64,13 @@ ROW = {
     "console_fw_version":"C.4",
     # D. Peak Scans
     "voltage_rail":      "D.1",
-    "scan_2d_image":     "D.2",   # (repurposed: was Axial Scan)
+    "scan_2d_image":     "D.2",
     "lateral_image":     "D.3",
     "elevation_image":   "D.4",
     "waveform_image":    "D.5",
     "pnp_at_peak_MPa":   "D.6",
     "axial_depth_mm":    "D.7",
+    "arrival_us":        "D.8",
 }
 
 # Scan geometry defaults kept as module constants for backward compat;
@@ -331,8 +332,10 @@ class Characterization:
         # arrival, not the pickup at t=0.
         skip_us = float(self.ver.system_transmit_delay_us) - 5.0
         arrival_us = _find_arrival_us(meas["t"], meas["trace"], skip_us=skip_us)
+        # sos in mm/\u00b5s = m/s / 1000.
+        sos_mm_per_us = float(self.scan_config.sos_water_m_per_s) / 1000.0
         expected_us = (float(self.ver.system_transmit_delay_us)
-                       + float(pos[2]) / 1.5)
+                       + float(pos[2]) / sos_mm_per_us)
         tol_us = expected_us * self.criteria.arrival_time.tol_pct / 100.0
 
         passed = (arrival_us is not None
@@ -353,9 +356,16 @@ class Characterization:
         )
         return result
 
-    def find_peak_xy(self, **kw) -> tuple[float, float]:
-        """Locate the true (x, y) peak and update ``hydrophone_position``."""
-        x, y = self.ver.find_peak(plot=self.plot, store=True, save=False,
+    def find_peak_xy(self, *, x0: float = 0.0, y0: float = 0.0,
+                     **kw) -> tuple[float, float]:
+        """Locate the true (x, y) peak and update ``hydrophone_position``.
+
+        Defaults ``x0``/``y0`` to the origin so the verification
+        pipeline always seeds the search from a known reference,
+        independent of any prior calibration or leftover position.
+        """
+        x, y = self.ver.find_peak(x0=x0, y0=y0,
+                                  plot=self.plot, store=True, save=False,
                                   keep_plot_open=False, **kw)
         self.report.peak_xy_mm = (float(x), float(y))
         logger.info("Peak located at (%.4f, %.4f) mm", x, y)
@@ -404,7 +414,14 @@ class Characterization:
         return {"lateral_1d": lat, "elevation_1d": elev, "scan_2d": two_d}
 
     def measure_waveform_at_peak(self) -> dict:
-        """Fire one pulse at the peak; compute PNP + axial depth."""
+        """Fire one pulse at the peak; compute PNP + axial depth.
+
+        Also fills the four "image" rows D.2-D.5 with
+        ``"see Figure N"`` cross-references and reports the pulse
+        arrival time (D.8) alongside the axial depth (D.7). The
+        depth is computed from the arrival time and the configured
+        speed of sound in water, not the commanded z-focus.
+        """
         pos = self.ver.hydrophone_position
         self._apply_baseline_range()
         meas = self.ver.measure_pressure(
@@ -414,19 +431,49 @@ class Characterization:
         if meas is None:
             raise RuntimeError("Scope timeout while measuring waveform at peak.")
         pnp_MPa = _pnp_MPa(meas["trace"]) if meas["units"] == "Pa" else float("nan")
-        axial_depth_mm = float(pos[2])
+
+        # Compute axial depth from time-of-flight so the reported
+        # value is the *measured* depth, not the commanded z.
+        skip_us = float(self.ver.system_transmit_delay_us) - 5.0
+        arrival_us = _find_arrival_us(meas["t"], meas["trace"], skip_us=skip_us)
+        sos_m_per_s = float(self.scan_config.sos_water_m_per_s)
+        if arrival_us is not None:
+            tof_us = arrival_us - float(self.ver.system_transmit_delay_us)
+            # \u00b5s * m/s / 1000  =  mm
+            axial_depth_mm = tof_us * sos_m_per_s / 1000.0
+        else:
+            axial_depth_mm = float("nan")
+
         result = {
             **meas,
             "pnp_MPa": pnp_MPa,
             "axial_depth_mm": axial_depth_mm,
+            "arrival_us": arrival_us,
+            "sos_water_m_per_s": sos_m_per_s,
         }
         self.report.waveform_at_peak = result
+
+        # D.2 - D.5 are figure cross-references so the row grid isn't
+        # sparse in the PDF/XLSX. The figures themselves are still
+        # embedded on the "Figures" sheet / PDF pages.
+        self.report.set_row(ROW["scan_2d_image"],   "2-D XY Scan",       "see Figure 1")
+        self.report.set_row(ROW["lateral_image"],   "1-D Lateral Scan",  "see Figure 2")
+        self.report.set_row(ROW["elevation_image"], "1-D Elevation Scan","see Figure 3")
+        self.report.set_row(ROW["waveform_image"],  "Waveform at Peak",  "see Figure 4")
+
         self.report.set_row(ROW["pnp_at_peak_MPa"], "PNP at Peak", pnp_MPa, unit="MPa")
         self.report.set_row(ROW["axial_depth_mm"], "Axial Depth of Peak",
                             axial_depth_mm, unit="mm")
-        # D.2/D.3/D.4/D.5 image rows get their paths from the report writer.
-        logger.info("Waveform at peak: PNP=%.3f MPa, depth=%.2f mm",
-                    pnp_MPa, axial_depth_mm)
+        self.report.set_row(ROW["arrival_us"], "Arrival Time",
+                            arrival_us if arrival_us is not None else float("nan"),
+                            unit="\u00b5s")
+        logger.info(
+            "Waveform at peak: PNP=%.3f MPa, arrival=%s, depth=%.2f mm "
+            "(sos=%.0f m/s)",
+            pnp_MPa,
+            f"{arrival_us:.2f}\u00b5s" if arrival_us is not None else "n/a",
+            axial_depth_mm, sos_m_per_s,
+        )
         return result
 
     def sweep_frequency(self, *, duration_msec: Optional[float] = None) -> ScanResult:
@@ -673,7 +720,15 @@ class Characterization:
         """Run every phase in order and grade."""
         self.collect_test_info()
         self.warmup_and_arrival_check()
-        self.find_peak_xy(x0=0,y0=0)
+        # Wipe any XY drift from a prior calibration / leftover run
+        # so the peak search is guaranteed to start from a known,
+        # transducer-centered reference. Axial (z) is left intact
+        # because it encodes the true focus depth.
+        self.ver.hydrophone_position[0] = 0.0
+        self.ver.hydrophone_position[1] = 0.0
+        logger.info("Running fresh find_peak from (x=0, y=0, z=%.2f mm).",
+                    float(self.ver.hydrophone_position[2]))
+        self.find_peak_xy(x0=0.0, y0=0.0)
         self.run_beam_scans() if not skip_2d else logger.info("Skipping beam scans (--skip-2d).")
         self.measure_waveform_at_peak()
         if not skip_frequency:

@@ -79,9 +79,17 @@ def _read_hwid(dev, module: int, label: str) -> tuple[str, str]:
         return "", ""
 
     try:
+        # Match the test app's HWID convention *exactly* so the XLSX we
+        # emit is byte-identical to what the app would produce for the
+        # same device. The app slices ``hwid_hex[:HW_ID_DATA_LENGTH]``
+        # (12 hex chars = 6 bytes) before base58-encoding -- see
+        # openlifu-test-app/test_reports/test_reports.py. That's what
+        # ends up in the report/config schema, so we mirror it.
         import base58
         from openlifu_sdk.io.LIFUConfig import HW_ID_DATA_LENGTH
-        b58 = base58.b58encode(bytes.fromhex(hex_hwid[:HW_ID_DATA_LENGTH * 2])).decode("utf-8")
+        b58 = base58.b58encode(
+            bytes.fromhex(hex_hwid[:HW_ID_DATA_LENGTH])
+        ).decode("utf-8")
     except Exception as e:
         logger.warning("Could not base58-encode %s HW ID: %s", label, e)
         b58 = ""

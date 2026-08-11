@@ -71,6 +71,23 @@ class AcceptanceCriteria:
     temperature: Temperature = field(default_factory=Temperature)
 
     @classmethod
+    def from_dict(cls, data: dict) -> "AcceptanceCriteria":
+        """Construct criteria from a plain dict; unknown keys ignored.
+
+        Used both by :meth:`from_file` and by :class:`ScanConfig` when
+        acceptance is embedded inside ``scan_config.json``.
+        """
+        data = data or {}
+        return cls(
+            arrival_time=ArrivalTime(**data.get("arrival_time", {})),
+            peak_offset=PeakOffset(**data.get("peak_offset", {})),
+            pnp_at_peak=PnpAtPeak(**data.get("pnp_at_peak", {})),
+            freq_response=FreqResponse(**data.get("freq_response", {})),
+            voltage_linearity=VoltageLinearity(**data.get("voltage_linearity", {})),
+            temperature=Temperature(**data.get("temperature", {})),
+        )
+
+    @classmethod
     def from_file(cls, path: Optional[Path] = None) -> "AcceptanceCriteria":
         """Load criteria from ``path``; unknown keys are ignored."""
         if path is None:
@@ -81,15 +98,7 @@ class AcceptanceCriteria:
                 "acceptance file %s does not exist; using defaults", path,
             )
             return cls()
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return cls(
-            arrival_time=ArrivalTime(**data.get("arrival_time", {})),
-            peak_offset=PeakOffset(**data.get("peak_offset", {})),
-            pnp_at_peak=PnpAtPeak(**data.get("pnp_at_peak", {})),
-            freq_response=FreqResponse(**data.get("freq_response", {})),
-            voltage_linearity=VoltageLinearity(**data.get("voltage_linearity", {})),
-            temperature=Temperature(**data.get("temperature", {})),
-        )
+        return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     @classmethod
     def load_or_create(cls, path: Path) -> "AcceptanceCriteria":

@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .acceptance import AcceptanceCriteria
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,6 +100,12 @@ class ScanConfig:
     scan_2d: Scan2D = field(default_factory=Scan2D)
     frequency_sweep: FrequencySweep = field(default_factory=FrequencySweep)
     voltage_sweep: VoltageSweep = field(default_factory=VoltageSweep)
+    acceptance: AcceptanceCriteria = field(default_factory=AcceptanceCriteria)
+    #: Speed of sound in water (m/s), used to convert pulse arrival
+    #: time to axial depth. 1500 m/s is standard for degassed water at
+    #: ~22 \u00b0C; tweak here if the tank is at a different temperature
+    #: or the medium changes.
+    sos_water_m_per_s: float = 1500.0
 
     # ------------------------------------------------------------------
     # I/O
@@ -119,6 +127,10 @@ class ScanConfig:
             scan_2d=Scan2D(**data.get("scan_2d", {})),
             frequency_sweep=FrequencySweep(**data.get("frequency_sweep", {})),
             voltage_sweep=VoltageSweep(**data.get("voltage_sweep", {})),
+            acceptance=AcceptanceCriteria.from_dict(data.get("acceptance", {})),
+            sos_water_m_per_s=float(
+                data.get("sos_water_m_per_s", cls.sos_water_m_per_s)
+            ),
         )
 
     @classmethod

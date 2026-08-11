@@ -160,7 +160,15 @@ def _sanitize_stem(name: str) -> str:
 # Figure builders
 # ----------------------------------------------------------------------
 def build_figures(report: TestReport) -> dict:
-    """Build a dict of matplotlib figures keyed by artifact name."""
+    """Build a dict of matplotlib figures keyed by artifact name.
+
+    The insertion order (scan_2d \u2192 lateral \u2192 elevation \u2192
+    waveform \u2192 freq \u2192 voltage) matches the "see Figure N"
+    cross-references written into the D-section rows by
+    :meth:`Characterization.measure_waveform_at_peak`. Figure
+    titles carry the same "Figure N:" prefix so the PDF page order
+    reads the way the row grid says it should.
+    """
     import matplotlib
     matplotlib.use("Agg", force=False)
     import matplotlib.pyplot as plt
@@ -168,7 +176,27 @@ def build_figures(report: TestReport) -> dict:
     figs: dict = {}
     scans = report.scans
 
-    # 1-D lateral (x sweep)
+    # Figure 1: 2-D XY heatmap.
+    s2d = scans.get("scan_2d")
+    if s2d is not None:
+        xs = s2d.coords.get("xfoci")
+        ys = s2d.coords.get("yfoci")
+        pnp = _pnp_MPa_grid(s2d.traces)
+        fig, ax = plt.subplots(figsize=(5, 4.2))
+        im = ax.imshow(pnp,
+                       extent=(float(xs[0]), float(xs[-1]),
+                               float(ys[0]), float(ys[-1])),
+                       origin="lower", aspect="equal", cmap="viridis")
+        ax.plot(0, 0, "r+", ms=14, mew=2, label="peak (relative)")
+        ax.set_xlabel("X offset (mm)")
+        ax.set_ylabel("Y offset (mm)")
+        ax.set_title(f"Figure 1: 2-D XY PNP map @ {report.frequency_kHz:.0f} kHz, "
+                     f"{report.voltage_V:.0f} V")
+        fig.colorbar(im, ax=ax, label="PNP (MPa)")
+        fig.tight_layout()
+        figs["scan_2d"] = fig
+
+    # Figure 2: 1-D lateral (x sweep).
     lat = scans.get("lateral_1d")
     if lat is not None:
         xs = lat.coords.get("xfoci")
@@ -179,13 +207,13 @@ def build_figures(report: TestReport) -> dict:
         ax.axvline(0.0, color="0.7", lw=0.7)
         ax.set_xlabel("X offset from peak (mm)")
         ax.set_ylabel("PNP (MPa)")
-        ax.set_title(f"1-D Lateral scan @ {report.frequency_kHz:.0f} kHz, "
+        ax.set_title(f"Figure 2: 1-D Lateral scan @ {report.frequency_kHz:.0f} kHz, "
                      f"{report.voltage_V:.0f} V")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         figs["lateral_1d"] = fig
 
-    # 1-D elevation (y sweep)
+    # Figure 3: 1-D elevation (y sweep).
     elev = scans.get("elevation_1d")
     if elev is not None:
         ys = elev.coords.get("yfoci")
@@ -200,33 +228,13 @@ def build_figures(report: TestReport) -> dict:
         ax.axvline(0.0, color="0.7", lw=0.7)
         ax.set_xlabel("Y offset from peak (mm)")
         ax.set_ylabel("PNP (MPa)")
-        ax.set_title(f"1-D Elevation scan @ {report.frequency_kHz:.0f} kHz, "
+        ax.set_title(f"Figure 3: 1-D Elevation scan @ {report.frequency_kHz:.0f} kHz, "
                      f"{report.voltage_V:.0f} V")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         figs["elevation_1d"] = fig
 
-    # 2-D XY heatmap
-    s2d = scans.get("scan_2d")
-    if s2d is not None:
-        xs = s2d.coords.get("xfoci")
-        ys = s2d.coords.get("yfoci")
-        pnp = _pnp_MPa_grid(s2d.traces)
-        fig, ax = plt.subplots(figsize=(5, 4.2))
-        im = ax.imshow(pnp,
-                       extent=(float(xs[0]), float(xs[-1]),
-                               float(ys[0]), float(ys[-1])),
-                       origin="lower", aspect="equal", cmap="viridis")
-        ax.plot(0, 0, "r+", ms=14, mew=2, label="peak (relative)")
-        ax.set_xlabel("X offset (mm)")
-        ax.set_ylabel("Y offset (mm)")
-        ax.set_title(f"2-D XY PNP map @ {report.frequency_kHz:.0f} kHz, "
-                     f"{report.voltage_V:.0f} V")
-        fig.colorbar(im, ax=ax, label="PNP (MPa)")
-        fig.tight_layout()
-        figs["scan_2d"] = fig
-
-    # Waveform at peak
+    # Figure 4: Waveform at peak.
     wf = report.waveform_at_peak
     if wf:
         t_us = np.asarray(wf["t"], dtype=float) * 1e-3
@@ -239,14 +247,22 @@ def build_figures(report: TestReport) -> dict:
             ylabel = f"Amplitude ({wf.get('units', 'a.u.')})"
         fig, ax = plt.subplots(figsize=(6, 3.2))
         ax.plot(t_us, y, lw=0.9)
+        arrival_us = wf.get("arrival_us")
+        if arrival_us is not None and np.isfinite(arrival_us):
+            ax.axvline(float(arrival_us), color="tab:red", lw=0.8,
+                       label=f"arrival {float(arrival_us):.2f} \u00b5s")
+            ax.legend(loc="upper right", fontsize=8)
         ax.set_xlabel("Time (\u00b5s)")
         ax.set_ylabel(ylabel)
-        ax.set_title(f"Waveform at peak (PNP = {wf.get('pnp_MPa', float('nan')):.3f} MPa)")
+        ax.set_title(
+            f"Figure 4: Waveform at peak "
+            f"(PNP = {wf.get('pnp_MPa', float('nan')):.3f} MPa)"
+        )
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         figs["waveform_at_peak"] = fig
 
-    # Frequency response
+    # Figure 5: Frequency response.
     fr = report.freq_response
     if fr:
         freqs = np.asarray(fr["frequencies_kHz"], dtype=float)
@@ -257,13 +273,13 @@ def build_figures(report: TestReport) -> dict:
                    label=f"nominal {report.frequency_kHz:.0f} kHz")
         ax.set_xlabel("Frequency (kHz)")
         ax.set_ylabel("PNP (MPa)")
-        ax.set_title(f"Frequency response @ {report.voltage_V:.0f} V")
+        ax.set_title(f"Figure 5: Frequency response @ {report.voltage_V:.0f} V")
         ax.grid(True, alpha=0.3)
         ax.legend()
         fig.tight_layout()
         figs["freq_response"] = fig
 
-    # Voltage linearity
+    # Figure 6: Voltage linearity.
     vr = report.voltage_response
     if vr:
         volts = np.asarray(vr["voltages_V"], dtype=float)
@@ -277,7 +293,7 @@ def build_figures(report: TestReport) -> dict:
         ax.plot(volts, fit, "-", lw=1, label=f"fit (R\u00b2={r2:.4f})")
         ax.set_xlabel("HV rail (V)")
         ax.set_ylabel("PNP (MPa)")
-        ax.set_title(f"Voltage linearity @ {report.frequency_kHz:.0f} kHz")
+        ax.set_title(f"Figure 6: Voltage linearity @ {report.frequency_kHz:.0f} kHz")
         ax.grid(True, alpha=0.3)
         ax.legend()
         fig.tight_layout()
@@ -456,6 +472,9 @@ def write_pdf(report: TestReport, path: Path,
 
     path = Path(path)
     figures = figures or {}
+    # Build a letter -> section title map so we can insert a header
+    # line every time the section changes in the cover-page listing.
+    section_titles = {letter: title for letter, title in SECTION_HEADERS}
     with PdfPages(path) as pdf:
         # Cover page
         fig, ax = plt.subplots(figsize=(8.5, 11))
@@ -466,10 +485,16 @@ def write_pdf(report: TestReport, path: Path,
             f"Overall verdict: {'PASS' if report.overall_pass else 'FAIL'}",
             f"Date: {report.started_at}   Finished: {report.finished_at}",
             "",
-            "-- Section A: Test Information --",
         ]
+        current_letter: Optional[str] = None
         for id_, row in _iter_rows_in_order(report):
             letter = id_.split(".", 1)[0]
+            if letter != current_letter:
+                if current_letter is not None:
+                    lines.append("")
+                title = section_titles.get(letter, "")
+                lines.append(f"-- Section {letter}: {title} --")
+                current_letter = letter
             val = row.value
             if isinstance(val, float):
                 val = f"{val:.4g}"
@@ -492,15 +517,17 @@ def write_pdf(report: TestReport, path: Path,
 # ----------------------------------------------------------------------
 # CSV bundle writer
 # ----------------------------------------------------------------------
-def write_csv_bundle(report: TestReport, out_dir: Path) -> Path:
+def write_csv_bundle(report: TestReport, out_dir: Path,
+                     *, summary_name: str = "summary.csv") -> Path:
     """Write flat summary CSV + per-scan CSVs into ``out_dir``."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = out_dir / "raw"
     raw_dir.mkdir(exist_ok=True)
 
-    # Flat summary.csv
-    summary_path = out_dir / "summary.csv"
+    # Flat summary CSV (name is caller-supplied so top-level artifacts
+    # can share a ``<TXM-SN>_...`` prefix).
+    summary_path = out_dir / summary_name
     with summary_path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(["Index", "Item", "Value", "Unit", "Status",
@@ -514,7 +541,7 @@ def write_csv_bundle(report: TestReport, out_dir: Path) -> Path:
                 thr = str(thr)
             w.writerow([id_, row.label, val, row.unit, row.status,
                         "" if thr is None else thr, row.note])
-    logger.info("summary.csv written to %s", summary_path)
+    logger.info("%s written to %s", summary_path.name, summary_path)
 
     # Per-scan CSVs (reduced to PNP-per-point + coords) and raw NPZs.
     for name, scan in report.scans.items():
@@ -635,7 +662,8 @@ def write_report(report: TestReport, output_dir: Optional[Path] = None,
     Layout when ``output_dir`` is omitted::
 
         test_reports/<TXM-SN>/<YYYYMMDD>_<HHMMSS>/
-            report.xlsx, report.pdf, device_config.json, summary.csv,
+            <TXM-SN>_Report.xlsx, <TXM-SN>_Report.pdf,
+            <TXM-SN>_device_config.json, <TXM-SN>_summary.csv,
             *.csv, figures/*.png, raw/*.npz, operator_prefs_snapshot.json
 
     Args:
@@ -669,13 +697,16 @@ def write_report(report: TestReport, output_dir: Optional[Path] = None,
     # Figures first (both xlsx + pdf reuse them).
     figures = build_figures(report)
 
-    write_xlsx(report, run_dir / "report.xlsx", figures=figures)
-    write_pdf(report, run_dir / "report.pdf", figures=figures)
-    write_csv_bundle(report, run_dir)
+    # All top-level artifacts share the ``<TXM-SN>_...`` prefix so a
+    # single file picked out of the folder is self-describing.
+    report_stem = f"{sn}_Report"
+    write_xlsx(report, run_dir / f"{report_stem}.xlsx", figures=figures)
+    write_pdf(report, run_dir / f"{report_stem}.pdf", figures=figures)
+    write_csv_bundle(report, run_dir, summary_name=f"{sn}_summary.csv")
 
     if write_device_config_json:
         try:
-            write_device_config(report, run_dir / "device_config.json")
+            write_device_config(report, run_dir / f"{sn}_device_config.json")
         except Exception as e:
             logger.warning("Skipping device_config.json: %s", e)
 

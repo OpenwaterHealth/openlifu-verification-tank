@@ -212,7 +212,7 @@ __marimo__/
 scripts/data/
 
 # Local, per-machine test outputs and calibrations
-acceptance.json
+scan_config.json
 hydrophone_position.json
 test_reports/
 
