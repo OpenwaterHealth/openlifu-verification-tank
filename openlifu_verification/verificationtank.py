@@ -120,6 +120,7 @@ class VerificationTank:
                  hydrophone=None,
                  hydrophone_position=(0.0, 0.0, 50.0),
                  calibration_path=HYDROPHONE_STATE_PATH,
+                 use_calibration=True,
                  system_transmit_delay_us=SYSTEM_TRANSMIT_DELAY_US):
         self.use_picoscope = use_picoscope
         self.resolution = resolution
@@ -148,6 +149,12 @@ class VerificationTank:
         self.hydrophone = hydrophone
         self.hydrophone_position = np.array(hydrophone_position, dtype=float).reshape(3)
         self.calibration_path = Path(calibration_path) if calibration_path else None
+        # When ``False``, keep the hydrophone attached (so position,
+        # id, and any calibration-file lookups still work) but skip
+        # the mV \u2192 Pa conversion so all reported traces stay in raw
+        # scope volts. Useful when the operator wants to see the raw
+        # signal even though a calibration is available.
+        self.use_calibration = bool(use_calibration)
         # Fixed electrical delay between trigger and actual ultrasound
         # emission (µs). Used to convert arrival time ↔ axial depth
         # via ``expected_arrival_us = system_transmit_delay_us + z_mm / SOS``.
@@ -252,7 +259,17 @@ class VerificationTank:
             # subsequent relative scans will use as their origin.
             hydro_id = self._current_hydrophone_id()
             if self.hydrophone is not None:
-                hydro_desc = f"attached (id={hydro_id!r})" if hydro_id else "attached"
+                if self.use_calibration:
+                    hydro_desc = (f"attached (id={hydro_id!r})"
+                                  if hydro_id else "attached")
+                else:
+                    hydro_desc = (
+                        f"attached (id={hydro_id!r}) but calibration "
+                        f"disabled -- traces reported in mV"
+                        if hydro_id
+                        else "attached but calibration disabled -- "
+                             "traces reported in mV"
+                    )
             else:
                 hydro_desc = "not attached (traces will be reported in mV)"
             src_desc = f" [{cal_source}]" if cal_source else ""
@@ -2052,7 +2069,7 @@ class VerificationTank:
         else:
             trace_mv = stack.mean(axis=0)
 
-        if self.hydrophone is not None:
+        if self.hydrophone is not None and self.use_calibration:
             trace = np.asarray(
                 self.hydrophone.mv_to_pa(trace_mv, self.frequency * 1e3),
                 dtype=float,
@@ -2526,10 +2543,11 @@ class VerificationTank:
 
         Returns:
             ``(traces_out, units)`` where ``units`` is ``"Pa"`` when
-            the hydrophone is attached, otherwise ``"mV"`` and
+            the hydrophone is attached and ``self.use_calibration``
+            is ``True``. Otherwise ``units`` is ``"mV"`` and
             ``traces`` is returned unchanged.
         """
-        if self.hydrophone is None:
+        if self.hydrophone is None or not self.use_calibration:
             return traces, "mV"
         freq_hz_arr = np.asarray(frequency_hz, dtype=float)
         pa_per_v = np.asarray(

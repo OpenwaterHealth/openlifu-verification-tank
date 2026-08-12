@@ -76,6 +76,11 @@ def main():
                         default=str(paths.HYDROPHONE_STATE_PATH),
                         help="JSON file storing hydrophone position + last-used ID "
                              "(auto-loaded if present).")
+    parser.add_argument("--raw-mv", action="store_true",
+                        help="Skip the mV->Pa calibration even if a "
+                             "hydrophone ID is saved. Position calibration "
+                             "and hydrophone ID still load normally; only "
+                             "the trace/rms/vpp reporting stays in mV.")
     # --- Misc ---
     parser.add_argument("--chunk-size", type=int, default=0,
                         help="Rapid-block chunk size (0 = whole sweep).")
@@ -125,6 +130,7 @@ def main():
                               num_modules=1,
                               ext_power_supply=False,
                               hydrophone=args.hydrophone or None,
+                              use_calibration=not args.raw_mv,
                               calibration_path=args.calibration_path or None) as ver:
             if args.log_file:
                 ver.add_log_file(args.log_file)

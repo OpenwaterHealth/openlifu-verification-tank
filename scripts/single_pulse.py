@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from openlifu_verification import ScanResult, VerificationTank, paths, set_log_level
+from openlifu_verification.characterization import _find_arrival_us
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,11 @@ def main():
     parser.add_argument("--hydro-range-mv", type=int, default=100)
     parser.add_argument("--timeout-s", type=float, default=3.0)
     # --- Hydrophone ---
+    parser.add_argument("--raw-mv", action="store_true",
+                        help="Skip the mV->Pa calibration even if a "
+                             "hydrophone ID is saved. Position calibration "
+                             "and hydrophone ID still load normally; only "
+                             "the trace/rms/vpp reporting stays in mV.")
     parser.add_argument("--hydrophone", type=str, default="",
                         help="Hydrophone calibration file or bare ID. Falls "
                              "back to the last-used ID stored in --calibration-path.")
@@ -79,6 +85,7 @@ def main():
                               hydrophone=args.hydrophone or None,
                               calibration_path=args.calibration_path or None,
                               hydrophone_range_mv=args.hydro_range_mv,
+                              use_calibration=not args.raw_mv,
                               ext_power_supply=False) as ver:
             resolved = ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
@@ -102,7 +109,7 @@ def main():
                 )
                 if result is not None:
                     trace_mv = np.asarray(result[ver.hydrophone_channel])
-                    if ver.hydrophone is not None:
+                    if ver.hydrophone is not None and ver.use_calibration:
                         trace = ver.hydrophone.mv_to_pa(trace_mv, ver.frequency * 1e3)
                         units = "Pa"
                     else:
@@ -132,7 +139,16 @@ def main():
     if result is None or scan_result is None:
         logger.warning("No pulse captured within the timeout window.")
         return
-    scan_result.plot(kind="trace", show=True)
+    # Estimate the acoustic arrival time from the trace so the plot
+    # shows where the pulse actually landed. Traces are stored in the
+    # emission-referenced frame, so the arrival time equals the
+    # time-of-flight from the transducer face to the hydrophone.
+    arrival_us = _find_arrival_us(scan_result.t, scan_result.traces[0])
+    if arrival_us is not None:
+        logger.info("Estimated arrival time: %.2f \u00b5s", arrival_us)
+    else:
+        logger.info("Could not estimate arrival time from trace.")
+    scan_result.plot(kind="trace", show=True, arrival_us=arrival_us)
 
 
 if __name__ == "__main__":

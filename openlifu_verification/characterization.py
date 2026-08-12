@@ -72,6 +72,11 @@ ROW = {
     "arrival_us":        "D.9",
 }
 
+# Voltage-linearity R\u00b2 lives at F.8 (the row on which the F section's
+# PASS/FAIL is graded). Individual F.2 - F.7 PNP rows are informational
+# only.
+ROW["voltage_r2"] = "F.8"
+
 # Scan geometry defaults kept as module constants for backward compat;
 # the live values are pulled from :class:`ScanConfig` at run time.
 LATERAL_1D_EXTENT_MM = 5.0
@@ -367,6 +372,8 @@ class Characterization:
                                   keep_plot_open=False, **kw)
         self.report.peak_xy_mm = (float(x), float(y))
         logger.info("Peak located at (%.4f, %.4f) mm", x, y)
+        # Grade inline so the offset PASS/FAIL is visible immediately.
+        self._grade_peak_offset()
         return float(x), float(y)
 
     def run_beam_scans(self) -> dict:
@@ -485,6 +492,11 @@ class Characterization:
             f"{arrival_us:.2f}\u00b5s" if arrival_us is not None else "n/a",
             axial_depth_mm, sos_m_per_s,
         )
+        # Grade inline so the operator sees the PASS/FAIL verdict
+        # immediately after the measurement, not retroactively at
+        # the end of the run.
+        self._grade_arrival()
+        self._grade_pnp_at_peak()
         return result
 
     def sweep_frequency(self, *, duration_usec: Optional[float] = None) -> ScanResult:
@@ -518,6 +530,9 @@ class Characterization:
             label = f"PNP ({int(round(f))} kHz)"
             self.report.set_row(row_id, label, float(p), unit="MPa")
         self.report.set_row("E.1", "Voltage Rail Setting", self.voltage_V, unit="V (+/-)")
+        # Grade inline so the ripple PASS/FAIL is logged as soon as
+        # the sweep finishes.
+        self._grade_freq_response()
         return result
 
     def sweep_voltage(self, *,
@@ -575,8 +590,17 @@ class Characterization:
             row_id = f"F.{i}"
             label = f"PNP ({int(round(v))}V/{int(round(2*v))}Vpp)"
             self.report.set_row(row_id, label, float(p), unit="MPa")
+        # F.8 carries the linearity R\u00b2 (the metric the section's
+        # PASS/FAIL is graded on). The individual F.2 - F.7 PNP rows
+        # stay ungraded (status="NA") so their values aren't
+        # misinterpreted as per-voltage acceptance results.
+        self.report.set_row(ROW["voltage_r2"], "Voltage Linearity R\u00b2",
+                            float(r2))
         logger.info("Voltage linearity: slope=%.4f MPa/V  R\u00b2=%.4f",
                     slope, r2)
+        # Grade inline so R\u00b2 PASS/FAIL is logged as soon as the
+        # sweep finishes.
+        self._grade_voltage_linearity()
         return result
 
     # ------------------------------------------------------------------
@@ -654,84 +678,137 @@ class Characterization:
     # ------------------------------------------------------------------
     # Grading
     # ------------------------------------------------------------------
+    # The per-section ``_grade_*`` helpers are called from within the
+    # measurement methods themselves so the operator sees a PASS/FAIL
+    # verdict for each phase as soon as the underlying data lands.
+    # ``grade()`` at the end of the run just aggregates whatever
+    # verdicts are already recorded (plus a couple of section-less
+    # checks like peak offset).
+
+    def _grade_arrival(self) -> Optional[bool]:
+        """Stamp the D.9 row with PASS/FAIL from ``arrival_check`` and
+        log the verdict. Returns the boolean verdict (or ``None`` if
+        the arrival check has not been run yet).
+        """
+        arr = self.report.arrival_check
+        if not arr:
+            return None
+        passed = bool(arr.get("passed", False))
+        expected_us = arr.get("expected_us")
+        tol_us = arr.get("tol_us")
+        if expected_us is not None and tol_us is not None:
+            threshold = f"{expected_us:.2f} \u00b1 {tol_us:.2f} \u00b5s"
+            note = f"tol = \u00b1{self.criteria.arrival_time.tol_pct:g}%"
+        else:
+            threshold = None
+            note = arr.get("reason", "")
+        if ROW["arrival_us"] in self.report.rows:
+            self.report.grade_row(ROW["arrival_us"], passed=passed,
+                                  threshold=threshold, note=note)
+        logger.info("[grade] Arrival time \u2192 %s (%s)",
+                    "PASS" if passed else "FAIL", note)
+        return passed
+
+    def _grade_pnp_at_peak(self) -> Optional[bool]:
+        """Stamp the D.7 row with PASS/FAIL and log the verdict."""
+        wf = self.report.waveform_at_peak
+        if not wf:
+            return None
+        pnp = wf.get("pnp_MPa", float("nan"))
+        thr = self.criteria.pnp_min_for(self.frequency_kHz)
+        if thr is None:
+            self.report.grade_row(
+                ROW["pnp_at_peak_MPa"], passed=True,
+                note=f"no threshold for {self.frequency_kHz} kHz",
+            )
+            logger.info("[grade] PNP at peak \u2192 SKIP "
+                        "(no threshold for %g kHz; measured=%.3f MPa)",
+                        self.frequency_kHz, float(pnp))
+            return None
+        passed = float(pnp) >= thr
+        self.report.grade_row(ROW["pnp_at_peak_MPa"], passed=passed,
+                              threshold=thr,
+                              note=f"threshold >= {thr} MPa")
+        logger.info("[grade] PNP at peak \u2192 %s "
+                    "(measured=%.3f MPa, threshold \u2265 %.3f MPa)",
+                    "PASS" if passed else "FAIL", float(pnp), float(thr))
+        return passed
+
+    def _grade_freq_response(self) -> Optional[bool]:
+        """Compute the frequency-sweep ripple, log PASS/FAIL, and
+        annotate every E.2 - E.9 row with the ripple in its note.
+        (No dedicated report row exists for ripple, so the section
+        verdict is broadcast to the E rows' notes as a courtesy.)"""
+        fr = self.report.freq_response
+        if fr.get("pnp_MPa") is None:
+            return None
+        ripple = _ripple_dB(np.asarray(fr["pnp_MPa"]))
+        max_r = self.criteria.freq_response.max_ripple_dB
+        passed = ripple <= max_r
+        note = f"ripple = {ripple:.2f} dB (max {max_r} dB)"
+        for i in range(2, 10):
+            rid = f"E.{i}"
+            if rid in self.report.rows:
+                self.report.grade_row(rid, passed=passed,
+                                      threshold=max_r, note=note)
+        logger.info("[grade] Frequency response \u2192 %s (%s)",
+                    "PASS" if passed else "FAIL", note)
+        return passed
+
+    def _grade_voltage_linearity(self) -> Optional[bool]:
+        """Stamp the F.8 R\u00b2 row with PASS/FAIL and log the verdict.
+        The individual F.2 - F.7 PNP rows are left with ``status="NA"``
+        so their values aren't misinterpreted as per-voltage
+        acceptance results."""
+        vr = self.report.voltage_response
+        if vr.get("r2") is None:
+            return None
+        r2 = float(vr["r2"])
+        r2_min = float(self.criteria.voltage_linearity.r2_min)
+        passed = r2 >= r2_min
+        note = f"R\u00b2 = {r2:.4f} (min {r2_min})"
+        if ROW["voltage_r2"] in self.report.rows:
+            self.report.grade_row(ROW["voltage_r2"], passed=passed,
+                                  threshold=r2_min, note=note)
+        logger.info("[grade] Voltage linearity \u2192 %s (%s)",
+                    "PASS" if passed else "FAIL", note)
+        return passed
+
+    def _grade_peak_offset(self) -> Optional[bool]:
+        """Peak offset from nominal (0, 0). No dedicated report row \u2014
+        log-only for now."""
+        if not self.report.peak_xy_mm:
+            return None
+        off = float(np.hypot(*self.report.peak_xy_mm))
+        max_mm = self.criteria.peak_offset.max_mm
+        passed = off <= max_mm
+        note = f"|peak - (0,0)| = {off:.3f} mm (max {max_mm} mm)"
+        logger.info("[grade] Peak offset \u2192 %s (%s)",
+                    "PASS" if passed else "FAIL", note)
+        return passed
+
     def grade(self) -> dict:
-        """Compare every measurement to acceptance criteria; set statuses."""
-        c = self.criteria
-        r = self.report
-        summary = {}
+        """Aggregate the per-section verdicts into an overall PASS/FAIL.
 
-        # Arrival time.
-        arr = r.arrival_check
-        if arr:
-            passed = bool(arr.get("passed", False))
-            summary["arrival_time"] = passed
-            expected_us = arr.get("expected_us")
-            tol_us = arr.get("tol_us")
-            if expected_us is not None and tol_us is not None:
-                threshold = f"{expected_us:.2f} \u00b1 {tol_us:.2f} \u00b5s"
-                note = f"tol = \u00b1{c.arrival_time.tol_pct:g}%"
-            else:
-                threshold = None
-                note = arr.get("reason", "")
-            if ROW["arrival_us"] in r.rows:
-                r.grade_row(ROW["arrival_us"], passed=passed,
-                            threshold=threshold, note=note)
-
-        # Peak offset from nominal (0, 0).
-        if r.peak_xy_mm:
-            off = float(np.hypot(*r.peak_xy_mm))
-            passed = off <= c.peak_offset.max_mm
-            summary["peak_offset"] = passed
-            note = f"|peak - (0,0)| = {off:.3f} mm"
-            # There's no dedicated report row, so log-only for now.
-            logger.info("Peak offset from nominal: %s  \u2192 %s",
-                        note, "PASS" if passed else "FAIL")
-
-        # PNP at peak.
-        if r.waveform_at_peak:
-            pnp = r.waveform_at_peak.get("pnp_MPa", float("nan"))
-            thr = c.pnp_min_for(self.frequency_kHz)
-            if thr is None:
-                r.grade_row(ROW["pnp_at_peak_MPa"], passed=True,
-                            note=f"no threshold for {self.frequency_kHz} kHz")
-                summary["pnp_at_peak"] = None
-            else:
-                passed = float(pnp) >= thr
-                r.grade_row(ROW["pnp_at_peak_MPa"], passed=passed,
-                            threshold=thr,
-                            note=f"threshold >= {thr} MPa")
-                summary["pnp_at_peak"] = passed
-
-        # Frequency response ripple.
-        if r.freq_response.get("pnp_MPa") is not None:
-            ripple = _ripple_dB(np.asarray(r.freq_response["pnp_MPa"]))
-            passed = ripple <= c.freq_response.max_ripple_dB
-            summary["freq_response"] = passed
-            # No single row for it; tag every E row's note with the ripple.
-            note = f"ripple = {ripple:.2f} dB (max {c.freq_response.max_ripple_dB} dB)"
-            for i in range(2, 10):
-                rid = f"E.{i}"
-                if rid in r.rows:
-                    r.grade_row(rid, passed=passed, threshold=c.freq_response.max_ripple_dB,
-                                note=note)
-
-        # Voltage linearity R^2.
-        if r.voltage_response.get("r2") is not None:
-            r2 = r.voltage_response["r2"]
-            passed = r2 >= c.voltage_linearity.r2_min
-            summary["voltage_linearity"] = passed
-            note = f"R\u00b2 = {r2:.4f} (min {c.voltage_linearity.r2_min})"
-            for i in range(2, 8):
-                rid = f"F.{i}"
-                if rid in r.rows:
-                    r.grade_row(rid, passed=passed,
-                                threshold=c.voltage_linearity.r2_min, note=note)
+        Each section is graded eagerly by its own ``_grade_*`` helper
+        as soon as the underlying data is available (arrival, PNP,
+        frequency ripple, voltage linearity), so this method is a
+        thin aggregator. It also runs the couple of checks that
+        don't have a natural attachment point in a measurement
+        method (currently: peak offset).
+        """
+        summary: dict[str, Optional[bool]] = {}
+        summary["arrival_time"] = self._grade_arrival()
+        summary["peak_offset"] = self._grade_peak_offset()
+        summary["pnp_at_peak"] = self._grade_pnp_at_peak()
+        summary["freq_response"] = self._grade_freq_response()
+        summary["voltage_linearity"] = self._grade_voltage_linearity()
 
         # Overall pass = all non-None entries pass.
         booleans = [v for v in summary.values() if v is not None]
-        r.overall_pass = all(booleans) if booleans else False
+        self.report.overall_pass = all(booleans) if booleans else False
         logger.info("Overall verdict: %s (%s)",
-                    "PASS" if r.overall_pass else "FAIL",
+                    "PASS" if self.report.overall_pass else "FAIL",
                     ", ".join(f"{k}={v}" for k, v in summary.items()))
         return summary
 

@@ -46,6 +46,11 @@ def main():
                         help="JSON file storing hydrophone position + last-used ID.")
     parser.add_argument("--hydro-range-mv", type=int, default=5000,
                         help="Scope full-scale on the hydrophone channel (default 5000 mV).")
+    parser.add_argument("--raw-mv", action="store_true",
+                        help="Skip the mV->Pa calibration even if a "
+                             "hydrophone ID is saved. Position calibration "
+                             "and hydrophone ID still load normally; only "
+                             "the trace/rms/vpp reporting stays in mV.")
     # --- Misc ---
     parser.add_argument("--chunk-size", type=int, default=0)
     parser.add_argument("--n-averages", type=int, default=1,
@@ -94,6 +99,7 @@ def main():
                               ext_power_supply=False,
                               hydrophone_range_mv=args.hydro_range_mv,
                               hydrophone=args.hydrophone or None,
+                              use_calibration=not args.raw_mv,
                               calibration_path=args.calibration_path or None) as ver:
             if args.log_file:
                 ver.add_log_file(args.log_file)

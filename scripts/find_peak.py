@@ -126,6 +126,11 @@ def main():
                         help="After convergence, persist the found (x, y, z) + "
                              "hydrophone ID to --calibration-path.")
     parser.add_argument("--hydro-range-mv", type=int, default=100)
+    parser.add_argument("--raw-mv", action="store_true",
+                        help="Skip the mV->Pa calibration even if a "
+                             "hydrophone ID is saved. Position calibration "
+                             "and hydrophone ID still load normally; only "
+                             "the reported trace amplitudes stay in mV.")
     parser.add_argument("--log-file", type=str, default="")
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument("--verbose", "-v", action="store_true")
@@ -148,6 +153,7 @@ def main():
                               ext_power_supply=False,
                               hydrophone_range_mv=args.hydro_range_mv,
                               hydrophone=args.hydrophone or None,
+                              use_calibration=not args.raw_mv,
                               calibration_path=args.calibration_path or None) as ver:
             if args.log_file:
                 ver.add_log_file(args.log_file)

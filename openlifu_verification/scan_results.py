@@ -104,13 +104,14 @@ class ScanResult:
              show: bool = False,
              save_as: str | Path = "",
              title: str | None = None,
+             arrival_us: float | None = None,
              **kwargs):
         """Render a quick-look plot of the scan.
 
         Args:
             kind: Plot style.
 
-                - ``"auto"`` (default): pick based on coord layout —
+                - ``"auto"`` (default): pick based on coord layout \u2014
                   ``"line"`` for 1-D coords, ``"heatmap"`` for 2-D.
                 - ``"line"``: line plot of the reduction vs the single
                   coord axis. Requires 1-D coords.
@@ -122,13 +123,16 @@ class ScanResult:
                 - ``"trace_image"``: imshow of all traces along the
                   coord axis (only meaningful for 1-D sweeps).
 
-            reduce: Reduction used by ``"line"``/``"heatmap"`` —
+            reduce: Reduction used by ``"line"``/``"heatmap"`` \u2014
                 ``"vpp"`` (default), ``"vmin"``, or ``"vmax"``.
             index: Trace picker for ``"trace"``.
             ax: Optional matplotlib Axes to draw into.
             show: Call ``plt.show()`` at the end.
             save_as: If truthy, save the figure to this path.
             title: Override the auto-generated title.
+            arrival_us: If given and ``kind=="trace"``, overlay a
+                vertical dashed line at this time (\u00b5s) labeled
+                "arrival". Ignored for other plot kinds.
             **kwargs: Passed through to the underlying matplotlib call
                 (``plot``/``imshow``).
 
@@ -190,6 +194,11 @@ class ScanResult:
             ax.set_xlabel("time (\u00b5s)")
             ax.set_ylabel(self._trace_label(y_unit))
             ax.grid(True)
+            if arrival_us is not None and np.isfinite(arrival_us):
+                ax.axvline(float(arrival_us), color="tab:red",
+                           linestyle="--", linewidth=1,
+                           label=f"arrival = {float(arrival_us):.2f} \u00b5s")
+                ax.legend(loc="best")
 
         elif kind == "trace_image":
             if n_coord_axes != 1:

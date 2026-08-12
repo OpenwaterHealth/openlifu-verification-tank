@@ -83,6 +83,11 @@ def main():
                         help="Hydrophone calibration file or bare ID.")
     parser.add_argument("--calibration-path", type=str,
                         default=str(paths.HYDROPHONE_STATE_PATH))
+    parser.add_argument("--raw-mv", action="store_true",
+                        help="Skip the mV->Pa calibration even if a "
+                             "hydrophone ID is saved. Position calibration "
+                             "and hydrophone ID still load normally; only "
+                             "the reported trace amplitudes stay in mV.")
     parser.add_argument("--num-modules", type=int, default=1)
     # --- Plot / output ---
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
@@ -127,6 +132,7 @@ def main():
                               hydrophone=args.hydrophone or None,
                               calibration_path=args.calibration_path or None,
                               hydrophone_range_mv=args.hydro_range_mv,
+                              use_calibration=not args.raw_mv,
                               ext_power_supply=False) as ver:
             resolved = ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
@@ -162,7 +168,7 @@ def main():
                 )
             else:
                 traces_mv = np.asarray(bulk[ver.hydrophone_channel])
-                if ver.hydrophone is not None:
+                if ver.hydrophone is not None and ver.use_calibration:
                     traces = ver.hydrophone.mv_to_pa(traces_mv, ver.frequency * 1e3)
                     units = "Pa"
                 else:

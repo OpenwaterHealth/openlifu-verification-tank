@@ -44,6 +44,7 @@ class DryRunTank:
         noise_Pa=8e3,
         system_transmit_delay_us: float = 114.0,
         rng_seed: Optional[int] = 0,
+        use_calibration: bool = True,
     ):
         self.frequency = float(frequency)
         self.hydrophone_position = np.array(hydrophone_position, dtype=float).reshape(3)
@@ -64,6 +65,11 @@ class DryRunTank:
         # No-op hydrophone attribute so downstream code sees "attached".
         self.hydrophone = _DryHydrophone()
         self.calibration_path = None
+        # Kept for API parity with :class:`VerificationTank`; the
+        # dry-run synth always emits Pa, so toggling this flag has
+        # no effect on the returned traces. Consumers that inspect
+        # ``ver.use_calibration`` still see the intended value.
+        self.use_calibration = bool(use_calibration)
 
     # --- context manager ------------------------------------------------
     def __enter__(self):
