@@ -48,10 +48,31 @@ def main():
                         help="Starting x (mm). Defaults to 0.")
     parser.add_argument("--y0", type=float, default=0,
                         help="Starting y (mm). Defaults to 0.")
+    parser.add_argument("--method", choices=("grid", "gradient"),
+                        default="grid",
+                        help="Search algorithm. 'grid' (default) walks a "
+                             "fixed x/y grid, caches all samples, and "
+                             "least-squares-fits a 2-D paraboloid over the "
+                             "3x3 window around the bracketed peak. "
+                             "'gradient' is the older direct-search + "
+                             "subsample-refinement algorithm.")
+    # --- grid_walk_search parameters ---
+    parser.add_argument("--grid-step", type=float, default=0.2,
+                        help="[grid] Grid spacing (mm). Also the side "
+                             "length of the paraboloid fit cell. Default "
+                             "0.2 mm.")
+    parser.add_argument("--max-evaluations", type=int, default=50,
+                        help="[grid] Cap on total new measurements. Cached "
+                             "grid-node re-visits are free. Default 50.")
+    parser.add_argument("--fit-window", type=int, default=1,
+                        help="[grid] Radius (in grid nodes) around the "
+                             "converged best used for the paraboloid fit. "
+                             "1 -> 3x3, 2 -> 5x5. Default 1.")
+    # --- gradient_search parameters ---
     parser.add_argument("--initial-step", type=float, default=0.25,
-                        help="Initial trial step length (mm).")
+                        help="[gradient] Initial trial step length (mm).")
     parser.add_argument("--tol", type=float, default=0.02,
-                        help="Convergence tolerance (mm).")
+                        help="[gradient] Convergence tolerance (mm).")
     parser.add_argument("--max-iter", type=int, default=40)
     parser.add_argument("--hysteresis", type=float, default=0.01,
                         help="Required fractional RMS improvement to accept a move.")
@@ -62,6 +83,19 @@ def main():
     parser.add_argument("--min-line-step-scale", type=float, default=0.05,
                         help="Smallest backtracking line-search step, as a "
                              "fraction of the current step.")
+    parser.add_argument("--min-step", type=float, default=0.2,
+                        help="Minimum probe spacing (mm) below which the "
+                             "grid stops shrinking. This is the roll-off "
+                             "scale used for symmetry-centering. Set "
+                             "~equal to the transducer spot radius "
+                             "(default 0.2 mm = 200 µm). Setting this to "
+                             "a very small value restores the old "
+                             "micro-peak-hunting behavior.")
+    parser.add_argument("--max-polish-iter", type=int, default=6,
+                        help="Cap on symmetry-polish iterations (once step "
+                             "has reached --min-step) before declaring "
+                             "convergence. Prevents endless jitter around "
+                             "a noisy top.")
     parser.add_argument("--no-rotate-basis", action="store_true",
                         help="Keep probes axis-aligned each iteration instead of "
                              "rotating along the accepted gradient direction.")
@@ -129,12 +163,18 @@ def main():
             t_start = time.perf_counter()
             x_peak, y_peak = ver.find_peak(
                 x0=args.x0, y0=args.y0, z=args.z,
+                method=args.method,
+                grid_step=args.grid_step,
+                max_evaluations=args.max_evaluations,
+                fit_window=args.fit_window,
                 initial_step=args.initial_step,
                 tol=args.tol,
                 max_iter=args.max_iter,
                 hysteresis=args.hysteresis,
                 probe_scale=args.probe_scale,
                 min_line_step_scale=args.min_line_step_scale,
+                min_step=args.min_step,
+                max_polish_iter=args.max_polish_iter,
                 rotate_basis=not args.no_rotate_basis,
                 time_start_s=args.time_start_us * 1e-6,
                 time_stop_s=args.time_stop_us * 1e-6,

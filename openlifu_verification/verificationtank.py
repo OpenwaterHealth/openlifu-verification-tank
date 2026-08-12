@@ -2171,13 +2171,22 @@ class VerificationTank:
 
     def find_peak(self, *,
                   x0=None, y0=None, z=None,
+                  method="grid",
+                  # --- grid_walk_search parameters ---
+                  grid_step=0.2,
+                  max_evaluations=50,
+                  fit_window=1,
+                  # --- gradient_search parameters ---
                   initial_step=0.25,
                   tol=0.02,
                   max_iter=40,
                   hysteresis=0.005,
                   probe_scale=0.5,
                   min_line_step_scale=0.05,
+                  min_step=0.2,
+                  max_polish_iter=6,
                   rotate_basis=True,
+                  # --- shared ---
                   time_start_s=-14e-6,
                   time_stop_s=106e-6,
                   sampling_interval_ns=100,
@@ -2188,77 +2197,93 @@ class VerificationTank:
                   save=False,
                   keep_plot_open=True,
                   pause=False):
-        """Locate the true (x, y) hydrophone peak via 2-D gradient ascent.
+        """Locate the (x, y) hydrophone peak.
 
-        Estimates the RMS-pressure gradient by central differences on
-        a local ``(u, v)`` basis whose probe distance is
-        ``probe_scale * step`` (smaller than the trial step so the FD
-        estimate is genuinely local), then does a backtracking line
-        search along the gradient direction. If no step size in the
-        gradient direction beats the current best by ``hysteresis``,
-        falls back to the best of the four probes if it beat the
-        center; only when that also fails is ``step`` halved. On a
-        genuine gradient acceptance the basis rotates so ``u`` aligns
-        with the accepted direction (helpful on elongated peaks).
+        Two algorithms are available via the ``method`` argument:
+
+        * ``method="grid"`` (default) uses
+          :func:`~openlifu_verification.search.grid_walk_search`.
+          Fixed axis-aligned grid at spacing ``grid_step``, cached
+          samples (never re-measure a node), cardinal-then-diagonal
+          walk until the current-best node is bracketed on all 8
+          sides, then a least-squares 2-D paraboloid fit over the
+          ``fit_window`` neighborhood returns the vertex as the
+          centered peak. Best for typical use: minimal wasted
+          probes, robust to per-shot noise, no basis rotation.
+
+        * ``method="gradient"`` uses the older
+          :func:`~openlifu_verification.search.gradient_search`
+          (direct search + 3-point subsample refinement, with
+          basis rotation and step shrinking down to ``min_step``).
+          Kept for backward compatibility.
 
         Starts at the current ``hydrophone_position`` unless
         ``x0``/``y0``/``z`` are passed. When ``store=True`` (default),
         the found ``(x, y, z)`` is written to
         ``self.hydrophone_position`` in place, so any subsequent
-        relative scan (``scan_lateral`` / ``scan_2d`` /
-        ``scan_frequency`` / ``scan_voltage``) will be centered on the
-        empirical peak.
+        relative scan will be centered on the empirical peak.
 
         Args:
             x0, y0, z: Starting focus (mm). Default to the current
                 ``hydrophone_position``.
-            initial_step: Initial trial step length (mm).
-            tol: Convergence tolerance (mm). Iteration stops when
-                ``step`` falls below this.
-            max_iter: Maximum iterations.
-            hysteresis: Fractional RMS improvement required to accept
-                a move.
-            probe_scale: Probe distance as a fraction of the current
-                step (default 0.5). Smaller = more local gradient
-                estimate but noisier.
-            min_line_step_scale: Smallest backtracking line-search
-                step, as a fraction of the current step (default
-                0.05). The line search tries step, step/2, ..., down
-                to this fraction of step before giving up.
-            rotate_basis: If ``True`` (default), rotate the probe
-                basis to align ``u`` with each accepted gradient
-                direction.
-            time_start_s, time_stop_s, sampling_interval_ns: Capture
-                window used at every point.
+            method: ``"grid"`` (default) or ``"gradient"``. Selects
+                the underlying search algorithm.
+
+            grid_step: [``grid``] Grid spacing (mm). This is the
+                spatial scale over which we require the pressure
+                field to roll off measurably \u2014 pick it a couple
+                times bigger than the per-shot RMS noise "wobble"
+                divided by the local slope. Default 0.2 mm
+                (200 \u00b5m).
+            max_evaluations: [``grid``] Cap on total new
+                measurements. Default 50.
+            fit_window: [``grid``] Radius (grid nodes) around the
+                converged best used for the paraboloid fit.
+                ``1`` \u2192 3\u00d73, ``2`` \u2192 5\u00d75. Default 1.
+
+            initial_step: [``gradient``] Initial trial step (mm).
+            tol: [``gradient``] Convergence tolerance (mm).
+            max_iter: Maximum iterations (both methods).
+            hysteresis: [``gradient``] Retained for signature
+                compat; currently unused.
+            probe_scale: [``gradient``] Probe distance as a
+                fraction of current step.
+            min_line_step_scale: [``gradient``] Retained; unused.
+            min_step: [``gradient``] Minimum probe spacing
+                (mm) below which the grid stops shrinking.
+                Default 0.2 mm.
+            max_polish_iter: [``gradient``] Cap on
+                symmetry-polish iterations at ``min_step``.
+                Default 6.
+            rotate_basis: [``gradient``] Rotate probe basis
+                along accepted shifts. Default ``True``.
+
+            time_start_s, time_stop_s, sampling_interval_ns:
+                Capture window used at every point.
             n_averages: Number of pulses to fire and coherently
-                average per probe (see
-                :meth:`measure_pressure`). Higher values give a
-                lower-noise gradient/quadratic-fit estimate at the
-                cost of ``n_averages``\u00d7 the wall-time per iteration.
-                Default ``1``.
-            align: If ``True`` (default), cross-correlate repeats
-                before averaging (has no effect at ``n_averages=1``).
-            plot: If ``True``, open a live 3-panel matplotlib figure
-                (trace / xy scatter / info text) that updates on every
-                measurement. Default ``False``.
-            store: If ``True`` (default), update
-                ``self.hydrophone_position`` with the located
-                ``(x, y, z)``.
-            save: If ``True``, also persist the updated position via
-                :meth:`save_calibration`. Default ``False``.
-            keep_plot_open: When ``plot=True``, leave the figure open
-                after the search completes (blocks on ``plt.show()``).
+                average per probe. Default 1.
+            align: Cross-correlate repeats before averaging.
                 Default ``True``.
-            pause: If ``True``, block on ``input()`` at the end of
-                every iteration (after all probes + the refinement
-                measurement have been plotted) so the operator can
-                inspect the state before the next 5-sample batch.
-                Default ``False``.
+            plot: Live matplotlib figure. Default ``False``.
+            store: Update ``self.hydrophone_position`` with the
+                located ``(x, y, z)``. Default ``True``.
+            save: Also call :meth:`save_calibration`. Default
+                ``False``.
+            keep_plot_open: Leave the figure open after
+                convergence. Default ``True``.
+            pause: Block on ``input()`` at every iteration
+                boundary. Default ``False``.
 
         Returns:
-            ``(x, y)`` \u2014 the located peak in mm.
+            ``(x, y)`` \u2014 the located (centered) peak in mm.
         """
         from . import search
+
+        if method not in ("grid", "gradient"):
+            raise ValueError(
+                f"find_peak method must be 'grid' or 'gradient', "
+                f"got {method!r}"
+            )
 
         if z is None:
             z = float(self.hydrophone_position[2])
@@ -2308,29 +2333,56 @@ class VerificationTank:
                 align=align,
             )
 
+        if method == "grid":
+            logger.info(
+                "find_peak (grid): starting at (%.3f, %.3f, %.3f) mm  "
+                "grid_step=%.3f mm  max_evaluations=%d  "
+                "fit_window=%d  n_averages=%d",
+                x0, y0, z, grid_step, max_evaluations,
+                fit_window, n_averages,
+            )
+            result = search.grid_walk_search(
+                measure_fn,
+                x0=x0, y0=y0,
+                step=grid_step,
+                max_evaluations=max_evaluations,
+                max_iter=max_iter,
+                fit_window=fit_window,
+                on_progress=on_progress,
+            )
+        else:  # method == "gradient"
+            logger.info(
+                "find_peak (gradient): starting at (%.3f, %.3f, %.3f) mm  "
+                "initial_step=%.3f mm  tol=%.3f mm  n_averages=%d",
+                x0, y0, z, initial_step, tol, n_averages,
+            )
+            result = search.gradient_search(
+                measure_fn,
+                x0=x0, y0=y0,
+                initial_step=initial_step,
+                tol=tol,
+                max_iter=max_iter,
+                hysteresis=hysteresis,
+                probe_scale=probe_scale,
+                min_line_step_scale=min_line_step_scale,
+                min_step=min_step,
+                max_polish_iter=max_polish_iter,
+                rotate_basis=rotate_basis,
+                on_progress=on_progress,
+            )
+        # Use the *symmetry-center* the search settled on, not the
+        # highest single RMS sample. On a noisy top the max sample
+        # is a lucky noise spike; the center is what we actually
+        # asked the algorithm to find.
+        x, y = result["center_x"], result["center_y"]
         logger.info(
-            "find_peak: starting at (%.3f, %.3f, %.3f) mm  "
-            "initial_step=%.3f mm  tol=%.3f mm  n_averages=%d",
-            x0, y0, z, initial_step, tol, n_averages,
-        )
-        result = search.gradient_search(
-            measure_fn,
-            x0=x0, y0=y0,
-            initial_step=initial_step,
-            tol=tol,
-            max_iter=max_iter,
-            hysteresis=hysteresis,
-            probe_scale=probe_scale,
-            min_line_step_scale=min_line_step_scale,
-            rotate_basis=rotate_basis,
-            on_progress=on_progress,
-        )
-        x, y = result["best_x"], result["best_y"]
-        logger.info(
-            "find_peak: %s at (%.4f, %.4f, %.4f) mm  RMS=%.4g %s  "
-            "(%d iterations, %d evaluations)",
+            "find_peak: %s at center (%.4f, %.4f, %.4f) mm  "
+            "RMS=%.4g %s  (global max sample=%.4g %s at "
+            "(%.4f, %.4f))  (%d iterations, %d evaluations)",
             "converged" if result["converged"] else "hit max_iter",
-            x, y, z, result["best_rms"], result["units"],
+            x, y, z, result["center_rms"], result["units"],
+            result["best_rms"], result["units"],
+            result["best_x"], result["best_y"],
             result["iterations"], result["evaluations"],
         )
 

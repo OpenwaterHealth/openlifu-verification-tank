@@ -214,6 +214,7 @@ scripts/data/
 # Local, per-machine test outputs and calibrations
 scan_config.json
 hydrophone_position.json
+config/hydrophone.json
 test_reports/
 
 *.npz

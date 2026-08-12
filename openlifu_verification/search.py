@@ -50,6 +50,8 @@ def gradient_search(
     hysteresis: float = 0.01,
     probe_scale: float = 1.0,
     min_line_step_scale: float = 0.05,
+    min_step: float = 0.2,
+    max_polish_iter: int = 6,
     rotate_basis: bool = True,
     on_progress: Optional[Callable[..., None]] = None,
 ):
@@ -74,12 +76,17 @@ def gradient_search(
     step on each axis rotates the basis by 45\u00b0; a pure quadratic
     refinement rotates by an arbitrary angle). Once both axes are
     in the subsample regime (center dominates on both axes) the
-    probe grid shrinks by half.
+    probe grid shrinks by half \u2014 but only down to ``min_step``.
+    Below ``min_step`` the algorithm switches to a **symmetry
+    polish** phase: the probe spacing stays fixed at ``min_step``
+    and each iteration moves the center to the estimated
+    symmetry point of the roll-off. This trades noisy micro-peak
+    hunting for a stable "center the mountain" objective.
 
     Convergence: both axes used the quadratic branch **and** the
-    combined shift magnitude is smaller than ``tol``. As a safety
-    fallback, the search also stops when ``step`` shrinks below
-    ``tol``.
+    combined shift magnitude is smaller than ``tol``. During the
+    polish phase we additionally cap iteration count at
+    ``max_polish_iter`` to prevent noise-driven oscillation.
 
     Every measurement is compared against a *global peak* tracker
     so the returned ``best_x, best_y, best_rms`` are the
@@ -101,6 +108,19 @@ def gradient_search(
             be > 0.
         min_line_step_scale: Currently unused (kept for signature
             stability).
+        min_step: Minimum probe spacing (mm) below which we stop
+            halving. This is the spatial scale over which we
+            require the mountain to roll off symmetrically. On a
+            noisy top, setting this too small makes the parabola
+            fit dominated by RMS noise; the default of 0.2 mm
+            (200 \u00b5m) is roughly the transducer's spot
+            radius \u2014 large enough that the side probes see a
+            meaningful pressure drop. Set to 0 or a very small
+            value to recover the old "always shrink" behavior.
+        max_polish_iter: Cap on how many symmetry-polish iterations
+            (once ``step == min_step``) are allowed before we
+            declare convergence. Prevents endless jitter around a
+            noisy top.
         rotate_basis: If ``True``, rotate the probe basis so ``u``
             aligns with each accepted shift direction.
         on_progress: Optional callback invoked after every
@@ -197,7 +217,14 @@ def gradient_search(
     v = np.array([0.0, 1.0])
 
     step = float(initial_step)
+    # Clamp min_step to be at most initial_step (otherwise we'd
+    # start at the floor, which is fine \u2014 but never let it exceed
+    # the starting spacing).
+    min_step = max(0.0, min(float(min_step), step))
     iteration = 0
+    # Count of iterations spent at ``step == min_step`` (the
+    # symmetry-polish phase). Capped at ``max_polish_iter``.
+    polish_count = 0
     converged = False
 
     while iteration < max_iter:
@@ -410,17 +437,38 @@ def gradient_search(
         # declare success (we have nothing better to do).
         if not converged_now and du == 0.0 and dv == 0.0:
             converged_now = True
-        # Only shrink once we've genuinely bracketed a sample peak
-        # on both axes (concave-down triple) AND the subsample-peak
-        # estimate lies inside what the *halved* probe band would
-        # cover. Otherwise we risk locking in a too-small step
-        # before we've actually landed on the peak, which produces
-        # the "ping-pong with concave-up triples" pathology.
+
+        # ---- Shrink / polish decision -------------------------------
+        # If we're already at (or below) ``min_step`` we're in the
+        # symmetry-polish phase: probe spacing stays fixed at the
+        # roll-off distance, and each iteration recenters the
+        # mountain rather than hunting for a micro-peak. Cap total
+        # polish iterations so noise-driven jitter can't run
+        # forever.
+        at_floor = step <= min_step + 1e-12
+        if at_floor and not converged_now:
+            polish_count += 1
+            if polish_count >= max_polish_iter:
+                converged_now = True
+        # Only shrink when we've bracketed a sample peak on both
+        # axes AND the subsample-peak estimate lies inside what
+        # the halved probe band would still cover. This avoids
+        # collapsing ``step`` before we've actually landed on the
+        # mountain. Never shrink below ``min_step``.
         shrink_now = (not converged_now
+                      and not at_floor
                       and both_quadratic
                       and offset_mag < step / 2.0)
         if shrink_now:
-            step /= 2.0
+            new_step = step / 2.0
+            if new_step < min_step:
+                new_step = min_step
+            step = new_step
+            # Reaching min_step is itself entering polish phase;
+            # count this shrink as the first polish iteration so
+            # the cap still applies.
+            if step <= min_step + 1e-12:
+                polish_count = max(polish_count, 1)
             if step < tol:
                 converged_now = True
 
@@ -456,6 +504,304 @@ def gradient_search(
         # The search center coordinates are also returned as
         # ``center_*`` for callers that want to inspect where the
         # walk settled.
+        "best_x": peak_x,
+        "best_y": peak_y,
+        "best_rms": peak_rms,
+        "center_x": center_x,
+        "center_y": center_y,
+        "center_rms": center_rms,
+        "units": units,
+        "converged": converged,
+        "iterations": iteration,
+        "evaluations": len(rms_values),
+        "xs": xs,
+        "ys": ys,
+        "rms_values": rms_values,
+    }
+
+
+# ----------------------------------------------------------------------
+# grid_walk_search: fixed-grid walk + LSQ paraboloid centering
+# ----------------------------------------------------------------------
+def _fit_paraboloid_vertex(points, *, guard_radius=None):
+    """Least-squares fit ``z = A x\u00b2 + B y\u00b2 + C xy + D x + E y + F``
+    to ``points`` (iterable of ``(x, y, z)``) and return the vertex
+    ``(xv, yv, zv)`` where the gradient vanishes.
+
+    Returns ``None`` if:
+      * fewer than 6 points (system is underdetermined),
+      * the Hessian is not concave-down (``4AB - C\u00b2 <= 0`` or
+        ``A >= 0``),
+      * or the vertex lies farther than ``guard_radius`` from the
+        centroid of the input points (fit is extrapolating).
+    """
+    if len(points) < 6:
+        return None
+    px = np.array([p[0] for p in points], dtype=float)
+    py = np.array([p[1] for p in points], dtype=float)
+    pz = np.array([p[2] for p in points], dtype=float)
+    M = np.column_stack([px * px, py * py, px * py,
+                         px, py, np.ones_like(px)])
+    try:
+        coeffs, *_ = np.linalg.lstsq(M, pz, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    a, b, c, d, e, f = (float(v) for v in coeffs)
+    det = 4.0 * a * b - c * c
+    if det <= 1e-18 or a >= 0.0:
+        # Not a concave-down elliptic paraboloid (saddle, plane, or
+        # concave-up bowl) \u2014 no interior maximum.
+        return None
+    # Solve [[2A, C], [C, 2B]] @ [x; y] = -[D; E]
+    xv = (c * e - 2.0 * b * d) / det
+    yv = (c * d - 2.0 * a * e) / det
+    if guard_radius is not None:
+        cx = float(px.mean())
+        cy = float(py.mean())
+        if np.hypot(xv - cx, yv - cy) > guard_radius:
+            return None
+    zv = (a * xv * xv + b * yv * yv + c * xv * yv
+          + d * xv + e * yv + f)
+    return xv, yv, zv
+
+
+def grid_walk_search(
+    measure_fn: Callable[[float, float], Optional[dict]],
+    *,
+    x0: float,
+    y0: float,
+    step: float = 0.2,
+    max_evaluations: int = 50,
+    max_iter: int = 40,
+    fit_window: int = 1,
+    on_progress: Optional[Callable[..., None]] = None,
+):
+    """Fixed-grid peak search with 2-D paraboloid centering.
+
+    All samples live on an axis-aligned grid with spacing ``step``,
+    keyed by integer indices ``(i, j)`` with coordinates
+    ``(x0 + i*step, y0 + j*step)``. Once measured, a node is
+    cached and never re-visited (so a walk that doubles back is
+    free of wall-time cost).
+
+    Algorithm
+    ---------
+    1. **Seed**: measure origin ``(0, 0)`` plus the 4 cardinal
+       neighbors ``(\u00b11, 0)``, ``(0, \u00b11)``. (5 measurements.)
+    2. **Cardinal walk**: identify the current best grid node.
+       Sample any of its 4 cardinal neighbors we don't have yet.
+       If the max moves to one of those neighbors, iterate.
+    3. **Diagonal bracket**: once the cardinals are all sampled and
+       none exceed the center, sample the 4 diagonals of the best
+       node. If any diagonal exceeds the center, resume step 2
+       from there. Otherwise the max is a local grid maximum with
+       all 8 neighbors lower \u2014 converged.
+    4. **Paraboloid fit**: fit ``z = A x\u00b2 + B y\u00b2 + C xy + D x
+       + E y + F`` by least squares to all cached samples within
+       ``fit_window`` grid nodes of the converged best. Return the
+       vertex as ``(center_x, center_y)``. If the fit isn't
+       concave-down or the vertex falls outside the window, fall
+       back to the grid-max coordinates.
+
+    Compared to :func:`gradient_search`, this trades subsample
+    refinement of individual triples for a many-sample LSQ fit,
+    which averages down single-sample noise. It also never rotates
+    the coordinate system and never re-measures a node, giving a
+    predictable sample budget of roughly ``5 + 3*(walk_steps) +
+    4`` measurements for a peak ``walk_steps`` grid-steps away.
+
+    Args:
+        measure_fn: ``measure_fn(x, y) -> {"rms", "vpp", "trace",
+            "t", "units"} | None``, matching
+            :meth:`VerificationTank.measure_pressure`.
+        x0, y0: Origin of the grid (mm).
+        step: Grid spacing (mm). Also the side length of the fit
+            window's central cell. Choose so a probe at ``\u00b1step``
+            from a peak sees a clearly detectable roll-off vs the
+            per-shot noise level. Default 0.2 mm (200 \u00b5m).
+        max_evaluations: Cap on total new measurements before
+            giving up. Cached re-visits don't count. Default 50.
+        max_iter: Cap on walk iterations (independent of
+            ``max_evaluations``). Default 40.
+        fit_window: Radius (in grid nodes) of the neighborhood
+            around the converged best used for the paraboloid fit.
+            ``fit_window=1`` \u2192 3\u00d73 (up to 9 points),
+            ``fit_window=2`` \u2192 5\u00d75 (up to 25 points).
+            Default 1.
+        on_progress: Callback fired after every new measurement
+            and once at every iteration boundary. See
+            :func:`gradient_search` for the kwarg contract.
+
+    Returns:
+        Dict with the same keys as :func:`gradient_search`:
+        ``best_x, best_y, best_rms`` (global-max sample),
+        ``center_x, center_y, center_rms`` (paraboloid vertex),
+        ``units, converged, iterations, evaluations, xs, ys,
+        rms_values``.
+    """
+    if step <= 0:
+        raise ValueError("step must be > 0")
+    if fit_window < 1:
+        raise ValueError("fit_window must be >= 1")
+
+    grid_rms: dict[tuple[int, int], float] = {}
+    grid_meas: dict[tuple[int, int], dict] = {}
+    xs: list[float] = []
+    ys: list[float] = []
+    rms_values: list[float] = []
+    center_history: list[tuple[float, float]] = []
+
+    peak_x: float = x0
+    peak_y: float = y0
+    peak_rms: float = float("-inf")
+    units: str = "?"
+
+    def gcoord(i, j):
+        return (x0 + i * step, y0 + j * step)
+
+    def _measure(i, j):
+        """Measure node (i, j) unless cached. Return rms or ``None``
+        on scope timeout. Updates the global peak."""
+        nonlocal peak_x, peak_y, peak_rms, units
+        if (i, j) in grid_rms:
+            return grid_rms[(i, j)]
+        x, y = gcoord(i, j)
+        meas = measure_fn(x, y)
+        if meas is None:
+            return None
+        r = float(meas["rms"])
+        grid_rms[(i, j)] = r
+        grid_meas[(i, j)] = meas
+        xs.append(x)
+        ys.append(y)
+        rms_values.append(r)
+        if units == "?":
+            units = str(meas.get("units", "?"))
+        if r > peak_rms:
+            peak_x, peak_y, peak_rms = x, y, r
+        _emit(meas, x, y, r, info_extra=f"grid ({i:+d},{j:+d}) "
+                                        f"RMS={r:.4g} {units}")
+        return r
+
+    def _emit(meas, x, y, r, *, iter_end=False, converged=False,
+              done=False, info_extra=""):
+        if on_progress is None:
+            return
+        on_progress(
+            meas=meas, x=x, y=y, r=r,
+            xs=xs, ys=ys, rms_values=rms_values,
+            best_x=peak_x, best_y=peak_y, best_rms=peak_rms,
+            units=units,
+            iteration=iteration, step=step,
+            evaluations=len(rms_values),
+            converged=converged, done=done,
+            iter_end=iter_end,
+            centers=list(center_history),
+            info_extra=info_extra,
+        )
+
+    def _emit_iter_end(*, converged=False, done=False, info_extra=""):
+        if on_progress is None:
+            return
+        on_progress(
+            meas=None,
+            x=(center_history[-1][0] if center_history else x0),
+            y=(center_history[-1][1] if center_history else y0),
+            r=(grid_rms[best_ij] if best_ij in grid_rms else 0.0),
+            xs=xs, ys=ys, rms_values=rms_values,
+            best_x=peak_x, best_y=peak_y, best_rms=peak_rms,
+            units=units,
+            iteration=iteration, step=step,
+            evaluations=len(rms_values),
+            converged=converged, done=done,
+            iter_end=True,
+            centers=list(center_history),
+            info_extra=info_extra,
+        )
+
+    iteration = 0
+    best_ij: tuple[int, int] = (0, 0)
+
+    # ---- Seed: origin + 4 cardinals -------------------------------
+    r0 = _measure(0, 0)
+    if r0 is None:
+        raise RuntimeError("Scope timed out on initial measurement.")
+    for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+        _measure(di, dj)
+
+    best_ij = max(grid_rms, key=grid_rms.__getitem__)
+    center_history.append(gcoord(*best_ij))
+    _emit_iter_end(info_extra=f"seed done  best=({best_ij[0]:+d},"
+                              f"{best_ij[1]:+d})")
+
+    # ---- Cardinal walk + diagonal bracket -------------------------
+    converged = False
+    while iteration < max_iter and len(grid_rms) < max_evaluations:
+        iteration += 1
+        # Phase A: fill cardinals of current best.
+        cardinals = [(best_ij[0] + di, best_ij[1] + dj)
+                     for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)]]
+        for n in cardinals:
+            if n not in grid_rms and len(grid_rms) < max_evaluations:
+                _measure(*n)
+        new_best = max(grid_rms, key=grid_rms.__getitem__)
+        if new_best != best_ij:
+            best_ij = new_best
+            center_history.append(gcoord(*best_ij))
+            _emit_iter_end(info_extra=f"walk \u2192 ({best_ij[0]:+d},"
+                                      f"{best_ij[1]:+d})")
+            continue
+
+        # Phase B: fill diagonals of current best.
+        diagonals = [(best_ij[0] + di, best_ij[1] + dj)
+                     for (di, dj) in [(1, 1), (1, -1), (-1, 1), (-1, -1)]]
+        for n in diagonals:
+            if n not in grid_rms and len(grid_rms) < max_evaluations:
+                _measure(*n)
+        new_best = max(grid_rms, key=grid_rms.__getitem__)
+        if new_best != best_ij:
+            best_ij = new_best
+            center_history.append(gcoord(*best_ij))
+            _emit_iter_end(info_extra=f"walk (diag) \u2192 "
+                                      f"({best_ij[0]:+d},{best_ij[1]:+d})")
+            continue
+
+        # All 8 neighbors sampled and lower \u2014 bracketed.
+        converged = True
+        _emit_iter_end(converged=True, done=False,
+                       info_extra=f"bracketed at ({best_ij[0]:+d},"
+                                  f"{best_ij[1]:+d})")
+        break
+
+    # ---- Paraboloid fit over fit_window window around best_ij -----
+    fit_pts = []
+    for di in range(-fit_window, fit_window + 1):
+        for dj in range(-fit_window, fit_window + 1):
+            n = (best_ij[0] + di, best_ij[1] + dj)
+            if n in grid_rms:
+                fx, fy = gcoord(*n)
+                fit_pts.append((fx, fy, grid_rms[n]))
+
+    grid_max_x, grid_max_y = gcoord(*best_ij)
+    grid_max_r = grid_rms[best_ij]
+    # Vertex must lie inside the fit window (radius = fit_window * step).
+    fit_result = _fit_paraboloid_vertex(
+        fit_pts, guard_radius=fit_window * step,
+    )
+    if fit_result is not None:
+        center_x, center_y, center_rms = fit_result
+        info_fit = (f"paraboloid vertex from {len(fit_pts)} pts \u2192 "
+                    f"({center_x:.4f}, {center_y:.4f}) mm  "
+                    f"RMS={center_rms:.4g} {units}")
+    else:
+        center_x, center_y = grid_max_x, grid_max_y
+        center_rms = grid_max_r
+        info_fit = (f"paraboloid fit rejected \u2014 fell back to "
+                    f"grid-max ({grid_max_x:.4f}, {grid_max_y:.4f}) mm")
+    center_history.append((center_x, center_y))
+    _emit_iter_end(converged=converged, done=True, info_extra=info_fit)
+
+    return {
         "best_x": peak_x,
         "best_y": peak_y,
         "best_rms": peak_rms,

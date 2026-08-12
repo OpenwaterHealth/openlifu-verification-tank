@@ -8,9 +8,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from openlifu_verification.search import gradient_search, _quadratic_subsample_frac
-
-
+from openlifu_verification.search import (
+    gradient_search,
+    grid_walk_search,
+    _fit_paraboloid_vertex,
+    _quadratic_subsample_frac,
+)
 def _gaussian_source(*, peak_xy, sigma=1.5, noise=0.0, seed=0):
     """Build a synthetic ``measure_fn`` around a known peak."""
     rng = np.random.default_rng(seed)
@@ -246,3 +249,209 @@ def test_shift_shift_diagonal_is_weighted_by_relative_gain():
     assert refined_x > 0.35
     assert refined_y < 0.25
     assert refined_x > 2 * refined_y
+
+
+# ======================================================================
+# grid_walk_search tests
+# ======================================================================
+def test_grid_walk_returns_expected_keys():
+    """Result dict must expose the same keys as ``gradient_search``
+    so ``find_peak`` can consume either interchangeably."""
+    res = grid_walk_search(
+        _gaussian_source(peak_xy=(0.4, 0.4)),
+        x0=0.0, y0=0.0, step=0.2, max_evaluations=30,
+    )
+    for k in ("best_x", "best_y", "best_rms",
+              "center_x", "center_y", "center_rms",
+              "units", "converged", "iterations", "evaluations",
+              "xs", "ys", "rms_values"):
+        assert k in res
+    assert res["converged"]
+
+
+def test_grid_walk_finds_gaussian_peak_within_step():
+    """On a clean gaussian at (0.4, -0.3) with step 0.2 mm, the
+    paraboloid vertex should be within a small fraction of a step of
+    the true peak."""
+    res = grid_walk_search(
+        _gaussian_source(peak_xy=(0.4, -0.3), sigma=1.5),
+        x0=0.0, y0=0.0, step=0.2, max_evaluations=30,
+    )
+    assert res["converged"]
+    d = np.hypot(res["center_x"] - 0.4, res["center_y"] + 0.3)
+    # LSQ paraboloid on a clean gaussian should be well under
+    # step/4 from the true center.
+    assert d < 0.05, f"center off by {d:.4f} mm"
+
+
+def test_grid_walk_off_axis_start():
+    """Walk should reach the peak even when the origin is well away
+    from the peak in both axes."""
+    res = grid_walk_search(
+        _gaussian_source(peak_xy=(1.2, -0.8), sigma=1.5),
+        x0=0.0, y0=0.0, step=0.2, max_evaluations=60,
+    )
+    assert res["converged"]
+    d = np.hypot(res["center_x"] - 1.2, res["center_y"] + 0.8)
+    assert d < 0.1
+
+
+def test_grid_walk_never_measures_same_node_twice():
+    """The sample cache should be perfect: no (x, y) pair is fired
+    twice, even if the walk doubles back."""
+    n_calls = 0
+    seen: set[tuple[float, float]] = set()
+
+    def measure(x, y):
+        nonlocal n_calls
+        n_calls += 1
+        # Reject re-visits with an exact match on rounded coords.
+        key = (round(x, 6), round(y, 6))
+        assert key not in seen, f"re-measured {key}"
+        seen.add(key)
+        r2 = (x - 0.4) ** 2 + (y + 0.3) ** 2
+        rms = 100.0 * np.exp(-0.5 * r2 / 1.5**2)
+        return {"t": np.arange(2), "trace": np.zeros(2),
+                "rms": float(rms), "vpp": float(rms * 2), "units": "Pa"}
+
+    grid_walk_search(measure, x0=0.0, y0=0.0, step=0.2, max_evaluations=40)
+    assert n_calls == len(seen)
+
+
+def test_grid_walk_sample_arrays_are_consistent():
+    """``xs``, ``ys``, ``rms_values`` must all have equal length and
+    that length must match the returned ``evaluations`` count."""
+    res = grid_walk_search(
+        _gaussian_source(peak_xy=(0.4, 0.4)),
+        x0=0.0, y0=0.0, step=0.2, max_evaluations=30,
+    )
+    n = len(res["xs"])
+    assert len(res["ys"]) == n
+    assert len(res["rms_values"]) == n
+    assert res["evaluations"] == n
+
+
+def test_grid_walk_best_equals_global_max():
+    """``best_x, best_y, best_rms`` must be the highest single
+    measurement, regardless of where the paraboloid vertex lands."""
+    res = grid_walk_search(
+        _gaussian_source(peak_xy=(0.4, -0.3)),
+        x0=0.0, y0=0.0, step=0.2, max_evaluations=40,
+    )
+    imax = int(np.argmax(res["rms_values"]))
+    assert res["best_rms"] == pytest.approx(res["rms_values"][imax])
+    assert res["best_x"] == pytest.approx(res["xs"][imax])
+    assert res["best_y"] == pytest.approx(res["ys"][imax])
+
+
+def test_grid_walk_pauses_at_iteration_boundaries():
+    """The ``on_progress`` callback must receive ``iter_end=True``
+    exactly at each iteration boundary (seed, each walk step, and
+    final fit)."""
+    iter_ends: list[int] = []
+
+    def on_progress(**kw):
+        if kw.get("iter_end"):
+            iter_ends.append(kw.get("iteration", -1))
+
+    res = grid_walk_search(
+        _gaussian_source(peak_xy=(0.4, -0.3)),
+        x0=0.0, y0=0.0, step=0.2, max_evaluations=40,
+        on_progress=on_progress,
+    )
+    # At minimum: 1 seed emit, >=1 walk emit, 1 final fit emit.
+    assert len(iter_ends) >= 3
+    # The final emit corresponds to convergence + fit \u2014 verify
+    # the last on_progress call carried ``done=True``.
+    last_done: list[bool] = []
+
+    def on_progress2(**kw):
+        last_done.append(bool(kw.get("done", False)))
+
+    grid_walk_search(
+        _gaussian_source(peak_xy=(0.4, -0.3)),
+        x0=0.0, y0=0.0, step=0.2, max_evaluations=40,
+        on_progress=on_progress2,
+    )
+    assert last_done[-1] is True
+    # Sanity: exactly one done event.
+    assert sum(1 for d in last_done if d) == 1
+    del res  # unused
+
+
+def test_grid_walk_recovers_center_under_noise():
+    """LSQ paraboloid over 9 samples should still land close to the
+    true center even with per-shot RMS noise \u226b the peak-neighbor
+    contrast."""
+    # Peak of ~100; add gaussian noise \u03c3 = 3 (3% of peak, ~15% of
+    # a single-step roll-off at step=0.2 sigma=1.5 \u2192 ~0.9 units).
+    measure = _gaussian_source(peak_xy=(0.35, -0.25),
+                               sigma=1.5, noise=3.0, seed=42)
+    res = grid_walk_search(
+        measure, x0=0.0, y0=0.0, step=0.2, max_evaluations=40,
+    )
+    d = np.hypot(res["center_x"] - 0.35, res["center_y"] + 0.25)
+    # Should be much better than picking the noisy argmax, whose
+    # error at this noise level is often > 0.2 mm.
+    assert d < 0.2, f"center off by {d:.4f} mm"
+
+
+def test_grid_walk_scope_timeout_at_start_raises():
+    """``measure_fn`` returning ``None`` on the first call is
+    fatal because we can't seed the ``units`` field."""
+    with pytest.raises(RuntimeError):
+        grid_walk_search(lambda x, y: None, x0=0.0, y0=0.0, step=0.2)
+
+
+def test_grid_walk_invalid_step_raises():
+    with pytest.raises(ValueError):
+        grid_walk_search(lambda x, y: None, x0=0.0, y0=0.0, step=0.0)
+
+
+def test_grid_walk_invalid_fit_window_raises():
+    with pytest.raises(ValueError):
+        grid_walk_search(_gaussian_source(peak_xy=(0.4, 0.4)),
+                         x0=0.0, y0=0.0, step=0.2, fit_window=0)
+
+
+# ---- _fit_paraboloid_vertex ---------------------------------------
+def test_fit_paraboloid_recovers_analytic_vertex():
+    """Given exact samples from a known concave-down paraboloid,
+    the fit must recover the vertex to numerical precision."""
+    # z = -2 (x - 0.3)^2 - 3 (y + 0.4)^2 + 5
+    # \u2192 vertex at (0.3, -0.4, 5).
+    pts = []
+    for gx in np.linspace(-0.5, 1.1, 5):
+        for gy in np.linspace(-1.0, 0.6, 5):
+            z = -2 * (gx - 0.3) ** 2 - 3 * (gy + 0.4) ** 2 + 5
+            pts.append((float(gx), float(gy), float(z)))
+    xv, yv, zv = _fit_paraboloid_vertex(pts, guard_radius=None)
+    assert xv == pytest.approx(0.3, abs=1e-6)
+    assert yv == pytest.approx(-0.4, abs=1e-6)
+    assert zv == pytest.approx(5.0, abs=1e-6)
+
+
+def test_fit_paraboloid_rejects_concave_up():
+    """A concave-up bowl (no interior maximum) must be rejected."""
+    pts = []
+    for gx in np.linspace(-1, 1, 5):
+        for gy in np.linspace(-1, 1, 5):
+            z = 2 * gx * gx + 3 * gy * gy  # concave up
+            pts.append((float(gx), float(gy), float(z)))
+    assert _fit_paraboloid_vertex(pts) is None
+
+
+def test_fit_paraboloid_rejects_vertex_outside_guard():
+    """A vertex far from the sample centroid should be rejected."""
+    # Wide gaussian, sampled only in a corner \u2192 fit will place
+    # vertex far outside sample cluster.
+    pts = []
+    for gx in np.linspace(0.0, 0.4, 3):
+        for gy in np.linspace(0.0, 0.4, 3):
+            r2 = (gx - 5.0) ** 2 + (gy - 5.0) ** 2
+            z = 100.0 * np.exp(-0.5 * r2 / 1.5**2)
+            pts.append((float(gx), float(gy), float(z)))
+    # Fit's vertex will be near (5, 5) but sample centroid ~= (0.2, 0.2).
+    assert _fit_paraboloid_vertex(pts, guard_radius=0.5) is None
+
+
