@@ -255,6 +255,17 @@ def main(argv=None) -> int:
         else:
             ver.enable_hv_output()
 
+        # Give the operator a chance to verify HV is up + the tank is
+        # ready before the (potentially long) scan campaign kicks off.
+        # Skip when --no-prompt (unattended runs) or --dry-run.
+        if not args.no_prompt and not args.dry_run:
+            try:
+                input("\nReady to begin characterization. "
+                      "Press Enter to start (Ctrl+C to abort)... ")
+            except (KeyboardInterrupt, EOFError):
+                print("\nAborted before start.", file=sys.stderr)
+                return 130
+
         # --- Run the characterization ---
         chz = Characterization(
             ver,
@@ -287,13 +298,14 @@ def main(argv=None) -> int:
             args.output_dir,
             write_device_config_json=not args.skip_frequency,
         )
-        sn = report.rows[characterization.ROW["txm_sn"]].value or "unknown"
-        sn_stem = report_io._sanitize_stem(sn)
+        # Match the on-disk stem (SN + test start timestamp) so the
+        # printed paths point at real files.
+        file_stem = report_io.report_file_stem(report)
         print(f"\nReport directory: {run_dir}")
-        print(f"  XLSX : {run_dir / f'{sn_stem}_Report.xlsx'}")
-        print(f"  PDF  : {run_dir / f'{sn_stem}_Report.pdf'}")
+        print(f"  XLSX : {run_dir / f'{file_stem}_Report.xlsx'}")
+        print(f"  PDF  : {run_dir / f'{file_stem}_Report.pdf'}")
         if not args.skip_frequency:
-            print(f"  JSON : {run_dir / f'{sn_stem}_device_config.json'}")
+            print(f"  JSON : {run_dir / f'{file_stem}_device_config.json'}")
         print(f"  Verdict: {'PASS' if report.overall_pass else 'FAIL'}")
 
         # --- Optionally push config back onto the device ---
@@ -301,7 +313,7 @@ def main(argv=None) -> int:
             if args.skip_frequency:
                 logger.warning("--skip-frequency set; no device_config.json to write.")
             else:
-                config_path = run_dir / f"{sn_stem}_device_config.json"
+                config_path = run_dir / f"{file_stem}_device_config.json"
                 do_write = True
                 if args.confirm_write_config:
                     do_write = _prompt_yes_no(

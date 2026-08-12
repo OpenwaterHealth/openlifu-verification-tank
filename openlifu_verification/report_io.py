@@ -156,6 +156,35 @@ def _sanitize_stem(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9\-_]+", "_", str(name)).strip("_") or "unknown"
 
 
+def _ts_for_filename(iso: str) -> str:
+    """Format an ISO timestamp as ``YYYYMMDD_HHMMSS`` for filenames.
+
+    Falls back to the current wall-clock time if ``iso`` is empty or
+    unparseable so callers can always build a stem without extra
+    guarding.
+    """
+    if iso:
+        try:
+            return datetime.datetime.fromisoformat(iso).strftime("%Y%m%d_%H%M%S")
+        except ValueError:
+            pass
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def report_file_stem(report: "TestReport") -> str:
+    """Return the ``<SN>_<YYYYMMDD_HHMMSS>`` prefix used for report files.
+
+    The timestamp comes from ``report.started_at`` so the on-disk
+    filename matches the test start time (not the write time), and so
+    the top-level files inside a run directory are self-describing
+    even if moved elsewhere.
+    """
+    sn_row = report.rows.get(ROW["txm_sn"])
+    sn = _sanitize_stem(sn_row.value if sn_row else "unknown")
+    ts = _ts_for_filename(report.started_at)
+    return f"{sn}_{ts}"
+
+
 # ----------------------------------------------------------------------
 # Figure builders
 # ----------------------------------------------------------------------
@@ -504,7 +533,13 @@ def write_xlsx(report: TestReport, path: Path, figures: Optional[dict] = None) -
 # ----------------------------------------------------------------------
 def write_pdf(report: TestReport, path: Path,
               figures: Optional[dict] = None) -> Path:
-    """Write a multi-page PDF: cover page + one page per figure."""
+    """Write a multi-page PDF: cover page + one page per figure.
+
+    Every page is rendered on 8.5\u00d711 in (US letter) so a print
+    stack has consistent paper. Figures keep their original aspect
+    ratio; each source figure is rasterised at 200 dpi and centered
+    on the letter page under its title.
+    """
     from matplotlib.backends.backend_pdf import PdfPages
     import matplotlib.pyplot as plt
 
@@ -514,7 +549,7 @@ def write_pdf(report: TestReport, path: Path,
     # line every time the section changes in the cover-page listing.
     section_titles = {letter: title for letter, title in SECTION_HEADERS}
     with PdfPages(path) as pdf:
-        # Cover page
+        # Cover page (already letter-sized).
         fig, ax = plt.subplots(figsize=(8.5, 11))
         ax.axis("off")
         lines = [
@@ -545,11 +580,40 @@ def write_pdf(report: TestReport, path: Path,
         pdf.savefig(fig)
         plt.close(fig)
 
-        # Figure pages
-        for name, fig in figures.items():
-            pdf.savefig(fig)
+        # Figure pages: render each source figure onto its own
+        # letter-sized page so the printout is uniform.
+        for name, src_fig in figures.items():
+            page = _render_figure_on_letter_page(src_fig, name)
+            pdf.savefig(page)
+            plt.close(page)
     logger.info("PDF written to %s", path)
     return path
+
+
+def _render_figure_on_letter_page(src_fig, name: str):
+    """Return a fresh 8.5\u00d711 figure with ``src_fig`` embedded.
+
+    Rasterises ``src_fig`` (at 200 dpi with a ``bbox_inches='tight'``
+    crop) and centers it on a letter page under the figure name.
+    Rasterising decouples the source's aspect ratio from the page
+    aspect, so slim landscape scan plots and taller waveform plots
+    both fit cleanly.
+    """
+    import io
+    import matplotlib.pyplot as plt
+
+    buf = io.BytesIO()
+    src_fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
+    buf.seek(0)
+    img = plt.imread(buf)
+
+    page = plt.figure(figsize=(8.5, 11))
+    # Leave ~0.5" top for the caption, 0.5" side margins, 0.5" bottom.
+    ax = page.add_axes((0.05, 0.05, 0.9, 0.88))
+    ax.imshow(img)
+    ax.axis("off")
+    page.suptitle(name, fontsize=10, y=0.97)
+    return page
 
 
 # ----------------------------------------------------------------------
@@ -719,6 +783,10 @@ def write_report(report: TestReport, output_dir: Optional[Path] = None,
     """
     sn_row = report.rows.get(ROW["txm_sn"])
     sn = _sanitize_stem(sn_row.value if sn_row else "unknown")
+    # Stem used for every top-level file in the run directory.
+    # Baked in the test start timestamp so a report copied out of its
+    # folder still identifies its device + run uniquely.
+    file_stem = report_file_stem(report)
 
     if output_dir is None:
         output_dir = Path.cwd() / "test_reports" / sn
@@ -727,23 +795,25 @@ def write_report(report: TestReport, output_dir: Optional[Path] = None,
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if run_dir_name is None:
-        run_dir_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Match the file stem's timestamp so the folder and files
+        # agree on when the test started.
+        run_dir_name = _ts_for_filename(report.started_at)
     run_dir = output_dir / run_dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Figures first (both xlsx + pdf reuse them).
     figures = build_figures(report)
 
-    # All top-level artifacts share the ``<TXM-SN>_...`` prefix so a
+    # All top-level artifacts share the ``<SN>_<TS>_...`` prefix so a
     # single file picked out of the folder is self-describing.
-    report_stem = f"{sn}_Report"
+    report_stem = f"{file_stem}_Report"
     write_xlsx(report, run_dir / f"{report_stem}.xlsx", figures=figures)
     write_pdf(report, run_dir / f"{report_stem}.pdf", figures=figures)
-    write_csv_bundle(report, run_dir, summary_name=f"{sn}_summary.csv")
+    write_csv_bundle(report, run_dir, summary_name=f"{file_stem}_summary.csv")
 
     if write_device_config_json:
         try:
-            write_device_config(report, run_dir / f"{sn}_device_config.json")
+            write_device_config(report, run_dir / f"{file_stem}_device_config.json")
         except Exception as e:
             logger.warning("Skipping device_config.json: %s", e)
 
