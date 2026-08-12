@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from openlifu_verification.search import gradient_search
+from openlifu_verification.search import gradient_search, _quadratic_subsample_frac
 
 
 def _gaussian_source(*, peak_xy, sigma=1.5, noise=0.0, seed=0):
@@ -151,3 +151,98 @@ def test_max_iter_stops_the_search():
         x0=10.0, y0=10.0, initial_step=0.5, tol=0.001, max_iter=1,
     )
     assert res["iterations"] <= 1
+
+
+def test_quadratic_subsample_frac_concave_down_interior():
+    """Symmetric samples -> peak sits on the center (frac ~= 0)."""
+    assert _quadratic_subsample_frac(0.5, 1.0, 0.5) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_quadratic_subsample_frac_biased_toward_higher_side():
+    """When the +side sample is higher than the -side, the fit vertex
+    shifts toward +1 (still in (-1, +1))."""
+    frac = _quadratic_subsample_frac(0.5, 1.0, 0.8)
+    assert frac is not None
+    assert 0.0 < frac < 1.0
+
+
+def test_quadratic_subsample_frac_rejects_non_concave():
+    # Concave-up parabola: no local max.
+    assert _quadratic_subsample_frac(1.0, 0.5, 1.0) is None
+    # Flat: denom == 0.
+    assert _quadratic_subsample_frac(1.0, 1.0, 1.0) is None
+
+
+def test_quadratic_subsample_frac_recovers_gaussian_center(tmp_path=None):
+    """A Gaussian sampled at ``[-h, 0, +h]`` off-center should give a
+    quadratic vertex close to the true offset (for small ``h/sigma``)."""
+    sigma = 1.5
+    true_offset = 0.3        # mm
+    h = 0.4                  # probe half-spacing (mm)
+    center = 0.0             # sampled at 0
+
+    def g(x):
+        return np.exp(-0.5 * (x - true_offset) ** 2 / sigma ** 2)
+
+    frac = _quadratic_subsample_frac(g(center - h), g(center), g(center + h))
+    assert frac is not None
+    # Fractional offset in units of h -> multiply by h to compare in mm.
+    assert frac * h == pytest.approx(true_offset, abs=0.05)
+
+
+def test_gaussian_search_uses_quadratic_refinement(monkeypatch):
+    """The final refinement step near the peak should come from the
+    quadratic fit on both axes, not just probe-halving. We assert
+    via the emitted info_extra string on the ``on_progress`` callback."""
+    seen_infos: list[str] = []
+
+    def on_progress(**kw):
+        seen_infos.append(kw.get("info_extra", ""))
+
+    res = gradient_search(
+        _gaussian_source(peak_xy=(0.15, -0.10), sigma=1.5),
+        x0=0.0, y0=0.0, initial_step=0.5, tol=0.02, max_iter=40,
+        on_progress=on_progress,
+    )
+    assert res["converged"]
+    assert any("u=quadratic v=quadratic" in s for s in seen_infos), (
+        "expected at least one iteration with quadratic refinement "
+        f"on both axes; saw: {seen_infos}"
+    )
+    dist = np.hypot(res["best_x"] - 0.15, res["best_y"] + 0.10)
+    assert dist < 0.05
+
+
+def test_shift_shift_diagonal_is_weighted_by_relative_gain():
+    """When both axes want a shift step but the peak is much
+    stronger in one direction, the combined step should skew toward
+    the stronger axis rather than moving 45\u00b0 diagonally."""
+
+    # Peak far in +x, only slightly in +y.
+    def measure(x, y):
+        rms = 100.0 * np.exp(-0.5 * ((x - 2.0) ** 2 + (y - 0.1) ** 2) / 1.5**2)
+        return {"t": np.arange(2), "trace": np.zeros(2),
+                "rms": float(rms), "vpp": float(rms * 2), "units": "Pa"}
+
+    positions: list[tuple[float, float]] = []
+
+    def on_progress(**kw):
+        positions.append((kw["x"], kw["y"]))
+
+    gradient_search(
+        measure, x0=0.0, y0=0.0, initial_step=0.5, tol=0.02,
+        max_iter=1, on_progress=on_progress, rotate_basis=False,
+    )
+    # positions[0] = start (0, 0)
+    # positions[1..4] = ±u, ±v probes at h=0.5
+    # positions[5] = the "probes complete" summary event (x, y = center)
+    # positions[6] = the refined move that closes iter 1
+    assert len(positions) >= 7
+    refined_x, refined_y = positions[6]
+    # The refined move must skew far more toward +x than +y since
+    # +x is the strong-gain direction. The unweighted algorithm
+    # would have gone to (0.5, 0.5); the weighted one should keep
+    # dx close to h and dy noticeably smaller.
+    assert refined_x > 0.35
+    assert refined_y < 0.25
+    assert refined_x > 2 * refined_y

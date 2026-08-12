@@ -1973,41 +1973,85 @@ class VerificationTank:
                          time_start_s=-14e-6,
                          time_stop_s=86e-6,
                          sampling_interval_ns=100,
-                         timeout_s=2.0):
-        """Fire one pulse at ``(x, y, z)`` and return the trace + RMS.
+                         timeout_s=2.0,
+                         n_averages=1,
+                         align=True,
+                         align_max_shift_samples=None):
+        """Fire one (or several) pulses at ``(x, y, z)`` and return the trace + RMS.
 
         Steers to the focus, captures the hydrophone trace, and
         (if a hydrophone calibration is attached) converts it from mV
         to Pa via the single-frequency lookup at ``self.frequency``.
+
+        When ``n_averages > 1`` the hydrophone trace is captured that
+        many times back-to-back, optionally aligned by
+        cross-correlation (:func:`~openlifu_verification.pulse_align.align_pulse_traces`)
+        and coherently averaged before RMS/vpp are computed \u2014 giving
+        a much lower-noise measurement at the cost of ``n_averages``\u00d7
+        the wall-time.
 
         Args:
             x, y, z: Focus in mm.
             time_start_s, time_stop_s, sampling_interval_ns: Capture
                 window.
             timeout_s: Max wait for the scope trigger.
+            n_averages: Number of pulses to fire and coherently
+                average at this point. Defaults to ``1``.
+            align: If ``True`` (default), cross-correlate repeats
+                against the first repeat before averaging.
+            align_max_shift_samples: Optional cap on the alignment
+                lag search (samples).
 
         Returns:
             Dict with:
 
             - ``t``: 1-D time axis (\u00b5s), zero at emission.
-            - ``trace``: 1-D signal, in ``units``.
+            - ``trace``: 1-D signal, in ``units``. When
+              ``n_averages > 1``, the coherently averaged trace.
             - ``rms``: scalar RMS over the whole window.
             - ``vpp``: scalar peak-to-peak amplitude.
             - ``units``: ``"Pa"`` if a hydrophone is attached,
               otherwise ``"mV"``.
+            - ``n_averages``: number of repeats actually captured
+              (may be less than requested if the scope timed out on
+              some repeats).
 
-            Or ``None`` if the scope timed out.
+            Or ``None`` if every scope capture timed out.
         """
+        n_averages = int(n_averages)
+        if n_averages < 1:
+            raise ValueError("n_averages must be >= 1")
+
         self.set_focus(x, y, z)
-        data = self.run_capture(
-            time_start_s=time_start_s,
-            time_stop_s=time_stop_s,
-            sampling_interval_ns=sampling_interval_ns,
-            timeout_s=timeout_s,
-        )
-        if data is None:
+        traces_mv: list[np.ndarray] = []
+        t_axis = None
+        for _ in range(n_averages):
+            data = self.run_capture(
+                time_start_s=time_start_s,
+                time_stop_s=time_stop_s,
+                sampling_interval_ns=sampling_interval_ns,
+                timeout_s=timeout_s,
+            )
+            if data is None:
+                continue
+            traces_mv.append(np.asarray(data[self.hydrophone_channel], dtype=float))
+            if t_axis is None:
+                t_axis = data["time"]
+
+        if not traces_mv:
             return None
-        trace_mv = np.asarray(data[self.hydrophone_channel], dtype=float)
+
+        stack = np.stack(traces_mv, axis=0)
+        if stack.shape[0] > 1 and align:
+            aligned, _lags = align_pulse_traces(
+                stack,
+                dt_s=float(sampling_interval_ns) * 1e-9,
+                max_shift_samples=align_max_shift_samples,
+            )
+            trace_mv = aligned.mean(axis=0)
+        else:
+            trace_mv = stack.mean(axis=0)
+
         if self.hydrophone is not None:
             trace = np.asarray(
                 self.hydrophone.mv_to_pa(trace_mv, self.frequency * 1e3),
@@ -2018,11 +2062,12 @@ class VerificationTank:
             trace = trace_mv
             units = "mV"
         return {
-            "t": data["time"],
+            "t": t_axis,
             "trace": trace,
             "rms": float(np.sqrt(np.mean(trace ** 2))),
             "vpp": float(np.max(trace) - np.min(trace)),
             "units": units,
+            "n_averages": stack.shape[0],
         }
 
     # ------------------------------------------------------------------
@@ -2136,10 +2181,13 @@ class VerificationTank:
                   time_start_s=-14e-6,
                   time_stop_s=106e-6,
                   sampling_interval_ns=100,
+                  n_averages=1,
+                  align=True,
                   plot=False,
                   store=True,
                   save=False,
-                  keep_plot_open=True):
+                  keep_plot_open=True,
+                  pause=False):
         """Locate the true (x, y) hydrophone peak via 2-D gradient ascent.
 
         Estimates the RMS-pressure gradient by central differences on
@@ -2182,6 +2230,14 @@ class VerificationTank:
                 direction.
             time_start_s, time_stop_s, sampling_interval_ns: Capture
                 window used at every point.
+            n_averages: Number of pulses to fire and coherently
+                average per probe (see
+                :meth:`measure_pressure`). Higher values give a
+                lower-noise gradient/quadratic-fit estimate at the
+                cost of ``n_averages``\u00d7 the wall-time per iteration.
+                Default ``1``.
+            align: If ``True`` (default), cross-correlate repeats
+                before averaging (has no effect at ``n_averages=1``).
             plot: If ``True``, open a live 3-panel matplotlib figure
                 (trace / xy scatter / info text) that updates on every
                 measurement. Default ``False``.
@@ -2193,6 +2249,11 @@ class VerificationTank:
             keep_plot_open: When ``plot=True``, leave the figure open
                 after the search completes (blocks on ``plt.show()``).
                 Default ``True``.
+            pause: If ``True``, block on ``input()`` at the end of
+                every iteration (after all probes + the refinement
+                measurement have been plotted) so the operator can
+                inspect the state before the next 5-sample batch.
+                Default ``False``.
 
         Returns:
             ``(x, y)`` \u2014 the located peak in mm.
@@ -2216,6 +2277,26 @@ class VerificationTank:
 
             def on_progress(**kw):
                 search.update_live_figure(handles, **kw)
+                if pause and kw.get("iter_end") and not kw.get("done"):
+                    try:
+                        input(
+                            f"[iter {kw.get('iteration')} done] "
+                            "press Enter for next iteration "
+                            "(Ctrl-C to abort)... "
+                        )
+                    except EOFError:
+                        pass
+        elif pause:
+            def on_progress(**kw):
+                if kw.get("iter_end") and not kw.get("done"):
+                    try:
+                        input(
+                            f"[iter {kw.get('iteration')} done] "
+                            "press Enter for next iteration "
+                            "(Ctrl-C to abort)... "
+                        )
+                    except EOFError:
+                        pass
 
         def measure_fn(x, y):
             return self.measure_pressure(
@@ -2223,12 +2304,14 @@ class VerificationTank:
                 time_start_s=time_start_s,
                 time_stop_s=time_stop_s,
                 sampling_interval_ns=sampling_interval_ns,
+                n_averages=n_averages,
+                align=align,
             )
 
         logger.info(
             "find_peak: starting at (%.3f, %.3f, %.3f) mm  "
-            "initial_step=%.3f mm  tol=%.3f mm",
-            x0, y0, z, initial_step, tol,
+            "initial_step=%.3f mm  tol=%.3f mm  n_averages=%d",
+            x0, y0, z, initial_step, tol, n_averages,
         )
         result = search.gradient_search(
             measure_fn,

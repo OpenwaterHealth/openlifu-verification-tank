@@ -44,11 +44,11 @@ def main():
     # --- Search geometry ---
     parser.add_argument("--z", type=float, default=None,
                         help="Depth (mm). Defaults to ver.hydrophone_position[2].")
-    parser.add_argument("--x0", type=float, default=None,
-                        help="Starting x (mm). Defaults to ver.hydrophone_position[0].")
-    parser.add_argument("--y0", type=float, default=None,
-                        help="Starting y (mm). Defaults to ver.hydrophone_position[1].")
-    parser.add_argument("--initial-step", type=float, default=0.5,
+    parser.add_argument("--x0", type=float, default=0,
+                        help="Starting x (mm). Defaults to 0.")
+    parser.add_argument("--y0", type=float, default=0,
+                        help="Starting y (mm). Defaults to 0.")
+    parser.add_argument("--initial-step", type=float, default=0.25,
                         help="Initial trial step length (mm).")
     parser.add_argument("--tol", type=float, default=0.02,
                         help="Convergence tolerance (mm).")
@@ -65,9 +65,23 @@ def main():
     parser.add_argument("--no-rotate-basis", action="store_true",
                         help="Keep probes axis-aligned each iteration instead of "
                              "rotating along the accepted gradient direction.")
-    parser.add_argument("--time-start-us", type=float, default=-14.0)
-    parser.add_argument("--time-stop-us", type=float, default=86.0)
+    parser.add_argument("--time-start-us", type=float, default=0.0)
+    parser.add_argument("--time-stop-us", type=float, default=200.0)
     parser.add_argument("--sampling-interval-ns", type=float, default=100.0)
+    parser.add_argument("-n", "--n-averages", type=int, default=1,
+                        help="Number of pulses to fire and coherently "
+                             "average at every probe point (default: 1). "
+                             "Larger values reduce noise at the cost of "
+                             "proportionally more wall-time per iteration.")
+    parser.add_argument("--align", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Cross-correlate repeats before averaging "
+                             "(only meaningful when --n-averages > 1).")
+    parser.add_argument("--pause", action="store_true",
+                        help="Pause for a keypress at the end of every "
+                             "iteration (after each set of 5 samples: 4 "
+                             "probes + 1 refinement). Handy for debugging "
+                             "the convergence path.")
     # --- Hydrophone / calibration ---
     parser.add_argument("--hydrophone", type=str, default="",
                         help="Hydrophone calibration file or bare ID (e.g. '2246').")
@@ -125,10 +139,13 @@ def main():
                 time_start_s=args.time_start_us * 1e-6,
                 time_stop_s=args.time_stop_us * 1e-6,
                 sampling_interval_ns=args.sampling_interval_ns,
+                n_averages=args.n_averages,
+                align=args.align,
                 plot=True,
                 store=True,
                 save=args.save_calibration,
                 keep_plot_open=True,
+                pause=args.pause,
             )
             elapsed = time.perf_counter() - t_start
             logger.info(
