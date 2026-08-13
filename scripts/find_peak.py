@@ -132,6 +132,24 @@ def main():
                              "and hydrophone ID still load normally; only "
                              "the reported trace amplitudes stay in mV.")
     parser.add_argument("--log-file", type=str, default="")
+    # --- Depth calibration (plane-wave arrival time) ---
+    parser.add_argument("--calibrate-depth",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Run a plane-wave arrival-time measurement "
+                             "before the 2-D search to set "
+                             "hydrophone_position[2]. Default on. See "
+                             "scripts/arrival_time_demo.py for tuning.")
+    parser.add_argument("--depth-voltage", type=float, default=30.0,
+                        help="[depth-cal] HV rail for the plane-wave "
+                             "pulses (default 30 V).")
+    parser.add_argument("--depth-pulse-count", type=int, default=32,
+                        help="[depth-cal] Pulses averaged (default 32).")
+    parser.add_argument("--depth-duration-usec", type=float, default=8.0,
+                        help="[depth-cal] Per-pulse duration (default 8 \u00b5s).")
+    parser.add_argument("--depth-skip-us", type=float, default=12.0,
+                        help="[depth-cal] Ignore samples before this time "
+                             "when searching for the first arrival "
+                             "(default 12 \u00b5s).")
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument("--verbose", "-v", action="store_true")
     verbosity.add_argument("--quiet", "-q", action="store_true")
@@ -157,6 +175,26 @@ def main():
                               calibration_path=args.calibration_path or None) as ver:
             if args.log_file:
                 ver.add_log_file(args.log_file)
+
+            if args.calibrate_depth:
+                logger.info("Running plane-wave depth calibration before 2-D search...")
+                depth_result = ver.calibrate_hydrophone_depth(
+                    voltage_V=args.depth_voltage,
+                    n_pulses=args.depth_pulse_count,
+                    duration_usec=args.depth_duration_usec,
+                    skip_us=args.depth_skip_us,
+                    hydrophone_range_mv=args.hydro_range_mv,
+                    store=True,
+                    save=False,
+                )
+                logger.info(
+                    "Depth calibration \u2192 z = %.3f mm "
+                    "(arrival=%.3f \u00b5s, %d pulses)",
+                    depth_result["distance_mm"],
+                    depth_result["arrival_us"],
+                    depth_result["n_pulses_used"],
+                )
+
             ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
                 voltage=args.voltage,

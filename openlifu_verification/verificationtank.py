@@ -26,7 +26,7 @@ SPEED_OF_SOUND = 1490  # m/s in water
 # time-of-arrival into an axial depth. Hard-coded from calibration on
 # current TX7332 firmware; override via ``VerificationTank(
 # system_transmit_delay_us=...)`` if a future firmware changes it.
-SYSTEM_TRANSMIT_DELAY_US = 115.0
+SYSTEM_TRANSMIT_DELAY_US = 113.5
 HYDROPHONE_CHANNEL = 'A'
 TRIGGER_CHANNEL = 'B'
 
@@ -2185,6 +2185,173 @@ class VerificationTank:
             return str(self.hydrophone.metadata.get("HYD_SN", ""))
         except Exception:
             return ""
+
+    def calibrate_hydrophone_depth(self, *,
+                                    voltage_V: float = 30.0,
+                                    n_pulses: int = 32,
+                                    duration_usec: float = 8.0,
+                                    interval_msec: float | None = None,
+                                    skip_us: float = 12.0,
+                                    time_start_us: float = 0.0,
+                                    time_stop_us: float = 100.0,
+                                    sampling_interval_ns: float = 100.0,
+                                    hydrophone_range_mv: int | None = None,
+                                    align: bool = True,
+                                    align_max_shift_ns: float = 500.0,
+                                    store: bool = True,
+                                    save: bool = False,
+                                    ) -> dict:
+        """Estimate the array\u2192hydrophone axial distance from a plane-wave pulse.
+
+        Fires ``n_pulses`` short bursts steered at an effectively
+        infinite depth (``set_focus(0, 0, 1e6)``) so all transducer
+        elements fire simultaneously and emit a plane wave along +z.
+        The returned pulse train is coherently averaged, the first
+        envelope peak after ``skip_us`` is located, a quarter-cycle
+        is subtracted to map the envelope peak to the sinusoid's
+        leading zero-crossing, and that time is multiplied by the
+        speed of sound to yield the axial distance.
+
+        This method updates ``self.hydrophone_position[2]`` in place
+        when ``store=True`` (default). It does *not* touch x/y \u2014
+        run :meth:`find_peak` afterwards for those.
+
+        Args:
+            voltage_V: HV rail during the calibration pulses.
+                Defaults to 30 V so the plane wave has enough
+                amplitude to swamp the noise floor even without
+                focusing.
+            n_pulses: Number of pulses to fire in one rapid-block
+                capture (default 32). More pulses \u2192 lower noise
+                floor but more wall-time.
+            duration_usec: Burst duration in \u00b5s (default 8).
+                Short bursts localize the envelope peak better than
+                the standard 20-cycle burst.
+            interval_msec: Interval between pulses in the train (ms).
+                Defaults to :attr:`DEFAULT_INTERVAL_MSEC`.
+            skip_us: Exclude everything before this time from the
+                arrival-time search (default 12 \u00b5s) to avoid
+                locking onto the trigger-flash / cross-talk.
+            time_start_us, time_stop_us, sampling_interval_ns:
+                Scope capture window and timebase.
+            hydrophone_range_mv: Optional override for the scope
+                vertical range on the hydrophone channel; leaves the
+                current range alone when ``None``.
+            align: Cross-correlate repeats before averaging.
+            align_max_shift_ns: Cross-correlation lag search bound.
+            store: If ``True`` (default), update
+                ``self.hydrophone_position[2]`` in place.
+            save: If ``True``, also persist via
+                :meth:`save_calibration`.
+
+        Returns:
+            Dict with:
+
+              - ``distance_mm``: Estimated array\u2192hydrophone
+                distance in mm.
+              - ``arrival_us``: Estimated arrival time (\u00b5s,
+                post quarter-cycle correction).
+              - ``envelope_peak_us``: Raw envelope peak time before
+                the quarter-cycle correction.
+              - ``quarter_cycle_us``: The correction applied.
+              - ``sos_m_per_s``: Speed of sound used.
+              - ``mean_trace``, ``t_us``: The aggregated waveform.
+              - ``n_pulses_used``: How many pulses were actually
+                averaged.
+        """
+        from .arrival_time import find_first_arrival_us
+        from .pulse_align import align_pulse_traces
+
+        if self.arr is None:
+            raise RuntimeError(
+                "Transducer array not loaded; cannot compute delays.",
+            )
+
+        resolved = self.apply_pulse(
+            voltage=voltage_V,
+            duration_usec=duration_usec,
+            interval_msec=interval_msec,
+            pulse_count=n_pulses,
+            trigger_mode="single",
+        )
+        # Plane wave: focus at effectively infinity so all elements
+        # get the same delay.
+        self.set_focus(0.0, 0.0, 1_000_000.0)
+        if hydrophone_range_mv is not None:
+            self.set_hydrophone_range(int(hydrophone_range_mv))
+        self.enable_hv_output(wait=True)
+
+        interval_s = float(resolved["interval_msec"]) * 1e-3
+        timeout_s = n_pulses * interval_s + 2.0
+
+        bulk = self.capture_pulse_train(
+            n_pulses=n_pulses,
+            time_start_s=float(time_start_us) * 1e-6,
+            time_stop_s=float(time_stop_us) * 1e-6,
+            sampling_interval_ns=float(sampling_interval_ns),
+            timeout_s=timeout_s,
+        )
+        if bulk is None:
+            raise RuntimeError(
+                "Rapid-block capture timed out during depth calibration.",
+            )
+
+        t_us = np.asarray(bulk["time"], dtype=float)
+        traces_mv = np.asarray(bulk[self.hydrophone_channel], dtype=float)
+        # Coherent average across pulses (in mV; calibration is
+        # amplitude-independent so we don't need Pa).
+        dt_s = float(t_us[1] - t_us[0]) * 1e-6
+        if align and traces_mv.shape[0] >= 2 and dt_s > 0:
+            max_shift_samples = max(
+                1, int(np.ceil(align_max_shift_ns * 1e-9 / dt_s))
+            )
+            aligned, _lags = align_pulse_traces(
+                traces_mv, dt_s=dt_s,
+                max_shift_samples=max_shift_samples,
+                reference="first",
+            )
+        else:
+            aligned = traces_mv
+        mean_trace = aligned.mean(axis=0)
+
+        arr = find_first_arrival_us(
+            t_us, mean_trace,
+            frequency_kHz=float(self.frequency),
+            skip_us=skip_us,
+        )
+        if arr is None:
+            raise RuntimeError(
+                "Could not locate a first-arrival RF peak in "
+                f"[{skip_us:.1f}, {t_us[-1]:.1f}] \u00b5s. "
+                "Increase --voltage or check that the hydrophone is "
+                "wetted and in front of the array.",
+            )
+
+        distance_mm = arr.arrival_us * 1e-6 * SPEED_OF_SOUND * 1e3
+        logger.info(
+            "calibrate_hydrophone_depth: first_peak=%.3f \u00b5s, "
+            "quarter_cycle=%.3f \u00b5s, arrival=%.3f \u00b5s, "
+            "distance=%.3f mm (SoS=%d m/s, %d pulses)",
+            arr.first_peak_us, arr.quarter_cycle_us, arr.arrival_us,
+            distance_mm, SPEED_OF_SOUND, n_pulses,
+        )
+        if store:
+            self.hydrophone_position[2] = distance_mm
+        if save:
+            self.save_calibration()
+
+        return {
+            "distance_mm": float(distance_mm),
+            "arrival_us": float(arr.arrival_us),
+            "first_peak_us": float(arr.first_peak_us),
+            "first_peak_value": float(arr.first_peak_value),
+            "quarter_cycle_us": float(arr.quarter_cycle_us),
+            "threshold": float(arr.threshold),
+            "sos_m_per_s": float(SPEED_OF_SOUND),
+            "mean_trace": mean_trace,
+            "t_us": t_us,
+            "n_pulses_used": int(traces_mv.shape[0]),
+        }
 
     def find_peak(self, *,
                   x0=None, y0=None, z=None,

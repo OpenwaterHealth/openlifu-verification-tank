@@ -67,11 +67,11 @@ def main():
     parser.add_argument("--y", type=float, default=0.0)
     parser.add_argument("--z", type=float, default=50.0)
     # --- Capture ---
-    parser.add_argument("--time-start-us", type=float, default=-14.0,
+    parser.add_argument("--time-start-us", type=float, default=-10.0,
                         help="Capture window start (µs), relative to the "
                              "start of ultrasound emission (see "
                              "VerificationTank.run_capture).")
-    parser.add_argument("--time-stop-us", type=float, default=106.0,
+    parser.add_argument("--time-stop-us", type=float, default=130.0,
                         help="Capture window stop (µs).")
     parser.add_argument("--sampling-interval-ns", type=float, default=100.0)
     parser.add_argument("--hydro-range-mv", type=int, default=100)
