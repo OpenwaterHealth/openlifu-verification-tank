@@ -186,6 +186,70 @@ class DryRunTank:
             self.hydrophone_position = np.array([x, y, z], dtype=float)
         return float(x), float(y)
 
+    def calibrate_hydrophone_depth(self, *,
+                                    voltage_V: float = 30.0,
+                                    n_pulses: int = 32,
+                                    duration_usec: float = 8.0,
+                                    interval_msec=None,
+                                    skip_us: float = 12.0,
+                                    time_start_us: float = 0.0,
+                                    time_stop_us: float = 100.0,
+                                    sampling_interval_ns: float = 100.0,
+                                    hydrophone_range_mv=None,
+                                    align: bool = True,
+                                    align_max_shift_ns: float = 500.0,
+                                    z_focus_mm=None,
+                                    store: bool = True,
+                                    save: bool = False,
+                                    ) -> dict:
+        """Synthetic stand-in for the real depth calibration.
+
+        Returns a distance derived from the current
+        ``hydrophone_position[2]`` (ground truth in dry-run) plus a
+        small amount of noise so downstream grading is stable. When
+        ``z_focus_mm`` is given, the transducer's max element delay
+        cancels the extra time-of-flight, so the reported distance
+        still matches the true depth.
+        """
+        true_z_mm = float(self.hydrophone_position[2])
+        # Sub-mm noise floor keeps the depth-within-5%-of-nominal test
+        # deterministic under fixed seeds.
+        distance_mm = true_z_mm + float(self._rng.normal(0.0, 0.05))
+        arrival_us = distance_mm / 1.5  # SoS = 1500 m/s = 1.5 mm/us
+        if z_focus_mm is None:
+            max_delay_us = 0.0
+        else:
+            # A perfectly-focused plane at (0, 0, z_focus_mm) delays
+            # every element by ~ (z_focus - actual_depth) / SOS
+            # relative to the plane-wave case. For a hydrophone at
+            # the true focus this is zero; approximate the general
+            # case as the direct-focus TOF minus the plane-wave TOF.
+            max_delay_us = max(0.0, float(z_focus_mm) / 1.5 - true_z_mm / 1.5)
+            arrival_us = arrival_us + max_delay_us
+        if store:
+            self.hydrophone_position[2] = distance_mm
+        t_us = np.linspace(0.0, float(time_stop_us),
+                           int(round(float(time_stop_us) * 1e3
+                                      / float(sampling_interval_ns))) + 1)
+        # Synthetic mean trace: a short raised-cosine burst centered
+        # at the picked first peak.
+        first_peak_us = arrival_us + 0.25 * 1000.0 / float(self.frequency)
+        mean_trace = np.zeros_like(t_us)
+        return {
+            "distance_mm": float(distance_mm),
+            "arrival_us": float(arrival_us),
+            "first_peak_us": float(first_peak_us),
+            "first_peak_value": 1.0,
+            "quarter_cycle_us": 250.0 / float(self.frequency),
+            "threshold": 0.25,
+            "max_delay_us": float(max_delay_us),
+            "z_focus_mm": None if z_focus_mm is None else float(z_focus_mm),
+            "sos_m_per_s": 1500.0,
+            "mean_trace": mean_trace,
+            "t_us": t_us,
+            "n_pulses_used": int(n_pulses),
+        }
+
     # --- scan APIs -----------------------------------------------------
     def _scan_grid(self, xs, ys, z, time_start_s, time_stop_s, sampling_interval_ns):
         t_us = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)

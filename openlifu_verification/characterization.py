@@ -9,9 +9,11 @@ a fixed sequence of measurement phases matching the sections of
     C. Console                (:meth:`Characterization.collect_console_info`)
     -- Arrival-time sanity check --
                               (:meth:`Characterization.warmup_and_arrival_check`)
+    -- Plane-wave depth cal --
+                              (:meth:`Characterization.calibrate_depth_plane_wave`)
     -- Peak search --         (:meth:`Characterization.find_peak_xy`)
     D. 1-D + 2-D peak scans   (:meth:`Characterization.run_beam_scans`)
-    D.5-D.7 Waveform at peak  (:meth:`Characterization.measure_waveform_at_peak`)
+    D.10-D.14 Waveform at peak (:meth:`Characterization.measure_waveform_at_peak`)
     E. Frequency sweep        (:meth:`Characterization.sweep_frequency`)
     F. Voltage sweep          (:meth:`Characterization.sweep_voltage`)
     -- Acceptance grading --  (:meth:`Characterization.grade`)
@@ -67,15 +69,32 @@ ROW = {
     "console_hwid":      "C.2",
     "console_fw_version":"C.3",
     # D. Peak Scans
-    "voltage_rail":      "D.1",
-    "scan_2d_image":     "D.2",
-    "lateral_image":     "D.3",
-    "elevation_image":   "D.4",
-    "axial_image":       "D.5",
-    "waveform_image":    "D.6",
-    "pnp_at_peak_MPa":   "D.7",
-    "axial_depth_mm":    "D.8",
-    "arrival_us":        "D.9",
+    "voltage_rail":          "D.1",
+    # Plane-wave depth calibration lives at the top of the D section
+    # because it precedes the 2-D scan (its result seeds the focus
+    # depth for every downstream focused measurement).
+    "plane_wave_arrival_us": "D.2",
+    "plane_wave_depth_mm":   "D.3",
+    "scan_2d_image":         "D.4",
+    # Hydrophone X / Y are derived from the 2-D scan, so they sit
+    # immediately after D.4.
+    "peak_x_mm":             "D.5",
+    "peak_y_mm":             "D.6",
+    "lateral_image":         "D.7",
+    "elevation_image":       "D.8",
+    "axial_image":           "D.9",
+    # Peak Z Focus is the commanded focus depth (from the 1-D axial
+    # scan / plane-wave depth cal) that seeds the focused-pulse
+    # measurement.
+    "peak_z_focus_mm":       "D.10",
+    "waveform_image":        "D.11",
+    # Focused-pulse block: the focused-pulse PNP (D.12), the raw
+    # focused arrival time (D.13, informational only), and the
+    # focused-arrival hydrophone depth (D.14, graded against
+    # ``criteria.peak_depth``).
+    "pnp_at_peak_MPa":       "D.12",
+    "focused_arrival_us":    "D.13",
+    "focused_depth_mm":      "D.14",
 }
 
 # Voltage-linearity R\u00b2 lives at F.8 (the row on which the F section's
@@ -83,10 +102,13 @@ ROW = {
 # only.
 ROW["voltage_r2"] = "F.8"
 
-# Freq-response deviation at nominal freq lives at E.2 (the row on
-# which the E section's PASS/FAIL is graded). E.1 is the voltage
-# rail setting; E.3.. are the informational per-frequency PNP values.
-ROW["freq_deviation_pct"] = "E.2"
+# Freq-response deviation at nominal freq lives at the LAST row of
+# the E section (the row on which the E section's PASS/FAIL is
+# graded). E.1 is the voltage rail setting; E.2.. are the
+# informational per-frequency PNP values; the trailing deviation row
+# ID is set dynamically inside :meth:`Characterization.sweep_frequency`
+# because its index depends on the number of sweep frequencies.
+ROW["freq_deviation_pct"] = "E.2"  # placeholder, overwritten at runtime
 
 # Scan geometry defaults kept as module constants for backward compat;
 # the live values are pulled from :class:`ScanConfig` at run time.
@@ -333,6 +355,81 @@ class Characterization:
         )
         return result
 
+    def calibrate_depth_plane_wave(self, *,
+                                    voltage_V: Optional[float] = None,
+                                    n_pulses: int = 32,
+                                    duration_usec: float = 8.0,
+                                    skip_us: float = 12.0,
+                                    ) -> dict:
+        """Run the plane-wave depth calibration.
+
+        Fires ``n_pulses`` short plane-wave bursts through
+        :meth:`VerificationTank.calibrate_hydrophone_depth`, records
+        the arrival time and inferred array-to-hydrophone distance,
+        and updates ``ver.hydrophone_position[2]`` in place. Populates
+        the D.12 (plane-wave arrival) and D.13 (plane-wave depth)
+        report rows.
+
+        Args:
+            voltage_V: HV rail for the calibration pulses. Defaults
+                to ``self.voltage_V`` (i.e. reuses the acceptance
+                rail).
+            n_pulses: Number of pulses in the averaged burst.
+            duration_usec: Per-pulse duration (\u00b5s).
+            skip_us: Ignore samples before this time when hunting
+                for the first arrival.
+
+        Returns:
+            The full result dict from
+            :meth:`VerificationTank.calibrate_hydrophone_depth`.
+        """
+        v = float(self.voltage_V if voltage_V is None else voltage_V)
+        cfg = self.scan_config
+        scope_kw = cfg.scope_kwargs()
+        logger.info(
+            "Plane-wave depth calibration: %d pulses @ %.1f V, %.1f \u00b5s each",
+            n_pulses, v, duration_usec,
+        )
+        result = self.ver.calibrate_hydrophone_depth(
+            voltage_V=v,
+            n_pulses=n_pulses,
+            duration_usec=duration_usec,
+            skip_us=skip_us,
+            time_start_us=scope_kw.get("time_start_s", 0.0) * 1e6
+                if scope_kw.get("time_start_s") is not None else 0.0,
+            time_stop_us=scope_kw.get("time_stop_s", 100e-6) * 1e6
+                if scope_kw.get("time_stop_s") is not None else 100.0,
+            sampling_interval_ns=float(scope_kw.get(
+                "sampling_interval_ns", 100.0)),
+            hydrophone_range_mv=int(cfg.scope.hydrophone_range_mv),
+            z_focus_mm=None,  # plane wave
+            store=True,
+            save=False,
+        )
+        self.report.set_row(
+            ROW["plane_wave_arrival_us"],
+            "Plane-Wave Arrival Time",
+            float(result["arrival_us"]),
+            unit="\u00b5s",
+        )
+        self.report.set_row(
+            ROW["plane_wave_depth_mm"],
+            "Plane-Wave Hydrophone Depth",
+            float(result["distance_mm"]),
+            unit="mm",
+        )
+        logger.info(
+            "Plane-wave depth: arrival=%.3f \u00b5s, distance=%.3f mm "
+            "(hydrophone_position[2] updated)",
+            float(result["arrival_us"]), float(result["distance_mm"]),
+        )
+        # calibrate_hydrophone_depth leaves the LIFU armed with 8 \u00b5s
+        # / 30 V / 32-pulse / single-trigger settings. Restore the
+        # acceptance rail + default 20-cycle burst so find_peak and
+        # the beam scans that follow don't fire the wrong pulse.
+        self._apply_baseline_pulse()
+        return result
+
     def find_peak_xy(self, *, x0: float = 0.0, y0: float = 0.0,
                      **kw) -> tuple[float, float]:
         """Locate the true (x, y) peak and update ``hydrophone_position``.
@@ -345,9 +442,17 @@ class Characterization:
                                   plot=self.plot, store=True, save=False,
                                   keep_plot_open=False, **kw)
         self.report.peak_xy_mm = (float(x), float(y))
+        # Populate the D.13 / D.14 rows with the located peak so the
+        # xlsx / PDF report carries the raw (x, y) alongside the
+        # PASS/FAIL verdicts stamped by ``_grade_peak_xy``.
+        self.report.set_row(ROW["peak_x_mm"], "Hydrophone X Position",
+                            float(x), unit="mm")
+        self.report.set_row(ROW["peak_y_mm"], "Hydrophone Y Position",
+                            float(y), unit="mm")
         logger.info("Peak located at (%.4f, %.4f) mm", x, y)
         # Grade inline so the offset PASS/FAIL is visible immediately.
         self._grade_peak_offset()
+        self._grade_peak_xy()
         return float(x), float(y)
 
     def run_beam_scans(self) -> dict:
@@ -404,13 +509,18 @@ class Characterization:
                 "axial_1d": axial, "scan_2d": two_d}
 
     def measure_waveform_at_peak(self) -> dict:
-        """Fire one pulse at the peak; compute PNP + axial depth.
+        """Fire one pulse at the peak; compute PNP + focused arrival depth.
 
-        Also fills the four "image" rows D.2-D.5 with
-        ``"see Figure N"`` cross-references and reports the pulse
-        arrival time (D.8) alongside the axial depth (D.7). The
-        depth is computed from the arrival time and the configured
-        speed of sound in water, not the commanded z-focus.
+        Also fills the five "image" rows D.4-D.8 with
+        ``"see Figure N"`` cross-references. The reported focused
+        arrival time (D.11) and focused-arrival hydrophone depth
+        (D.12) come from a focused-arrival pulse train
+        (``calibrate_hydrophone_depth`` steered at the commanded
+        z-focus), which averages more pulses and uses the first-RF-peak
+        picker with quarter-cycle correction. The focused depth is
+        graded against ``criteria.peak_depth`` (within ``tol_pct`` of
+        ``nominal_mm``); the focused arrival time itself is
+        informational.
         """
         pos = self.ver.hydrophone_position
         self._apply_baseline_range()
@@ -422,43 +532,100 @@ class Characterization:
             raise RuntimeError("Scope timeout while measuring waveform at peak.")
         pnp_MPa = _pnp_MPa(meas["trace"]) if meas["units"] == "Pa" else float("nan")
 
-        # Compute axial depth from time-of-flight so the reported
-        # value is the *measured* depth, not the commanded z.
-        # Traces are emission-relative, so t == time-of-flight directly.
-        skip_us = 0.0
-        arrival_us = _find_arrival_us(meas["t"], meas["trace"], skip_us=skip_us)
-        sos_m_per_s = float(self.scan_config.sos_water_m_per_s)
-        if arrival_us is not None:
-            tof_us = arrival_us
-            # \u00b5s * m/s / 1000  =  mm
-            axial_depth_mm = tof_us * sos_m_per_s / 1000.0
-        else:
-            axial_depth_mm = float("nan")
+        # Focused arrival + depth via the plane-wave-style calibrator
+        # steered at the commanded z-focus. The picker subtracts the
+        # transducer's max element delay, so ``distance_mm`` remains
+        # the one-way array-to-hydrophone normal distance.
+        z_focus_mm = float(pos[2])
+        cfg = self.scan_config
+        scope_kw = cfg.scope_kwargs()
+        try:
+            depth_result = self.ver.calibrate_hydrophone_depth(
+                voltage_V=float(self.voltage_V),
+                n_pulses=32,
+                duration_usec=8.0,
+                skip_us=12.0,
+                time_start_us=(scope_kw.get("time_start_s", 0.0) or 0.0)
+                              * 1e6,
+                time_stop_us=(scope_kw.get("time_stop_s", 100e-6) or 100e-6)
+                             * 1e6,
+                sampling_interval_ns=float(scope_kw.get(
+                    "sampling_interval_ns", 100.0)),
+                hydrophone_range_mv=int(cfg.scope.hydrophone_range_mv),
+                z_focus_mm=z_focus_mm,
+                store=False,  # keep the plane-wave depth as the truth
+                save=False,
+            )
+            arrival_us = float(depth_result["arrival_us"])
+            axial_depth_mm = float(depth_result["distance_mm"])
+            max_delay_us = float(depth_result["max_delay_us"])
+        except Exception as e:  # noqa: BLE001 - dry-run safety
+            logger.warning(
+                "Focused depth calibration failed (%s); "
+                "falling back to Hilbert-envelope arrival on the "
+                "single-pulse trace.", e,
+            )
+            arrival_us = _find_arrival_us(meas["t"], meas["trace"],
+                                          skip_us=0.0)
+            sos_m_per_s = float(cfg.sos_water_m_per_s)
+            axial_depth_mm = (arrival_us * sos_m_per_s / 1000.0
+                              if arrival_us is not None else float("nan"))
+            max_delay_us = 0.0
+        finally:
+            # calibrate_hydrophone_depth leaves the LIFU armed with the
+            # short-burst / high-voltage / 32-pulse settings. Restore
+            # the acceptance state so the frequency / voltage sweeps
+            # that follow fire the intended waveform.
+            self._apply_baseline_pulse()
 
+        sos_m_per_s = float(cfg.sos_water_m_per_s)
         result = {
             **meas,
             "pnp_MPa": pnp_MPa,
+            "peak_z_focus_mm": z_focus_mm,
+            "focused_depth_mm": axial_depth_mm,
+            "focused_arrival_us": arrival_us,
+            # Legacy aliases kept so any external consumer (or older
+            # notebook / script) that reads the ``waveform_at_peak``
+            # dict still finds the same values under their previous
+            # keys.
             "axial_depth_mm": axial_depth_mm,
             "arrival_us": arrival_us,
+            "focused_max_delay_us": max_delay_us,
             "sos_water_m_per_s": sos_m_per_s,
         }
         self.report.waveform_at_peak = result
 
-        # D.2 - D.6 are figure cross-references so the row grid isn't
-        # sparse in the PDF/XLSX. The figures themselves are still
-        # embedded on the "Figures" sheet / PDF pages.
+        # D.4 / D.7 - D.9 / D.11 are figure cross-references so the
+        # row grid isn't sparse in the PDF/XLSX. The figures
+        # themselves are still embedded on the "Figures" sheet / PDF
+        # pages.
         self.report.set_row(ROW["scan_2d_image"],   "2-D XY Scan",       "see Figure 1")
         self.report.set_row(ROW["lateral_image"],   "1-D Lateral Scan",  "see Figure 2")
         self.report.set_row(ROW["elevation_image"], "1-D Elevation Scan","see Figure 3")
         self.report.set_row(ROW["axial_image"],     "1-D Axial Scan",    "see Figure 4")
         self.report.set_row(ROW["waveform_image"],  "Waveform at Peak",  "see Figure 5")
 
-        self.report.set_row(ROW["pnp_at_peak_MPa"], "PNP at Peak", pnp_MPa, unit="MPa")
-        self.report.set_row(ROW["axial_depth_mm"], "Axial Depth of Peak",
-                            axial_depth_mm, unit="mm")
-        self.report.set_row(ROW["arrival_us"], "Arrival Time",
+        # D.10 shows the commanded focus depth (Peak Z Focus, =
+        # the plane-wave-derived hydrophone depth). D.12 is the
+        # focused-pulse PNP (graded against ``criteria.pnp_at_peak``).
+        # D.13 is the raw focused-pulse arrival time (informational
+        # only; the focused pulse arrives at
+        # ``distance / SOS + max_delay_us`` so a meaningful acceptance
+        # threshold would have to reference the geometric max delay).
+        # D.14 is the arrival-derived depth (max-delay corrected)
+        # which IS graded against ``criteria.peak_depth``.
+        self.report.set_row(ROW["peak_z_focus_mm"], "Peak Z Focus",
+                            z_focus_mm, unit="mm")
+        self.report.set_row(ROW["pnp_at_peak_MPa"], "Focused Pulse PNP",
+                            pnp_MPa, unit="MPa")
+        self.report.set_row(ROW["focused_arrival_us"],
+                            "Focused Pulse Arrival Time",
                             arrival_us if arrival_us is not None else float("nan"),
                             unit="\u00b5s")
+        self.report.set_row(ROW["focused_depth_mm"],
+                            "Focused Pulse Hydrophone Depth",
+                            axial_depth_mm, unit="mm")
         logger.info(
             "Waveform at peak: PNP=%.3f MPa, arrival=%s, depth=%.2f mm "
             "(sos=%.0f m/s)",
@@ -469,16 +636,18 @@ class Characterization:
         # Grade inline so the operator sees the PASS/FAIL verdict
         # immediately after the measurement, not retroactively at
         # the end of the run.
-        self._grade_arrival()
         self._grade_pnp_at_peak()
+        self._grade_peak_depth()
         return result
 
     def sweep_frequency(self, *, duration_usec: Optional[float] = None) -> ScanResult:
-        """Sweep pulse frequency around nominal; fill E.3.. with per-freq PNPs.
+        """Sweep pulse frequency around nominal; fill E.2.. with per-freq PNPs.
 
-        The section's PASS/FAIL is graded on E.2 (deviation of the
-        nominal-frequency PNP from the peak PNP in the sweep). The
-        individual E.3.. rows are informational only.
+        The section's PASS/FAIL is graded on the final row (deviation
+        of the nominal-frequency PNP from the peak PNP in the sweep),
+        which sits after the per-frequency PNP rows because it is
+        only computable once the sweep has completed. The individual
+        E.2.. per-frequency rows are informational only.
         """
         cfg = self.scan_config
         freqs = self.frequency_kHz + np.asarray(cfg.frequency_sweep.offsets_kHz,
@@ -504,14 +673,15 @@ class Characterization:
             "voltage_V": self.voltage_V,
         }
         self.report.set_row("E.1", "Voltage Rail Setting", self.voltage_V, unit="V (+/-)")
-        # E.2 is populated (with the actual deviation value) inside
-        # _grade_freq_response so the row carries both the metric and
-        # its PASS/FAIL verdict.
-        # E.3.. : informational per-frequency PNP values (no grading).
-        for i, (f, p) in enumerate(zip(freqs, pnp), start=3):
+        # E.2.. : informational per-frequency PNP values (no grading).
+        for i, (f, p) in enumerate(zip(freqs, pnp), start=2):
             row_id = f"E.{i}"
             label = f"PNP ({int(round(f))} kHz)"
             self.report.set_row(row_id, label, float(p), unit="MPa")
+        # PNP deviation at nominal freq is the graded row and sits at
+        # the end of the E section because it is only computed after
+        # the sweep completes.
+        ROW["freq_deviation_pct"] = f"E.{len(freqs) + 2}"
         # Grade inline so the PASS/FAIL is logged as soon as
         # the sweep finishes.
         self._grade_freq_response()
@@ -611,6 +781,48 @@ class Characterization:
             except Exception as e:
                 logger.debug("set_hydrophone_range(%d) failed: %s", rng, e)
 
+    def _apply_baseline_pulse(self) -> None:
+        """Re-arm the LIFU with the acceptance pulse settings and
+        re-steer to the current ``hydrophone_position``.
+
+        :meth:`VerificationTank.calibrate_hydrophone_depth` mutates the
+        LIFU (voltage=30 V, duration=8 \u00b5s, pulse_count=32,
+        trigger_mode="single") AND calls ``set_focus(0, 0, z_focus)``,
+        never restoring either. Any phase that fires pulses afterwards
+        \u2014 :meth:`find_peak`, the beam scans, the frequency /
+        voltage sweeps \u2014 would inherit those stale settings and see
+        a transient short-burst field at the wrong rail steered at
+        the array center (a sidelobe when the peak is off-axis)
+        instead of the steady-state 20-cycle burst focused at the
+        empirical peak. This method re-applies the acceptance
+        defaults and re-steers to
+        ``self.ver.hydrophone_position`` so downstream phases start
+        from a clean, peak-centered state.
+        """
+        if hasattr(self.ver, "apply_pulse"):
+            try:
+                self.ver.apply_pulse(
+                    frequency_kHz=self.frequency_kHz,
+                    voltage=self.voltage_V,
+                )
+            except Exception as e:
+                logger.warning(
+                    "apply_pulse(freq=%g kHz, voltage=%g V) failed while "
+                    "restoring baseline: %s",
+                    self.frequency_kHz, self.voltage_V, e,
+                )
+        if hasattr(self.ver, "set_focus"):
+            pos = self.ver.hydrophone_position
+            try:
+                self.ver.set_focus(float(pos[0]), float(pos[1]),
+                                   float(pos[2]))
+            except Exception as e:
+                logger.warning(
+                    "set_focus(%.3f, %.3f, %.3f) failed while restoring "
+                    "baseline: %s",
+                    float(pos[0]), float(pos[1]), float(pos[2]), e,
+                )
+
     def _predict_peak_mV_at_ref(self) -> Optional[float]:
         """Estimate the single-sided peak hydrophone signal in mV at ``self.voltage_V``.
 
@@ -652,9 +864,20 @@ class Characterization:
     # checks like peak offset).
 
     def _grade_arrival(self) -> Optional[bool]:
-        """Stamp the D.9 row with PASS/FAIL from ``arrival_check`` and
-        log the verdict. Returns the boolean verdict (or ``None`` if
-        the arrival check has not been run yet).
+        """Log the plane-wave arrival-check verdict.
+
+        The arrival check is retained as a sanity log message but
+        is no longer stamped on any graded report row: the raw
+        focused arrival time (D.11) is informational only, and any
+        acceptance threshold on it would have to include the
+        transducer's per-element ``max_delay_us`` shift. The
+        plane-wave hydrophone depth (D.3) and the focused-arrival
+        depth (D.12) already provide graded, geometry-corrected
+        checks on the arrival timing.
+
+        Returns the boolean verdict (or ``None`` if the arrival
+        check has not been run yet) so callers can still consult it
+        without it feeding the overall pass/fail.
         """
         arr = self.report.arrival_check
         if not arr:
@@ -663,15 +886,12 @@ class Characterization:
         expected_us = arr.get("expected_us")
         tol_us = arr.get("tol_us")
         if expected_us is not None and tol_us is not None:
-            threshold = f"{expected_us:.2f} \u00b1 {tol_us:.2f} \u00b5s"
-            note = f"tol = \u00b1{self.criteria.arrival_time.tol_pct:g}%"
+            note = (f"measured={arr.get('arrival_us', float('nan')):.2f} \u00b5s, "
+                    f"expected={expected_us:.2f} \u00b1 {tol_us:.2f} \u00b5s "
+                    f"(tol \u00b1{self.criteria.arrival_time.tol_pct:g}%)")
         else:
-            threshold = None
             note = arr.get("reason", "")
-        if ROW["arrival_us"] in self.report.rows:
-            self.report.grade_row(ROW["arrival_us"], passed=passed,
-                                  threshold=threshold, note=note)
-        logger.info("[grade] Arrival time \u2192 %s (%s)",
+        logger.info("[grade] Arrival time \u2192 %s (%s, informational)",
                     "PASS" if passed else "FAIL", note)
         return passed
 
@@ -701,10 +921,11 @@ class Characterization:
         return passed
 
     def _grade_freq_response(self) -> Optional[bool]:
-        """Grade E.2: how far below the sweep peak the PNP at nominal
-        frequency sits, as a percentage of the peak. Passes if the
-        deviation is within ``criteria.freq_response.max_deviation_pct``.
-        The individual E.3.. PNP rows are left informational
+        """Grade the trailing E-section row: how far below the sweep
+        peak the PNP at nominal frequency sits, as a percentage of
+        the peak. Passes if the deviation is within
+        ``criteria.freq_response.max_deviation_pct``. The individual
+        per-frequency PNP rows (E.2..) are left informational
         (``status="NA"``)."""
         fr = self.report.freq_response
         pnp = np.asarray(fr.get("pnp_MPa", []), dtype=float)
@@ -768,6 +989,67 @@ class Characterization:
                     "PASS" if passed else "FAIL", note)
         return passed
 
+    def _grade_peak_xy(self) -> Optional[bool]:
+        """Grade D.10 / D.11 on per-axis displacement from (0, 0).
+
+        Passes when both ``|x|`` and ``|y|`` are within
+        ``criteria.peak_offset.max_axis_mm``. Returns the combined
+        verdict (both must pass) or ``None`` if the peak has not
+        been located yet.
+        """
+        if not self.report.peak_xy_mm:
+            return None
+        x, y = float(self.report.peak_xy_mm[0]), float(self.report.peak_xy_mm[1])
+        max_axis = float(self.criteria.peak_offset.max_axis_mm)
+        x_pass = abs(x) <= max_axis
+        y_pass = abs(y) <= max_axis
+        threshold = f"|axis| \u2264 {max_axis} mm"
+        if ROW["peak_x_mm"] in self.report.rows:
+            self.report.grade_row(ROW["peak_x_mm"], passed=x_pass,
+                                  threshold=threshold,
+                                  note=f"|x| = {abs(x):.3f} mm")
+        if ROW["peak_y_mm"] in self.report.rows:
+            self.report.grade_row(ROW["peak_y_mm"], passed=y_pass,
+                                  threshold=threshold,
+                                  note=f"|y| = {abs(y):.3f} mm")
+        logger.info(
+            "[grade] Peak X \u2192 %s (|x|=%.3f mm, max %.2f mm)",
+            "PASS" if x_pass else "FAIL", abs(x), max_axis,
+        )
+        logger.info(
+            "[grade] Peak Y \u2192 %s (|y|=%.3f mm, max %.2f mm)",
+            "PASS" if y_pass else "FAIL", abs(y), max_axis,
+        )
+        return x_pass and y_pass
+
+    def _grade_peak_depth(self) -> Optional[bool]:
+        """Grade D.12 on focused-arrival hydrophone depth vs. nominal.
+
+        Passes when ``|depth - nominal_mm| <= tol_pct% * nominal_mm``.
+        Returns the boolean verdict (or ``None`` if
+        ``measure_waveform_at_peak`` has not been called yet or the
+        arrival could not be picked).
+        """
+        wf = self.report.waveform_at_peak
+        if not wf:
+            return None
+        depth = wf.get("focused_depth_mm", wf.get("axial_depth_mm"))
+        if depth is None or not np.isfinite(depth):
+            return None
+        crit = self.criteria.peak_depth
+        nominal = float(crit.nominal_mm)
+        tol_mm = nominal * float(crit.tol_pct) / 100.0
+        passed = abs(float(depth) - nominal) <= tol_mm
+        threshold = f"{nominal:.1f} \u00b1 {tol_mm:.2f} mm"
+        note = (f"depth = {float(depth):.3f} mm "
+                f"(nominal {nominal:.1f}, tol \u00b1{crit.tol_pct:g}%)")
+        if ROW["focused_depth_mm"] in self.report.rows:
+            self.report.grade_row(ROW["focused_depth_mm"], passed=passed,
+                                  threshold=threshold, note=note)
+        logger.info("[grade] Peak depth \u2192 %s (%s)",
+                    "PASS" if passed else "FAIL", note)
+        return passed
+
     def grade(self) -> dict:
         """Aggregate the per-section verdicts into an overall PASS/FAIL.
 
@@ -779,9 +1061,15 @@ class Characterization:
         method (currently: peak offset).
         """
         summary: dict[str, Optional[bool]] = {}
-        summary["arrival_time"] = self._grade_arrival()
+        # Arrival-time sanity check is intentionally logged but NOT
+        # aggregated into the overall verdict: the raw arrival time
+        # is informational (the geometry-corrected plane-wave and
+        # focused-arrival depths are the graded quantities).
+        self._grade_arrival()
         summary["peak_offset"] = self._grade_peak_offset()
+        summary["peak_xy"] = self._grade_peak_xy()
         summary["pnp_at_peak"] = self._grade_pnp_at_peak()
+        summary["peak_depth"] = self._grade_peak_depth()
         summary["freq_response"] = self._grade_freq_response()
         summary["voltage_linearity"] = self._grade_voltage_linearity()
 
@@ -803,10 +1091,22 @@ class Characterization:
         """Run every phase in order and grade."""
         self.collect_test_info()
         self.warmup_and_arrival_check()
+        # Refine hydrophone depth via plane-wave arrival BEFORE the
+        # peak search so find_peak fires focused pulses at the true
+        # array-to-hydrophone distance rather than the operator's
+        # rough initial estimate.
+        try:
+            self.calibrate_depth_plane_wave()
+        except Exception as e:  # noqa: BLE001 - dry-run safety
+            logger.warning(
+                "Plane-wave depth calibration failed (%s); "
+                "continuing with the seeded hydrophone_position[2]=%.2f mm.",
+                e, float(self.ver.hydrophone_position[2]),
+            )
         # Wipe any XY drift from a prior calibration / leftover run
         # so the peak search is guaranteed to start from a known,
         # transducer-centered reference. Axial (z) is left intact
-        # because it encodes the true focus depth.
+        # because it now encodes the freshly-measured focus depth.
         self.ver.hydrophone_position[0] = 0.0
         self.ver.hydrophone_position[1] = 0.0
         logger.info("Running fresh find_peak from (x=0, y=0, z=%.2f mm).",

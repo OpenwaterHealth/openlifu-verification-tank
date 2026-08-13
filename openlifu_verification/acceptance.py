@@ -25,8 +25,22 @@ class ArrivalTime:
 
 @dataclass
 class PeakOffset:
-    """Max allowed distance from the nominal focal center (mm)."""
+    """Max allowed distance from the nominal focal center (mm).
+
+    ``max_mm`` bounds the Euclidean distance ``|(x, y)|`` and is
+    reported log-only. ``max_axis_mm`` bounds each axis
+    independently (``|x|`` and ``|y|``) and is what grades the
+    D.5 / D.6 Hydrophone X/Y Position report rows.
+    """
     max_mm: float = 3.0
+    max_axis_mm: float = 1.0
+
+
+@dataclass
+class PeakDepth:
+    """Focused-arrival axial depth (mm) at the located peak."""
+    nominal_mm: float = 50.0
+    tol_pct: float = 5.0
 
 
 @dataclass
@@ -66,6 +80,7 @@ class AcceptanceCriteria:
     """
     arrival_time: ArrivalTime = field(default_factory=ArrivalTime)
     peak_offset: PeakOffset = field(default_factory=PeakOffset)
+    peak_depth: PeakDepth = field(default_factory=PeakDepth)
     pnp_at_peak: PnpAtPeak = field(default_factory=PnpAtPeak)
     freq_response: FreqResponse = field(default_factory=FreqResponse)
     voltage_linearity: VoltageLinearity = field(default_factory=VoltageLinearity)
@@ -82,6 +97,7 @@ class AcceptanceCriteria:
         return cls(
             arrival_time=ArrivalTime(**data.get("arrival_time", {})),
             peak_offset=PeakOffset(**data.get("peak_offset", {})),
+            peak_depth=PeakDepth(**data.get("peak_depth", {})),
             pnp_at_peak=PnpAtPeak(**data.get("pnp_at_peak", {})),
             freq_response=FreqResponse(**data.get("freq_response", {})),
             voltage_linearity=VoltageLinearity(**data.get("voltage_linearity", {})),
@@ -123,7 +139,10 @@ class AcceptanceCriteria:
         payload = {
             "arrival_time":     {"nominal_us": self.arrival_time.nominal_us,
                                  "tol_pct":     self.arrival_time.tol_pct},
-            "peak_offset":      {"max_mm":      self.peak_offset.max_mm},
+            "peak_offset":      {"max_mm":      self.peak_offset.max_mm,
+                                 "max_axis_mm": self.peak_offset.max_axis_mm},
+            "peak_depth":       {"nominal_mm":  self.peak_depth.nominal_mm,
+                                 "tol_pct":     self.peak_depth.tol_pct},
             "pnp_at_peak":      {"min_by_freq_kHz": dict(self.pnp_at_peak.min_by_freq_kHz)},
             "freq_response":    {"max_deviation_pct": self.freq_response.max_deviation_pct},
             "voltage_linearity":{"r2_min":      self.voltage_linearity.r2_min},
