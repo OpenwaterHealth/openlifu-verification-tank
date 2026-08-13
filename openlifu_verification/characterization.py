@@ -197,40 +197,6 @@ def _ripple_dB(values: np.ndarray) -> float:
     return float(20.0 * np.log10(v.max() / v.min()))
 
 
-def _concat_voltage_results(results: list[ScanResult]) -> ScanResult:
-    """Concatenate a list of voltage-sweep :class:`ScanResult` objects.
-
-    All inputs must share the same ``t`` axis and units; each contributes
-    its own slice of the ``voltage_V`` coord and its own rows of
-    ``traces``. If only one result is given, it's returned as-is.
-    """
-    if len(results) == 1:
-        return results[0]
-    if not results:
-        raise ValueError("no voltage-sweep results to concatenate")
-    base = results[0]
-    t = base.t
-    for r in results[1:]:
-        if r.t.shape != t.shape or not np.allclose(r.t, t):
-            raise ValueError("voltage-sweep results have mismatched time axes")
-    traces = np.concatenate([np.atleast_2d(r.traces) for r in results], axis=0)
-    coords = {"voltage_V": np.concatenate(
-        [np.asarray(r.coords["voltage_V"], dtype=float) for r in results]
-    )}
-    meta = dict(base.metadata)
-    meta["range_groups_mv"] = [r.metadata.get("hydrophone_range_mv") for r in results]
-    return ScanResult(
-        scan_type=base.scan_type,
-        t=t,
-        traces=traces,
-        coords=coords,
-        hydrophone_channel=base.hydrophone_channel,
-        chunk_size=sum(r.chunk_size for r in results),
-        units=base.units,
-        metadata=meta,
-    )
-
-
 # ----------------------------------------------------------------------
 # Characterization workflow
 # ----------------------------------------------------------------------
@@ -539,41 +505,55 @@ class Characterization:
                       voltages_V: Optional[np.ndarray] = None) -> ScanResult:
         """Sweep HV rail; fill F.2 - F.7 and compute linearity R^2.
 
-        The scope's vertical range is auto-scaled per voltage: voltages
-        that would clip the current range are grouped together and run
-        in a separate rapid-block pass with a larger range. This means
-        one call may produce several underlying ``scan_voltage``
-        captures which are concatenated back into a single
-        :class:`ScanResult`.
+        The scope's vertical range is picked once as the widest
+        predicted across all voltages, so every point is captured in a
+        single rapid-block pass. The trade-off is coarser vertical
+        resolution on the low-voltage points, but the linearity R\u00b2
+        computation is unaffected because peak amplitude is what
+        matters.
+
+        Args:
+            voltages_V: Override the voltages in :attr:`scan_config`.
         """
         cfg = self.scan_config
         volts = np.asarray(
             cfg.voltage_sweep.voltages_V if voltages_V is None else voltages_V,
             dtype=float,
         )
+        volts = np.sort(volts)
         logger.info("Voltage sweep across %s V...", volts.tolist())
 
-        groups = self._plan_voltage_range_groups(volts)
-        results: list[ScanResult] = []
-        for group_range, group_volts in groups:
-            if group_range is not None and hasattr(self.ver, "set_hydrophone_range"):
-                try:
-                    self.ver.set_hydrophone_range(int(group_range))
-                    logger.info(
-                        "Voltage sweep group %s V \u2192 scope range \u00b1%d mV",
-                        group_volts.tolist(), int(group_range),
-                    )
-                except Exception as e:
-                    logger.warning("Could not set scope range %s: %s", group_range, e)
-            group_result = self.ver.scan_voltage(
-                voltages_V=group_volts,
-                **cfg.scope_kwargs(),
+        # Pick the widest predicted scope range so every point fits in
+        # one rapid-block pass. Fall back to leaving the scope alone
+        # if we can't predict amplitudes yet (no baseline waveform,
+        # no hydrophone).
+        base_peak_mV = self._predict_peak_mV_at_ref()
+        widest_range = None
+        if base_peak_mV is not None and self.voltage_V > 0:
+            headroom = cfg.scope.voltage_scan_headroom_pct
+            widest_range = max(
+                choose_range_mv(base_peak_mV * float(v) / float(self.voltage_V),
+                                headroom_pct=headroom)
+                for v in volts
             )
-            results.append(group_result)
+        if widest_range is not None and hasattr(self.ver, "set_hydrophone_range"):
+            try:
+                self.ver.set_hydrophone_range(int(widest_range))
+                logger.info(
+                    "Voltage sweep scope range \u00b1%d mV",
+                    int(widest_range),
+                )
+            except Exception as e:
+                logger.warning("Could not set scope range %s: %s",
+                               widest_range, e)
+
+        result = self.ver.scan_voltage(
+            voltages_V=volts,
+            **cfg.scope_kwargs(),
+        )
         # Reset to baseline for anything downstream.
         self._apply_baseline_range()
 
-        result = _concat_voltage_results(results)
         traces = np.atleast_2d(result.traces)
         pnp = np.array([_pnp_MPa(row) for row in traces])
         slope, intercept, r2 = _linear_r2(volts, pnp)
@@ -644,36 +624,6 @@ class Characterization:
             return None
         peak_v = peak / pa_per_v
         return peak_v * 1000.0  # mV
-
-    def _plan_voltage_range_groups(
-        self, volts: np.ndarray
-    ) -> list[tuple[Optional[int], np.ndarray]]:
-        """Group ``volts`` by required scope range.
-
-        Returns a list of ``(range_mv, voltages_array)`` in the same
-        order as ``volts``. If we can't predict amplitudes (no
-        baseline waveform yet, no hydrophone attached), returns a
-        single group with ``range_mv=None`` (meaning: leave the scope
-        alone).
-        """
-        cfg = self.scan_config
-        base_peak_mV = self._predict_peak_mV_at_ref()
-        if base_peak_mV is None or self.voltage_V <= 0:
-            return [(None, volts)]
-        headroom = cfg.scope.voltage_scan_headroom_pct
-        planned = []
-        for v in volts:
-            expected_peak_mV = base_peak_mV * float(v) / float(self.voltage_V)
-            planned.append(choose_range_mv(expected_peak_mV, headroom_pct=headroom))
-        # Group consecutive equal ranges together to minimize the
-        # number of separate rapid-block passes.
-        groups: list[tuple[Optional[int], list[float]]] = []
-        for rng, v in zip(planned, volts):
-            if groups and groups[-1][0] == rng:
-                groups[-1][1].append(float(v))
-            else:
-                groups.append((rng, [float(v)]))
-        return [(rng, np.asarray(vs, dtype=float)) for rng, vs in groups]
 
     # ------------------------------------------------------------------
     # Grading

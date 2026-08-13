@@ -107,7 +107,7 @@ def main():
             # doesn't overshoot the scope's range.
             ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
-                voltage=float(args.v_start),
+                voltage=float(voltages[0]),
                 duration_usec=args.duration_usec,
                 interval_msec=args.interval_msec,
             )
