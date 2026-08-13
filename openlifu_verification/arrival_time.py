@@ -68,7 +68,7 @@ def find_first_arrival_us(t_us: np.ndarray,
                           *,
                           frequency_kHz: float,
                           skip_us: float = 12.0,
-                          min_prominence_frac: float = 0.125,
+                          min_prominence_frac: float = 0.05,
                           ) -> Optional[ArrivalResult]:
     """Locate the first arrival of a narrow-band pulse.
 
@@ -88,7 +88,7 @@ def find_first_arrival_us(t_us: np.ndarray,
             to 12 \u00b5s to skip the trigger flash / cross-talk.
         min_prominence_frac: Local maxima whose value is below
             ``min_prominence_frac`` * global-positive-peak are rejected
-            as noise. Default 0.125 (12.5% of the burst peak) \u2014 well
+            as noise. Default 0.05 (5% of the burst peak) \u2014 well
             above typical noise floors for a 32-pulse coherent average,
             and comfortably below the leading crest of a boxcar-onset
             tone-burst.

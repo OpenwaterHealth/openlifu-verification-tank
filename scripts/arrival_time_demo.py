@@ -1,19 +1,33 @@
 """Dial-in demo for the arrival-time / hydrophone-depth calibration.
 
-Fires a train of short plane-wave pulses at the hydrophone, coherently
-averages them, locates the first RF-carrier peak above a prominence
-threshold, applies a quarter-cycle correction, and reports the
-inferred array-to-hydrophone distance. Also plots the aggregated
-waveform with the picked first peak, the prominence threshold, the
+Fires a train of short pulses at the hydrophone, coherently averages
+them, locates the first RF-carrier peak above a prominence threshold,
+applies a quarter-cycle correction, and reports the inferred
+array-to-hydrophone distance. Also plots the aggregated waveform with
+the picked first peak, the prominence threshold, the
 quarter-cycle-corrected arrival, and a shaded pre-``skip_us``
 exclusion region so you can iterate on ``--skip-us``,
 ``--duration-usec``, and ``--voltage`` before wiring this into
 ``find_peak.py``.
 
+By default the demo fires a plane wave (all elements simultaneous),
+so ``distance_mm`` is the array-to-hydrophone axial distance
+directly. Pass ``--z-focus-mm`` to steer to a real on-axis focus
+instead \u2014 the picker's arrival is then reduced by the transducer's
+max element delay so the reported distance is still the one-way
+normal distance from the array face to the hydrophone. When the
+hydrophone sits at the focus this cancels exactly; off-focus this is
+a first-order approximation.
+
 Example::
 
     python scripts/arrival_time_demo.py --hydrophone 2246 \\
         --voltage 30 --duration-usec 8 --pulse-count 32 --skip-us 12
+
+    # Same, but steer to an on-axis focus at 30 mm:
+    python scripts/arrival_time_demo.py --hydrophone 2246 \\
+        --voltage 30 --duration-usec 8 --pulse-count 32 --skip-us 12 \\
+        --z-focus-mm 30
 
 The reported ``distance_mm`` is the one-way distance from the array
 face to the hydrophone (plane-wave excitation, all elements fire
@@ -68,6 +82,13 @@ def main():
     parser.add_argument("--align", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Cross-correlate pulses before averaging.")
+    # --- Focus (delay adjustment) ---
+    parser.add_argument("--z-focus-mm", type=float, default=None,
+                        help="Steer to an on-axis focus at this depth (mm). "
+                             "Default: plane wave (all elements fire together). "
+                             "When set, the transducer's max element delay is "
+                             "subtracted from the picked arrival time so "
+                             "distance_mm is still the one-way normal distance.")
     # --- Hydrophone / calibration ---
     parser.add_argument("--hydrophone", type=str, default="",
                         help="Hydrophone calibration file or bare ID.")
@@ -102,7 +123,11 @@ def main():
                           hydrophone_range_mv=args.hydro_range_mv,
                           use_calibration=False,  # amplitude-independent
                           ext_power_supply=False) as ver:
-        input("Press Enter to start plane-wave arrival-time calibration")
+        prompt = ("Press Enter to start plane-wave arrival-time calibration"
+                  if args.z_focus_mm is None
+                  else f"Press Enter to start arrival-time calibration "
+                       f"(focus @ z = {args.z_focus_mm:.1f} mm)")
+        input(prompt)
         result = ver.calibrate_hydrophone_depth(
             voltage_V=args.voltage,
             n_pulses=args.pulse_count,
@@ -114,17 +139,24 @@ def main():
             sampling_interval_ns=args.sampling_interval_ns,
             hydrophone_range_mv=args.hydro_range_mv,
             align=args.align,
+            z_focus_mm=args.z_focus_mm,
             store=args.save_calibration,
             save=args.save_calibration,
         )
 
     print()
+    focus_desc = ("plane wave" if result["z_focus_mm"] is None
+                  else f"focus @ z = {result['z_focus_mm']:.2f} mm")
+    print(f"  excitation        : {focus_desc}")
     print(f"  n_pulses averaged : {result['n_pulses_used']}")
     print(f"  first RF peak     : {result['first_peak_us']:.3f} \u00b5s")
     print(f"  peak value        : {result['first_peak_value']:.4g} mV")
     print(f"  threshold         : {result['threshold']:.4g} mV")
     print(f"  quarter-cycle corr: {result['quarter_cycle_us']:.3f} \u00b5s")
-    print(f"  arrival           : {result['arrival_us']:.3f} \u00b5s")
+    print(f"  raw arrival       : {result['arrival_us']:.3f} \u00b5s")
+    print(f"  max element delay : {result['max_delay_us']:.3f} \u00b5s")
+    corrected_us = result["arrival_us"] - result["max_delay_us"]
+    print(f"  corrected arrival : {corrected_us:.3f} \u00b5s")
     print(f"  SoS               : {result['sos_m_per_s']:.0f} m/s")
     print(f"  distance          : {result['distance_mm']:.3f} mm")
 
@@ -150,10 +182,18 @@ def main():
                ls="--", lw=1.5,
                label=(f"arrival = peak \u2212 \u00bc cycle "
                       f"({result['quarter_cycle_us']:.2f} \u00b5s)"))
+    if result["max_delay_us"] > 0:
+        corrected_us = result["arrival_us"] - result["max_delay_us"]
+        ax.axvline(corrected_us, color="tab:green",
+                   ls="-.", lw=1.5,
+                   label=(f"corrected = arrival \u2212 max_delay "
+                          f"({result['max_delay_us']:.2f} \u00b5s)"))
     ax.set_xlabel("time (\u00b5s, relative to emission)")
     ax.set_ylabel("hydrophone (mV, averaged)")
+    focus_title = ("plane wave" if result["z_focus_mm"] is None
+                   else f"focus @ z = {result['z_focus_mm']:.1f} mm")
     ax.set_title(
-        f"Plane-wave arrival-time calibration  \u2192  "
+        f"Arrival-time calibration ({focus_title})  \u2192  "
         f"distance = {result['distance_mm']:.3f} mm"
     )
     ax.grid(True, alpha=0.3)

@@ -2198,6 +2198,7 @@ class VerificationTank:
                                     hydrophone_range_mv: int | None = None,
                                     align: bool = True,
                                     align_max_shift_ns: float = 500.0,
+                                    z_focus_mm: float | None = None,
                                     store: bool = True,
                                     save: bool = False,
                                     ) -> dict:
@@ -2239,6 +2240,16 @@ class VerificationTank:
                 current range alone when ``None``.
             align: Cross-correlate repeats before averaging.
             align_max_shift_ns: Cross-correlation lag search bound.
+            z_focus_mm: If ``None`` (default), fire a plane wave
+                (``set_focus(0, 0, 1e6)`` — all elements fire
+                simultaneously). If a numeric value is given, steer
+                to that on-axis focus in mm and subtract the
+                transducer's max element delay from the picked
+                arrival time so the returned ``distance_mm`` remains
+                the one-way array→hydrophone normal distance. When
+                the hydrophone sits at the focus this cancels
+                exactly; off-focus this is a first-order
+                approximation.
             store: If ``True`` (default), update
                 ``self.hydrophone_position[2]`` in place.
             save: If ``True``, also persist via
@@ -2250,10 +2261,17 @@ class VerificationTank:
               - ``distance_mm``: Estimated array\u2192hydrophone
                 distance in mm.
               - ``arrival_us``: Estimated arrival time (\u00b5s,
-                post quarter-cycle correction).
-              - ``envelope_peak_us``: Raw envelope peak time before
+                post quarter-cycle correction, **before** the
+                max-delay adjustment).
+              - ``first_peak_us``: Raw first-RF-peak time before
                 the quarter-cycle correction.
               - ``quarter_cycle_us``: The correction applied.
+              - ``max_delay_us``: The transducer's max element
+                delay for the requested focus (0 when firing a
+                plane wave). This is subtracted from
+                ``arrival_us`` before computing ``distance_mm``.
+              - ``z_focus_mm``: The focus depth actually used
+                (``None`` for plane wave).
               - ``sos_m_per_s``: Speed of sound used.
               - ``mean_trace``, ``t_us``: The aggregated waveform.
               - ``n_pulses_used``: How many pulses were actually
@@ -2274,9 +2292,27 @@ class VerificationTank:
             pulse_count=n_pulses,
             trigger_mode="single",
         )
-        # Plane wave: focus at effectively infinity so all elements
-        # get the same delay.
-        self.set_focus(0.0, 0.0, 1_000_000.0)
+        # Plane wave (``z_focus_mm is None``) or steered focus.
+        # For a plane wave the effective z is ~infinity so every
+        # element has the same delay (max_delay ~ 0).
+        if z_focus_mm is None:
+            focus_z_mm = 1_000_000.0
+            max_delay_us = 0.0
+        else:
+            focus_z_mm = float(z_focus_mm)
+            positions_mm = np.asarray(
+                self.arr.get_positions(units="mm"), dtype=float,
+            )
+            focus_vec_mm = np.array([0.0, 0.0, focus_z_mm])
+            distances_mm = np.linalg.norm(
+                focus_vec_mm - positions_mm, axis=1,
+            )
+            tof_us = distances_mm * 1e-3 / SPEED_OF_SOUND * 1e6
+            # ``set_focus`` sets delays = tof.max() - tof, so the
+            # innermost (closest to focus) element fires last at
+            # t = tof.max() - tof.min().
+            max_delay_us = float(tof_us.max() - tof_us.min())
+        self.set_focus(0.0, 0.0, focus_z_mm)
         if hydrophone_range_mv is not None:
             self.set_hydrophone_range(int(hydrophone_range_mv))
         self.enable_hv_output(wait=True)
@@ -2327,13 +2363,18 @@ class VerificationTank:
                 "wetted and in front of the array.",
             )
 
-        distance_mm = arr.arrival_us * 1e-6 * SPEED_OF_SOUND * 1e3
+        distance_mm = (
+            (arr.arrival_us - max_delay_us) * 1e-6 * SPEED_OF_SOUND * 1e3
+        )
         logger.info(
             "calibrate_hydrophone_depth: first_peak=%.3f \u00b5s, "
             "quarter_cycle=%.3f \u00b5s, arrival=%.3f \u00b5s, "
-            "distance=%.3f mm (SoS=%d m/s, %d pulses)",
+            "max_delay=%.3f \u00b5s, distance=%.3f mm "
+            "(SoS=%d m/s, %d pulses, focus=%s)",
             arr.first_peak_us, arr.quarter_cycle_us, arr.arrival_us,
-            distance_mm, SPEED_OF_SOUND, n_pulses,
+            max_delay_us, distance_mm, SPEED_OF_SOUND, n_pulses,
+            "plane wave" if z_focus_mm is None
+            else f"z={float(z_focus_mm):.1f} mm",
         )
         if store:
             self.hydrophone_position[2] = distance_mm
@@ -2347,6 +2388,8 @@ class VerificationTank:
             "first_peak_value": float(arr.first_peak_value),
             "quarter_cycle_us": float(arr.quarter_cycle_us),
             "threshold": float(arr.threshold),
+            "max_delay_us": float(max_delay_us),
+            "z_focus_mm": None if z_focus_mm is None else float(z_focus_mm),
             "sos_m_per_s": float(SPEED_OF_SOUND),
             "mean_trace": mean_trace,
             "t_us": t_us,
