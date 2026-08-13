@@ -40,8 +40,9 @@ class PnpAtPeak:
 
 @dataclass
 class FreqResponse:
-    """Ripple of the PNP-vs-frequency curve, in dB (peak-to-peak)."""
-    max_ripple_dB: float = 3.0
+    """Deviation of the nominal-frequency PNP from the peak PNP in the
+    frequency sweep, expressed as a percentage of the peak."""
+    max_deviation_pct: float = 5.0
 
 
 @dataclass
@@ -124,7 +125,7 @@ class AcceptanceCriteria:
                                  "tol_pct":     self.arrival_time.tol_pct},
             "peak_offset":      {"max_mm":      self.peak_offset.max_mm},
             "pnp_at_peak":      {"min_by_freq_kHz": dict(self.pnp_at_peak.min_by_freq_kHz)},
-            "freq_response":    {"max_ripple_dB": self.freq_response.max_ripple_dB},
+            "freq_response":    {"max_deviation_pct": self.freq_response.max_deviation_pct},
             "voltage_linearity":{"r2_min":      self.voltage_linearity.r2_min},
             "temperature":      {"max_C":       self.temperature.max_C},
         }

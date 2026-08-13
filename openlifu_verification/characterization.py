@@ -51,15 +51,21 @@ ROW = {
     "test_app_version":  "A.3",
     "sdk_version":       "A.4",
     "hydrophone_sn":     "A.5",
+    "hydrophone_model":  "A.6",
+    "hydrophone_cal_date":"A.7",
+    "hydrophone_cal_file":"A.8",
+    "picoscope_variant": "A.9",
+    "picoscope_sn":      "A.10",
+    "picoscope_cal_date":"A.11",
     # B. Transmit Module
     "txm_sn":            "B.1",
     "txm_freq_kHz":      "B.2",
-    "txm_hwid":          "B.4",
-    "txm_fw_version":    "B.5",
+    "txm_hwid":          "B.3",
+    "txm_fw_version":    "B.4",
     # C. Console
     "console_sn":        "C.1",
-    "console_hwid":      "C.3",
-    "console_fw_version":"C.4",
+    "console_hwid":      "C.2",
+    "console_fw_version":"C.3",
     # D. Peak Scans
     "voltage_rail":      "D.1",
     "scan_2d_image":     "D.2",
@@ -77,6 +83,11 @@ ROW = {
 # only.
 ROW["voltage_r2"] = "F.8"
 
+# Freq-response deviation at nominal freq lives at E.2 (the row on
+# which the E section's PASS/FAIL is graded). E.1 is the voltage
+# rail setting; E.3.. are the informational per-frequency PNP values.
+ROW["freq_deviation_pct"] = "E.2"
+
 # Scan geometry defaults kept as module constants for backward compat;
 # the live values are pulled from :class:`ScanConfig` at run time.
 LATERAL_1D_EXTENT_MM = 5.0
@@ -84,8 +95,8 @@ LATERAL_1D_POINTS = 21
 SCAN_2D_EXTENT_MM = 3.0
 SCAN_2D_POINTS = 13
 
-# Freq sweep: 8 points, -25 kHz .. +10 kHz around nominal @ 5 kHz spacing
-# (mirrors template rows E.2 - E.9).
+# Freq sweep default: 8 points, -25 kHz .. +10 kHz around nominal @ 5 kHz
+# spacing (overridable via ``scan_config.json``). Populates E.3..E.N.
 FREQ_SWEEP_OFFSETS_KHZ = np.array([-25, -20, -15, -10, -5, 0, +5, +10], dtype=float)
 
 # Voltage sweep: 6 points, 5..30 V (mirrors template F.2 - F.7).
@@ -188,15 +199,6 @@ def _linear_r2(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
     return float(slope), float(intercept), float(r2)
 
 
-def _ripple_dB(values: np.ndarray) -> float:
-    """Peak-to-peak ripple of a positive-valued sequence, in dB."""
-    v = np.asarray(values, dtype=float)
-    v = v[v > 0]
-    if v.size < 2:
-        return float("nan")
-    return float(20.0 * np.log10(v.max() / v.min()))
-
-
 # ----------------------------------------------------------------------
 # Characterization workflow
 # ----------------------------------------------------------------------
@@ -267,6 +269,12 @@ class Characterization:
         r.set_row(ROW["test_app_version"], "Test App Version",    p.test_app_version)
         r.set_row(ROW["sdk_version"],      "SDK Version",         info.sdk_version)
         r.set_row(ROW["hydrophone_sn"],    "Hydrophone S/N",      p.hydrophone_sn)
+        r.set_row(ROW["hydrophone_model"],   "Hydrophone Model",    info.hydrophone_model)
+        r.set_row(ROW["hydrophone_cal_date"],"Hydrophone Cal Date", info.hydrophone_cal_date)
+        r.set_row(ROW["hydrophone_cal_file"],"Hydrophone Cal File", info.hydrophone_cal_file)
+        r.set_row(ROW["picoscope_variant"], "PicoScope Variant",  info.picoscope_variant)
+        r.set_row(ROW["picoscope_sn"],      "PicoScope S/N",      info.picoscope_sn)
+        r.set_row(ROW["picoscope_cal_date"],"PicoScope Cal Date", info.picoscope_cal_date)
 
         r.set_row(ROW["txm_sn"],           "Serial Number",       p.txm_sn)
         r.set_row(ROW["txm_freq_kHz"],     "Frequency",           self.frequency_kHz,   unit="kHz")
@@ -466,7 +474,12 @@ class Characterization:
         return result
 
     def sweep_frequency(self, *, duration_usec: Optional[float] = None) -> ScanResult:
-        """Sweep pulse frequency around nominal; fill E.2 - E.9."""
+        """Sweep pulse frequency around nominal; fill E.3.. with per-freq PNPs.
+
+        The section's PASS/FAIL is graded on E.2 (deviation of the
+        nominal-frequency PNP from the peak PNP in the sweep). The
+        individual E.3.. rows are informational only.
+        """
         cfg = self.scan_config
         freqs = self.frequency_kHz + np.asarray(cfg.frequency_sweep.offsets_kHz,
                                                 dtype=float)
@@ -490,13 +503,16 @@ class Characterization:
             "pnp_MPa": pnp,
             "voltage_V": self.voltage_V,
         }
-        # Fill E.2 - E.9 (up to 8 entries).
-        for i, (f, p) in enumerate(zip(freqs, pnp), start=2):
+        self.report.set_row("E.1", "Voltage Rail Setting", self.voltage_V, unit="V (+/-)")
+        # E.2 is populated (with the actual deviation value) inside
+        # _grade_freq_response so the row carries both the metric and
+        # its PASS/FAIL verdict.
+        # E.3.. : informational per-frequency PNP values (no grading).
+        for i, (f, p) in enumerate(zip(freqs, pnp), start=3):
             row_id = f"E.{i}"
             label = f"PNP ({int(round(f))} kHz)"
             self.report.set_row(row_id, label, float(p), unit="MPa")
-        self.report.set_row("E.1", "Voltage Rail Setting", self.voltage_V, unit="V (+/-)")
-        # Grade inline so the ripple PASS/FAIL is logged as soon as
+        # Grade inline so the PASS/FAIL is logged as soon as
         # the sweep finishes.
         self._grade_freq_response()
         return result
@@ -685,24 +701,39 @@ class Characterization:
         return passed
 
     def _grade_freq_response(self) -> Optional[bool]:
-        """Compute the frequency-sweep ripple, log PASS/FAIL, and
-        annotate every E.2 - E.9 row with the ripple in its note.
-        (No dedicated report row exists for ripple, so the section
-        verdict is broadcast to the E rows' notes as a courtesy.)"""
+        """Grade E.2: how far below the sweep peak the PNP at nominal
+        frequency sits, as a percentage of the peak. Passes if the
+        deviation is within ``criteria.freq_response.max_deviation_pct``.
+        The individual E.3.. PNP rows are left informational
+        (``status="NA"``)."""
         fr = self.report.freq_response
-        if fr.get("pnp_MPa") is None:
+        pnp = np.asarray(fr.get("pnp_MPa", []), dtype=float)
+        freqs = np.asarray(fr.get("frequencies_kHz", []), dtype=float)
+        if pnp.size == 0 or freqs.size == 0 or pnp.size != freqs.size:
             return None
-        ripple = _ripple_dB(np.asarray(fr["pnp_MPa"]))
-        max_r = self.criteria.freq_response.max_ripple_dB
-        passed = ripple <= max_r
-        note = f"ripple = {ripple:.2f} dB (max {max_r} dB)"
-        for i in range(2, 10):
-            rid = f"E.{i}"
-            if rid in self.report.rows:
-                self.report.grade_row(rid, passed=passed,
-                                      threshold=max_r, note=note)
-        logger.info("[grade] Frequency response \u2192 %s (%s)",
-                    "PASS" if passed else "FAIL", note)
+        peak = float(np.max(pnp))
+        if peak <= 0:
+            return None
+        # PNP at (or nearest to) the nominal frequency.
+        idx_nom = int(np.argmin(np.abs(freqs - self.frequency_kHz)))
+        pnp_nom = float(pnp[idx_nom])
+        deviation_pct = (peak - pnp_nom) / peak * 100.0
+        max_dev = float(self.criteria.freq_response.max_deviation_pct)
+        passed = deviation_pct <= max_dev
+        note = (f"nominal={pnp_nom:.3f} MPa, peak={peak:.3f} MPa "
+                f"@ {freqs[int(np.argmax(pnp))]:.0f} kHz "
+                f"(max dev {max_dev:g}%)")
+        self.report.set_row(
+            ROW["freq_deviation_pct"],
+            "PNP Deviation at Nominal Freq",
+            float(deviation_pct),
+            unit="%",
+        )
+        self.report.grade_row(ROW["freq_deviation_pct"], passed=passed,
+                              threshold=max_dev, note=note)
+        logger.info("[grade] Frequency response \u2192 %s "
+                    "(deviation=%.2f%%, %s)",
+                    "PASS" if passed else "FAIL", deviation_pct, note)
         return passed
 
     def _grade_voltage_linearity(self) -> Optional[bool]:
@@ -742,7 +773,7 @@ class Characterization:
 
         Each section is graded eagerly by its own ``_grade_*`` helper
         as soon as the underlying data is available (arrival, PNP,
-        frequency ripple, voltage linearity), so this method is a
+        frequency deviation, voltage linearity), so this method is a
         thin aggregator. It also runs the couple of checks that
         don't have a natural attachment point in a measurement
         method (currently: peak offset).

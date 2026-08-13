@@ -24,6 +24,10 @@ import numpy as np
 
 from picosdk.functions import adc2mV, assert_pico_ok, mV2adc
 from picosdk.ps5000a import ps5000a as ps
+try:
+    from picosdk.constants import PICO_INFO
+except ImportError:  # older picosdk fallback
+    PICO_INFO = {}
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +181,51 @@ class Picoscope:
         
         self._is_open = True
         logger.info(f"PicoScope opened successfully (handle: {self.chandle.value})")
-        
+
+    def get_unit_info(self) -> dict[str, str]:
+        """Return the PicoScope's identification + calibration metadata.
+
+        Uses ``ps5000aGetUnitInfo`` to pull the same fields that
+        PicoScope 6 shows in its "About" panel. All values are stripped
+        strings; unreadable fields default to ``""``.
+
+        Returns:
+            A dict with keys ``variant``, ``batch_and_serial``,
+            ``cal_date``, ``hardware_version``, ``firmware_version_1``,
+            ``firmware_version_2``, ``driver_version``.
+        """
+        if not self._is_open:
+            raise PicoscopeError("Cannot read unit info: device not open")
+
+        fields = {
+            "driver_version":     PICO_INFO.get("PICO_DRIVER_VERSION"),
+            "hardware_version":   PICO_INFO.get("PICO_HARDWARE_VERSION"),
+            "variant":            PICO_INFO.get("PICO_VARIANT_INFO"),
+            "batch_and_serial":   PICO_INFO.get("PICO_BATCH_AND_SERIAL"),
+            "cal_date":           PICO_INFO.get("PICO_CAL_DATE"),
+            "firmware_version_1": PICO_INFO.get("PICO_FIRMWARE_VERSION_1"),
+            "firmware_version_2": PICO_INFO.get("PICO_FIRMWARE_VERSION_2"),
+        }
+        out: dict[str, str] = {}
+        buf_len = 40
+        buf = ctypes.create_string_buffer(buf_len)
+        required = ctypes.c_int16(0)
+        for name, info_code in fields.items():
+            if info_code is None:
+                out[name] = ""
+                continue
+            try:
+                status = ps.ps5000aGetUnitInfo(
+                    self.chandle, buf, ctypes.c_int16(buf_len),
+                    ctypes.byref(required), ctypes.c_uint32(info_code),
+                )
+                assert_pico_ok(status)
+                out[name] = buf.value.decode("utf-8", errors="replace").strip()
+            except Exception as e:
+                logger.debug("ps5000aGetUnitInfo(%s) failed: %s", name, e)
+                out[name] = ""
+        return out
+
     def close_unit(self):
         """
         Close connection to the PicoScope device.
