@@ -17,5 +17,12 @@ dependencies = [
     "base58",
 ]
 
+[project.optional-dependencies]
+# ``run_report_gui`` uses PyQt6 for the launcher dialog. Kept
+# optional so headless / CLI-only installs don't need it.
+gui = [
+    "PyQt6",
+]
+
 [tool.setuptools]
 packages = ["openlifu_verification"]

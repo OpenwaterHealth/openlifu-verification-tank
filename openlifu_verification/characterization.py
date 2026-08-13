@@ -81,20 +81,27 @@ ROW = {
     "peak_x_mm":             "D.5",
     "peak_y_mm":             "D.6",
     "lateral_image":         "D.7",
-    "elevation_image":       "D.8",
-    "axial_image":           "D.9",
-    # Peak Z Focus is the commanded focus depth (from the 1-D axial
-    # scan / plane-wave depth cal) that seeds the focused-pulse
-    # measurement.
-    "peak_z_focus_mm":       "D.10",
-    "waveform_image":        "D.11",
-    # Focused-pulse block: the focused-pulse PNP (D.12), the raw
-    # focused arrival time (D.13, informational only), and the
-    # focused-arrival hydrophone depth (D.14, graded against
-    # ``criteria.peak_depth``).
-    "pnp_at_peak_MPa":       "D.12",
-    "focused_arrival_us":    "D.13",
-    "focused_depth_mm":      "D.14",
+    # 1-D lateral / elevation peak-offset rows sit right below their
+    # respective figure rows (D.7, D.9). They grade the separation
+    # between the 1-D scan peak and the 2-D-derived hydrophone
+    # position against ``criteria.peak_offset.max_1d_axis_mm``.
+    "lateral_peak_offset_mm":   "D.8",
+    "elevation_image":       "D.9",
+    "elevation_peak_offset_mm": "D.10",
+    "axial_image":           "D.11",
+    # Peak Z Focus is the commanded focus depth (from the plane-wave
+    # depth cal / 1-D axial scan) that seeds the focused-pulse
+    # measurement. Graded against the plane-wave depth (D.3) within
+    # ``criteria.peak_depth.peak_z_focus_tol_pct``.
+    "peak_z_focus_mm":       "D.12",
+    "waveform_image":        "D.13",
+    # Focused-pulse block: the focused-pulse PNP (D.14), the raw
+    # focused arrival time (D.15, informational only), and the
+    # focused-arrival hydrophone depth (D.16, graded against
+    # ``criteria.peak_depth.focused_tol_pct``).
+    "pnp_at_peak_MPa":       "D.14",
+    "focused_arrival_us":    "D.15",
+    "focused_depth_mm":      "D.16",
 }
 
 # Voltage-linearity R\u00b2 lives at F.8 (the row on which the F section's
@@ -221,6 +228,78 @@ def _linear_r2(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
     return float(slope), float(intercept), float(r2)
 
 
+# --- Firmware version comparison -------------------------------------
+_FW_INT_RE = None  # lazy-compiled below
+
+
+def _fw_version_tuple(v: str) -> Optional[tuple[int, ...]]:
+    """Parse a version string to a tuple of ints for ordering.
+
+    Accepts ``"1.2.3"``, ``"v1.2.3"``, ``"1.2.3-beta"``,
+    ``"1.2"``; strips a leading ``"v"`` / ``"V"`` and takes only
+    the first three (or fewer) integer dotted components. Returns
+    ``None`` if no integer component is found (empty / stub strings
+    like ``""`` or ``"unknown"``)."""
+    global _FW_INT_RE
+    if _FW_INT_RE is None:
+        import re as _re
+        _FW_INT_RE = _re.compile(r"\d+")
+    if not v:
+        return None
+    v = v.strip()
+    if v[:1] in ("v", "V"):
+        v = v[1:]
+    parts = _FW_INT_RE.findall(v)
+    if not parts:
+        return None
+    return tuple(int(p) for p in parts[:3])
+
+
+def _fw_version_ge(reported: str, minimum: str) -> bool:
+    """Return True iff ``reported >= minimum`` under tuple ordering.
+
+    A missing or unparseable ``reported`` fails (we can't confirm
+    the device meets the minimum). A missing / unparseable
+    ``minimum`` short-circuits to True (the caller should have
+    guarded this)."""
+    m = _fw_version_tuple(minimum)
+    if m is None:
+        return True
+    r = _fw_version_tuple(reported)
+    if r is None:
+        return False
+    return r >= m
+
+
+# --- Calibration date parsing ----------------------------------------
+def _parse_cal_date(raw: str) -> Optional["datetime.date"]:
+    """Best-effort parse of a calibration date string.
+
+    Handles the common shapes we see in device metadata: ISO
+    ``"YYYY-MM-DD"``, ``"DD-Mon-YYYY"`` (Onda hydrophone files),
+    ``"DD/MM/YYYY"``, and ``"YYYYMMDD"`` (PicoScope driver strings).
+    Returns ``None`` for empty or unrecognized inputs so the caller
+    can skip the check without raising."""
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    fmts = (
+        "%Y-%m-%d",
+        "%d-%b-%Y", "%d-%B-%Y",
+        "%b-%d-%Y", "%B-%d-%Y",
+        "%d/%m/%Y", "%m/%d/%Y",
+        "%Y%m%d",
+    )
+    for fmt in fmts:
+        try:
+            return datetime.datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 # ----------------------------------------------------------------------
 # Characterization workflow
 # ----------------------------------------------------------------------
@@ -308,6 +387,14 @@ class Characterization:
         r.set_row(ROW["console_fw_version"],"Firmware Version",   info.console_fw_version)
 
         r.set_row(ROW["voltage_rail"],     "Voltage Rail Setting", self.voltage_V,      unit="V (+/-)")
+
+        # Grade the static (info-only) checks eagerly so the operator
+        # sees firmware / cal-date verdicts before any hardware
+        # measurement kicks off. Idempotent - grade() re-runs them at
+        # the end anyway.
+        logger.info("Checking firmware + calibration acceptance...")
+        self._grade_firmware()
+        self._grade_calibration_dates()
         return info
 
     def warmup_and_arrival_check(self) -> dict:
@@ -423,6 +510,9 @@ class Characterization:
             "(hydrophone_position[2] updated)",
             float(result["arrival_us"]), float(result["distance_mm"]),
         )
+        # Grade D.3 inline so the operator sees the plane-wave depth
+        # verdict alongside the raw measurement.
+        self._grade_hydrophone_depth()
         # calibrate_hydrophone_depth leaves the LIFU armed with 8 \u00b5s
         # / 30 V / 32-pulse / single-trigger settings. Restore the
         # acceptance rail + default 20-cycle burst so find_peak and
@@ -505,6 +595,34 @@ class Characterization:
         self.report.scans["elevation_1d"] = elev
         self.report.scans["axial_1d"] = axial
         self.report.scans["scan_2d"] = two_d
+
+        # Populate the graded 1-D peak-offset rows now so
+        # ``_grade_lateral_peak_offset`` / ``_grade_elevation_peak_offset``
+        # have something to stamp PASS/FAIL on. Compute the raw
+        # peak-x / peak-y from the sweep so the report shows the
+        # measured number even for SKIPPED grades.
+        for scan, axis, row_key, label in (
+            (lat,  "x", ROW["lateral_peak_offset_mm"],
+             "1-D Lateral Peak Offset"),
+            (elev, "y", ROW["elevation_peak_offset_mm"],
+             "1-D Elevation Peak Offset"),
+        ):
+            try:
+                coord_arr = np.asarray(next(iter(scan.coords.values())),
+                                       dtype=float)
+                idx = int(np.argmax(scan.vpp))
+                offset_mm = float(coord_arr[idx])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not extract 1-D peak for %s: %s",
+                               row_key, e)
+                offset_mm = float("nan")
+            self.report.set_row(row_key, label, offset_mm, unit="mm")
+
+        # Grade the two 1-D peak-offset rows inline so the operator
+        # sees the verdict alongside the raw sweep, not retroactively
+        # at the end of the run.
+        self._grade_lateral_peak_offset()
+        self._grade_elevation_peak_offset()
         return {"lateral_1d": lat, "elevation_1d": elev,
                 "axial_1d": axial, "scan_2d": two_d}
 
@@ -638,6 +756,7 @@ class Characterization:
         # the end of the run.
         self._grade_pnp_at_peak()
         self._grade_peak_depth()
+        self._grade_peak_z_focus()
         return result
 
     def sweep_frequency(self, *, duration_usec: Optional[float] = None) -> ScanResult:
@@ -1023,9 +1142,10 @@ class Characterization:
         return x_pass and y_pass
 
     def _grade_peak_depth(self) -> Optional[bool]:
-        """Grade D.12 on focused-arrival hydrophone depth vs. nominal.
+        """Grade D.16 on focused-arrival hydrophone depth vs. nominal.
 
-        Passes when ``|depth - nominal_mm| <= tol_pct% * nominal_mm``.
+        Passes when
+        ``|depth - nominal_mm(freq)| <= focused_tol_pct% * nominal_mm(freq)``.
         Returns the boolean verdict (or ``None`` if
         ``measure_waveform_at_peak`` has not been called yet or the
         arrival could not be picked).
@@ -1037,18 +1157,215 @@ class Characterization:
         if depth is None or not np.isfinite(depth):
             return None
         crit = self.criteria.peak_depth
-        nominal = float(crit.nominal_mm)
-        tol_mm = nominal * float(crit.tol_pct) / 100.0
+        nominal = float(crit.nominal_for(self.frequency_kHz))
+        tol_mm = nominal * float(crit.focused_tol_pct) / 100.0
         passed = abs(float(depth) - nominal) <= tol_mm
         threshold = f"{nominal:.1f} \u00b1 {tol_mm:.2f} mm"
         note = (f"depth = {float(depth):.3f} mm "
-                f"(nominal {nominal:.1f}, tol \u00b1{crit.tol_pct:g}%)")
+                f"(nominal {nominal:.1f} @ {self.frequency_kHz:g} kHz, "
+                f"tol \u00b1{crit.focused_tol_pct:g}%)")
         if ROW["focused_depth_mm"] in self.report.rows:
             self.report.grade_row(ROW["focused_depth_mm"], passed=passed,
                                   threshold=threshold, note=note)
         logger.info("[grade] Peak depth \u2192 %s (%s)",
                     "PASS" if passed else "FAIL", note)
         return passed
+
+    # ------------------------------------------------------------------
+    # Static (data-independent) graders
+    # ------------------------------------------------------------------
+    # These grade info already collected during ``collect_test_info`` /
+    # ``calibrate_depth_plane_wave`` / ``run_beam_scans`` /
+    # ``measure_waveform_at_peak``; each is called inline from the
+    # producing method so verdicts land in the log next to the raw
+    # measurement.
+
+    def _grade_firmware(self) -> Optional[bool]:
+        """Grade B.4 (TXM firmware) and C.3 (console firmware).
+
+        Empty version strings on either side skip that specific
+        check (empty ``min_*_version`` disables the criterion; an
+        empty *reported* version fails it so a mis-connected device
+        can't sneak through). Returns the combined AND of the two
+        sub-checks, or ``None`` if collect_test_info hasn't run yet.
+        """
+        info = self.report.device_info
+        if info is None:
+            return None
+        crit = self.criteria.firmware
+        results: list[bool] = []
+        for row_key, reported, minimum, label in (
+            (ROW["txm_fw_version"],     info.txm_fw_version,
+             crit.min_txm_version,     "TXM firmware"),
+            (ROW["console_fw_version"], info.console_fw_version,
+             crit.min_console_version, "Console firmware"),
+        ):
+            if not minimum:
+                # Check disabled - leave row NA.
+                logger.info("[grade] %s \u2192 SKIP (no minimum set)", label)
+                continue
+            ok = _fw_version_ge(reported, minimum)
+            note = f"reported={reported or 'n/a'!s}, minimum={minimum}"
+            threshold = f">= {minimum}"
+            if row_key in self.report.rows:
+                self.report.grade_row(row_key, passed=ok,
+                                      threshold=threshold, note=note)
+            logger.info("[grade] %s \u2192 %s (%s)",
+                        label, "PASS" if ok else "FAIL", note)
+            results.append(ok)
+        return all(results) if results else None
+
+    def _grade_calibration_dates(self) -> Optional[bool]:
+        """Grade A.7 (hydrophone) and A.11 (picoscope) cal dates.
+
+        Ages older than ``criteria.calibration.max_age_years`` fail.
+        Unparseable / empty dates are logged as SKIP (row stays NA)
+        so we don't punish a bring-up run whose stub metadata lacks
+        a date. Returns the AND of the parseable sub-checks, or
+        ``None`` if collect_test_info hasn't run yet.
+        """
+        info = self.report.device_info
+        if info is None:
+            return None
+        max_years = float(self.criteria.calibration.max_age_years)
+        today = datetime.date.today()
+        results: list[bool] = []
+        for row_key, raw, label in (
+            (ROW["hydrophone_cal_date"], info.hydrophone_cal_date,
+             "Hydrophone cal date"),
+            (ROW["picoscope_cal_date"],  info.picoscope_cal_date,
+             "PicoScope cal date"),
+        ):
+            parsed = _parse_cal_date(raw)
+            if parsed is None:
+                logger.info("[grade] %s \u2192 SKIP (unparseable %r)",
+                            label, raw)
+                continue
+            age_years = (today - parsed).days / 365.25
+            ok = age_years <= max_years
+            note = (f"cal={parsed.isoformat()}, "
+                    f"age={age_years:.2f} y (max {max_years:g} y)")
+            threshold = f"age <= {max_years:g} y"
+            if row_key in self.report.rows:
+                self.report.grade_row(row_key, passed=ok,
+                                      threshold=threshold, note=note)
+            logger.info("[grade] %s \u2192 %s (%s)",
+                        label, "PASS" if ok else "FAIL", note)
+            results.append(ok)
+        return all(results) if results else None
+
+    def _grade_hydrophone_depth(self) -> Optional[bool]:
+        """Grade D.3 (plane-wave hydrophone depth) against LUT nominal.
+
+        Uses ``criteria.peak_depth.nominal_for(freq)`` and the
+        absolute ``hydrophone_tol_mm``. Returns the boolean verdict
+        (or ``None`` if plane-wave depth calibration hasn't landed
+        yet)."""
+        row = self.report.rows.get(ROW["plane_wave_depth_mm"])
+        if row is None or row.value is None:
+            return None
+        depth = float(row.value)
+        crit = self.criteria.peak_depth
+        nominal = float(crit.nominal_for(self.frequency_kHz))
+        tol_mm = float(crit.hydrophone_tol_mm)
+        passed = abs(depth - nominal) <= tol_mm
+        threshold = f"{nominal:.1f} \u00b1 {tol_mm:.2f} mm"
+        note = (f"depth = {depth:.3f} mm (nominal {nominal:.1f} @ "
+                f"{self.frequency_kHz:g} kHz)")
+        self.report.grade_row(ROW["plane_wave_depth_mm"], passed=passed,
+                              threshold=threshold, note=note)
+        logger.info("[grade] Hydrophone depth \u2192 %s (%s)",
+                    "PASS" if passed else "FAIL", note)
+        return passed
+
+    def _grade_peak_z_focus(self) -> Optional[bool]:
+        """Grade D.12 (Peak Z Focus) against D.3 (hydrophone depth).
+
+        Passes when
+        ``|peak_z - hydrophone_depth| <= peak_z_focus_tol_pct% *
+        hydrophone_depth``. Because Peak Z Focus is seeded from the
+        plane-wave depth calibration these should agree to within
+        rounding under normal operation; the tolerance catches
+        pathological cases where the calibration silently fell back
+        to the initial estimate."""
+        depth_row = self.report.rows.get(ROW["plane_wave_depth_mm"])
+        focus_row = self.report.rows.get(ROW["peak_z_focus_mm"])
+        if depth_row is None or focus_row is None:
+            return None
+        if depth_row.value is None or focus_row.value is None:
+            return None
+        depth = float(depth_row.value)
+        focus = float(focus_row.value)
+        if depth <= 0:
+            return None
+        crit = self.criteria.peak_depth
+        tol_pct = float(crit.peak_z_focus_tol_pct)
+        tol_mm = depth * tol_pct / 100.0
+        passed = abs(focus - depth) <= tol_mm
+        threshold = f"|focus - {depth:.2f}| \u2264 {tol_mm:.2f} mm"
+        note = (f"focus = {focus:.3f} mm, hydrophone = {depth:.3f} mm "
+                f"(tol \u00b1{tol_pct:g}%)")
+        self.report.grade_row(ROW["peak_z_focus_mm"], passed=passed,
+                              threshold=threshold, note=note)
+        logger.info("[grade] Peak Z focus \u2192 %s (%s)",
+                    "PASS" if passed else "FAIL", note)
+        return passed
+
+    def _grade_1d_peak_offset(self, *, scan_key: str, axis: str,
+                               row_key: str, label: str) -> Optional[bool]:
+        """Grade the D.8 / D.10 rows (1-D lateral / elevation peak offset).
+
+        ``scan_key`` is the :attr:`TestReport.scans` key
+        (``"lateral_1d"`` or ``"elevation_1d"``). ``axis`` is
+        ``"x"`` or ``"y"`` and selects which component of the
+        ``(x, y)`` peak located by :meth:`find_peak_xy` we compare
+        against. The 1-D scan is stored with coordinates relative
+        to the 2-D peak (``absolute=False``), so the reference is
+        zero and the offset is simply the argmax coordinate of the
+        1-D sweep."""
+        scan = self.report.scans.get(scan_key)
+        if scan is None:
+            return None
+        try:
+            coord_name, coord_arr = next(iter(scan.coords.items()))
+            coord_arr = np.asarray(coord_arr, dtype=float)
+            vpp = scan.vpp  # peak-to-peak per point, shape matches coord
+            if vpp.size == 0 or coord_arr.size == 0:
+                return None
+            idx = int(np.argmax(vpp))
+            peak_coord = float(coord_arr[idx])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not extract 1-D peak from %s: %s",
+                           scan_key, e)
+            return None
+        # 1-D scans are ``absolute=False`` so the coordinate origin
+        # is the 2-D peak. The offset is therefore the peak coord
+        # itself.
+        offset_mm = float(peak_coord)
+        max_mm = float(self.criteria.peak_offset.max_1d_axis_mm)
+        passed = abs(offset_mm) <= max_mm
+        threshold = f"|{axis}| \u2264 {max_mm} mm"
+        note = f"1-D peak {axis} = {offset_mm:+.3f} mm from 2-D peak"
+        # The row was created by ``run_beam_scans`` right after the
+        # scan completed; grade it in-place.
+        if row_key in self.report.rows:
+            self.report.grade_row(row_key, passed=passed,
+                                  threshold=threshold, note=note)
+        logger.info("[grade] %s peak offset \u2192 %s (%s)",
+                    label, "PASS" if passed else "FAIL", note)
+        return passed
+
+    def _grade_lateral_peak_offset(self) -> Optional[bool]:
+        return self._grade_1d_peak_offset(
+            scan_key="lateral_1d", axis="x",
+            row_key=ROW["lateral_peak_offset_mm"], label="Lateral",
+        )
+
+    def _grade_elevation_peak_offset(self) -> Optional[bool]:
+        return self._grade_1d_peak_offset(
+            scan_key="elevation_1d", axis="y",
+            row_key=ROW["elevation_peak_offset_mm"], label="Elevation",
+        )
 
     def grade(self) -> dict:
         """Aggregate the per-section verdicts into an overall PASS/FAIL.
@@ -1066,8 +1383,14 @@ class Characterization:
         # is informational (the geometry-corrected plane-wave and
         # focused-arrival depths are the graded quantities).
         self._grade_arrival()
+        summary["firmware"] = self._grade_firmware()
+        summary["calibration_dates"] = self._grade_calibration_dates()
+        summary["hydrophone_depth"] = self._grade_hydrophone_depth()
         summary["peak_offset"] = self._grade_peak_offset()
         summary["peak_xy"] = self._grade_peak_xy()
+        summary["lateral_peak_offset"] = self._grade_lateral_peak_offset()
+        summary["elevation_peak_offset"] = self._grade_elevation_peak_offset()
+        summary["peak_z_focus"] = self._grade_peak_z_focus()
         summary["pnp_at_peak"] = self._grade_pnp_at_peak()
         summary["peak_depth"] = self._grade_peak_depth()
         summary["freq_response"] = self._grade_freq_response()

@@ -28,8 +28,10 @@ import logging
 import sys
 import time
 from contextlib import ExitStack
+from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
+from typing import Optional
 
 from openlifu_verification import (
     Characterization,
@@ -68,43 +70,62 @@ def _configure_root_logger(log_file: Path | None = None) -> None:
 def _write_config_to_device(ver, config_path: Path, *, module: int = 0) -> bool:
     """Push a device_config.json onto the TXM via the SDK.
 
+    The SDK exposes two entry points on ``TxDevice``:
+
+    - ``write_config(cfg: LifuUserConfig, module: int) -> LifuUserConfig``
+    - ``write_config_json(json_str: str, module: int) -> LifuUserConfig``
+
+    We prefer ``write_config_json`` because it takes the raw JSON
+    string and avoids having to hand-construct a ``LifuUserConfig``
+    header (magic / version / seq / crc) — the SDK does that
+    internally. If it's not available on this SDK version we fall
+    back to constructing a ``LifuUserConfig`` and calling
+    ``write_config``.
+
     Returns ``True`` on success. Any failure is logged and returns
     ``False`` so the CLI can continue.
     """
+    # Read the file first — cheap failure mode that shouldn't need
+    # the SDK.
     try:
-        from openlifu_sdk.io.LIFUConfig import LIFUConfig  # type: ignore
-    except Exception as e:
-        logger.error("Cannot import openlifu_sdk.io.LIFUConfig: %s", e)
-        return False
-
-    try:
-        cfg_dict = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        raw_json = Path(config_path).read_text(encoding="utf-8")
     except Exception as e:
         logger.error("Cannot read %s: %s", config_path, e)
         return False
 
-    try:
-        cfg = LIFUConfig.from_dict(cfg_dict) if hasattr(LIFUConfig, "from_dict") \
-            else LIFUConfig(**cfg_dict)
-    except Exception as e:
-        logger.error("Cannot instantiate LIFUConfig from %s: %s", config_path, e)
-        return False
+    tx = ver.lifu.txdevice
 
-    try:
-        tx = ver.lifu.txdevice
-        # The SDK's method name has changed a few times; try both.
-        if hasattr(tx, "write_config"):
-            tx.write_config(cfg, module)
-        elif hasattr(tx, "write_config_json"):
-            tx.write_config_json(cfg_dict, module)
-        else:
-            logger.error("TX device has no write_config/write_config_json method.")
+    # Preferred path: JSON-string API.
+    if hasattr(tx, "write_config_json"):
+        try:
+            tx.write_config_json(raw_json, module)
+            logger.info("Wrote device_config.json to TXM module %d "
+                        "via write_config_json.", module)
+            return True
+        except Exception as e:
+            logger.error("write_config_json failed: %s", e)
             return False
-        logger.info("Wrote device_config.json to TXM module %d.", module)
-        return True
-    except Exception as e:
-        logger.error("write_config failed: %s", e)
-        return False
+
+    # Fallback: LifuUserConfig object API.
+    if hasattr(tx, "write_config"):
+        try:
+            from openlifu_sdk.io.LIFUUserConfig import LifuUserConfig  # type: ignore
+        except Exception as e:
+            logger.error("Cannot import LifuUserConfig: %s", e)
+            return False
+        try:
+            cfg_dict = json.loads(raw_json)
+            cfg = LifuUserConfig(json_data=cfg_dict)
+            tx.write_config(cfg, module)
+            logger.info("Wrote device_config.json to TXM module %d "
+                        "via write_config.", module)
+            return True
+        except Exception as e:
+            logger.error("write_config failed: %s", e)
+            return False
+
+    logger.error("TX device has no write_config/write_config_json method.")
+    return False
 
 
 def _prompt_yes_no(prompt: str, *, default: bool = False) -> bool:
@@ -151,6 +172,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Parent output directory. Default: ./test_reports/<TXM-SN>/.")
     p.add_argument("--no-prompt", action="store_true",
                    help="Skip the interactive prefs prompt; use cached values as-is.")
+    p.add_argument("--no-start-prompt", action="store_true",
+                   help="Skip the 'Press Enter to start' confirmation prompt "
+                        "before the scan campaign kicks off. Implied by "
+                        "--no-prompt; expose separately so callers (e.g. the "
+                        "GUI launcher) can suppress just the start prompt "
+                        "while still driving prefs collection themselves.")
     # --- Phase skips ---
     p.add_argument("--skip-2d", action="store_true",
                    help="Skip the 1-D + 2-D beam scans.")
@@ -178,13 +205,39 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+@dataclass
+class RunResult:
+    """Return value from :func:`run` capturing everything the GUI /
+    caller needs to know after the pipeline finishes.
+
+    ``passed`` reflects the overall PASS/FAIL verdict. ``run_dir``
+    points at the timestamped output folder (``None`` if the run
+    aborted before ``write_report`` ran). ``files`` maps short names
+    (``"xlsx"``, ``"pdf"``, ``"device_config"``) to the corresponding
+    Paths. ``exit_code`` is what ``main`` returns to the OS: 0 on
+    pass, 1 on fail, 130 on user abort, 2 on unexpected error.
+    """
+    passed: bool = False
+    run_dir: Optional[Path] = None
+    files: dict[str, Path] = field(default_factory=dict)
+    exit_code: int = 1
+    device_write_ok: Optional[bool] = None
+
+
+def run(args: argparse.Namespace) -> RunResult:
+    """Execute the report pipeline with parsed ``args``.
+
+    Split out of :func:`main` so a GUI launcher can call the same
+    code path in-process, then read ``RunResult.run_dir`` /
+    ``RunResult.passed`` to build a completion dialog.
+    """
     _configure_root_logger(args.log_file)
-    if args.verbose:
+    if getattr(args, "verbose", False):
         set_log_level("DEBUG", sdk_level="DEBUG")
-    elif args.quiet:
+    elif getattr(args, "quiet", False):
         set_log_level("WARNING")
+
+    result = RunResult()
 
     # --- Prefs ---
     prefs = OperatorPrefs.load(args.prefs)
@@ -212,7 +265,8 @@ def main(argv=None) -> int:
             prefs.prompt_interactively(freq_kHz=args.frequency_khz)
         except (KeyboardInterrupt, EOFError):
             print("\nAborted at prompt.", file=sys.stderr)
-            return 130
+            result.exit_code = 130
+            return result
         prefs.save(args.prefs)
     logger.info("Operator prefs: tester=%r txm_sn=%r hydrophone_sn=%r app_ver=%r",
                 prefs.tester_name, prefs.txm_sn, prefs.hydrophone_sn,
@@ -257,14 +311,18 @@ def main(argv=None) -> int:
 
         # Give the operator a chance to verify HV is up + the tank is
         # ready before the (potentially long) scan campaign kicks off.
-        # Skip when --no-prompt (unattended runs) or --dry-run.
-        if not args.no_prompt and not args.dry_run:
+        # Skip when either --no-prompt or --no-start-prompt is set, or
+        # in --dry-run (nothing to physically verify).
+        suppress_start = (args.no_prompt or args.no_start_prompt
+                          or args.dry_run)
+        if not suppress_start:
             try:
                 input("\nReady to begin characterization. "
                       "Press Enter to start (Ctrl+C to abort)... ")
             except (KeyboardInterrupt, EOFError):
                 print("\nAborted before start.", file=sys.stderr)
-                return 130
+                result.exit_code = 130
+                return result
 
         # --- Run the characterization ---
         chz = Characterization(
@@ -285,7 +343,8 @@ def main(argv=None) -> int:
             )
         except KeyboardInterrupt:
             print("\nInterrupted during characterization.", file=sys.stderr)
-            return 130
+            result.exit_code = 130
+            return result
         elapsed = time.perf_counter() - t_start
         logger.info("Characterization finished in %.1f s. Overall: %s",
                     elapsed, "PASS" if report.overall_pass else "FAIL")
@@ -301,19 +360,49 @@ def main(argv=None) -> int:
         # Match the on-disk stem (SN + test start timestamp) so the
         # printed paths point at real files.
         file_stem = report_io.report_file_stem(report)
+        xlsx_path = run_dir / f"{file_stem}_Report.xlsx"
+        pdf_path = run_dir / f"{file_stem}_Report.pdf"
+        config_path = run_dir / f"{file_stem}_device_config.json"
         print(f"\nReport directory: {run_dir}")
-        print(f"  XLSX : {run_dir / f'{file_stem}_Report.xlsx'}")
-        print(f"  PDF  : {run_dir / f'{file_stem}_Report.pdf'}")
+        print(f"  XLSX : {xlsx_path}")
+        print(f"  PDF  : {pdf_path}")
         if not args.skip_frequency:
-            print(f"  JSON : {run_dir / f'{file_stem}_device_config.json'}")
+            print(f"  JSON : {config_path}")
         print(f"  Verdict: {'PASS' if report.overall_pass else 'FAIL'}")
 
+        result.passed = bool(report.overall_pass)
+        result.run_dir = run_dir
+        result.files["xlsx"] = xlsx_path
+        result.files["pdf"] = pdf_path
+        if not args.skip_frequency:
+            result.files["device_config"] = config_path
+        result.exit_code = 0 if result.passed else 1
+
         # --- Optionally push config back onto the device ---
+        # Only fire when the run PASSED so we never overwrite a
+        # good on-device config with the calibration numbers from a
+        # failing run. This is what backs the GUI's "save calibration
+        # data to device" checkbox: caller sets --write-config, and
+        # the pass gate here decides whether the write actually
+        # happens.
+        logger.info(
+            "Device-write decision: write_config=%s dry_run=%s "
+            "skip_frequency=%s passed=%s",
+            bool(getattr(args, "write_config", False)),
+            bool(getattr(args, "dry_run", False)),
+            bool(getattr(args, "skip_frequency", False)),
+            bool(result.passed),
+        )
         if args.write_config and not args.dry_run:
             if args.skip_frequency:
                 logger.warning("--skip-frequency set; no device_config.json to write.")
+            elif not result.passed:
+                logger.warning(
+                    "Report FAILED; skipping --write-config (device "
+                    "calibration is only pushed on PASS)."
+                )
+                print("  Write to device: SKIPPED (report FAILED)")
             else:
-                config_path = run_dir / f"{file_stem}_device_config.json"
                 do_write = True
                 if args.confirm_write_config:
                     do_write = _prompt_yes_no(
@@ -322,9 +411,16 @@ def main(argv=None) -> int:
                     )
                 if do_write:
                     ok = _write_config_to_device(ver, config_path)
+                    result.device_write_ok = bool(ok)
                     print(f"  Write to device: {'OK' if ok else 'FAILED'}")
 
-    return 0 if report.overall_pass else 1
+    return result
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    result = run(args)
+    return result.exit_code
 
 
 if __name__ == "__main__":
