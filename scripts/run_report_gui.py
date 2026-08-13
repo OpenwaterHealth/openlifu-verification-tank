@@ -16,6 +16,7 @@ Example::
     python scripts/run_report_gui.py               # real hardware
     python scripts/run_report_gui.py --dry-run     # smoke test
     python scripts/run_report_gui.py --hydrophone 2246 --frequency-khz 400
+    python scripts/run_report_gui.py --theme Dark  # dark mode
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ import logging
 import re
 import sys
 import traceback
+from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 from typing import Optional
@@ -41,6 +43,8 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -56,6 +60,322 @@ from openlifu_verification import Hydrophone, OperatorPrefs
 
 
 logger = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------------------------
+# Theme system
+# ----------------------------------------------------------------------
+# Two hand-tuned palettes (Light / Dark) are applied application-wide
+# via ``QApplication.setStyleSheet``. Widgets that need state-specific
+# colors (e.g. the gate glyph) advertise a dynamic ``state`` property
+# that the QSS keys on, so a theme swap re-colors everything without
+# any per-widget bookkeeping.
+
+@dataclass(frozen=True)
+class Palette:
+    """Named color slots consumed by :func:`_build_qss` and by widgets
+    that build rich-text (``ResultDialog``) at construction time.
+
+    Keeping colors here (as opposed to buried inline) means adding a
+    third theme is just another :class:`Palette` instance."""
+    name: str
+    window_bg: str        # dialog / app background
+    panel_bg: str         # inputs, group boxes, terminal
+    panel_alt_bg: str     # subtle stripe (progress trough, hover)
+    text: str             # primary foreground
+    subtle_text: str      # form-label style hint text
+    muted: str            # PENDING glyph, SKIP glyph
+    border: str           # 1px separators / input outline
+    accent: str           # CHECKING glyph, focus ring, progress fill
+    accent_hover: str     # button hover
+    success: str          # PASS glyph, verdict PASS
+    danger: str           # FAIL glyph, verdict FAIL
+    warning: str          # (reserved) yellow highlights
+
+
+_LIGHT = Palette(
+    name="Light",
+    window_bg="#f4f6f9",
+    panel_bg="#ffffff",
+    panel_alt_bg="#eef1f5",
+    text="#1c2126",
+    subtle_text="#4d5865",
+    muted="#8a939e",
+    border="#d5dbe3",
+    accent="#1f6feb",
+    accent_hover="#155bcb",
+    success="#1a7a1a",
+    danger="#b32020",
+    warning="#c68a00",
+)
+
+_DARK = Palette(
+    name="Dark",
+    window_bg="#1e2229",
+    panel_bg="#262b33",
+    panel_alt_bg="#2f353e",
+    text="#e6edf3",
+    subtle_text="#c0c8d1",
+    muted="#8b95a1",
+    border="#3a4149",
+    accent="#58a6ff",
+    accent_hover="#7cb9ff",
+    success="#4caf50",
+    danger="#ff6b6b",
+    warning="#e0b341",
+)
+
+_PALETTES: dict[str, Palette] = {p.name: p for p in (_LIGHT, _DARK)}
+
+# Module-level "currently applied" palette so widgets that build
+# rich-text at construction time (verdict label, write-line) can
+# read the right colors without needing a back-reference to the
+# QApplication.
+_current_palette: Palette = _LIGHT
+
+
+def current_palette() -> Palette:
+    """Return the palette in force. Widgets that need to embed a
+    color into rich text (e.g. HTML ``<span style='color:...'>``)
+    read from here at build time."""
+    return _current_palette
+
+
+def _build_qss(p: Palette) -> str:
+    """Assemble the QSS stylesheet for palette ``p``.
+
+    Kept as a plain string with ``{p.field}`` interpolation for
+    readability. Selectors intentionally target base widget types
+    (rather than every subclass) so downstream custom widgets
+    inherit the look automatically."""
+    return f"""
+    QWidget {{
+        background-color: {p.window_bg};
+        color: {p.text};
+        font-size: 10pt;
+    }}
+    QDialog {{
+        background-color: {p.window_bg};
+    }}
+    QLabel {{
+        background: transparent;
+        color: {p.text};
+    }}
+    QLabel[role="subtle"] {{
+        color: {p.subtle_text};
+    }}
+    QLabel[role="section"] {{
+        color: {p.subtle_text};
+        font-weight: bold;
+        padding-top: 2px;
+    }}
+
+    /* --- Group boxes --- */
+    QGroupBox {{
+        background-color: {p.panel_bg};
+        border: 1px solid {p.border};
+        border-radius: 6px;
+        margin-top: 14px;
+        padding: 12px 10px 10px 10px;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        left: 10px;
+        padding: 0 6px;
+        color: {p.subtle_text};
+        font-weight: bold;
+    }}
+
+    /* --- Inputs --- */
+    QLineEdit, QComboBox, QPlainTextEdit {{
+        background-color: {p.panel_bg};
+        color: {p.text};
+        border: 1px solid {p.border};
+        border-radius: 4px;
+        padding: 4px 6px;
+        selection-background-color: {p.accent};
+        selection-color: {p.panel_bg};
+    }}
+    QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {{
+        border: 1px solid {p.accent};
+    }}
+    QLineEdit:disabled, QComboBox:disabled {{
+        color: {p.muted};
+        background-color: {p.panel_alt_bg};
+    }}
+    QComboBox::drop-down {{
+        border: none;
+        width: 20px;
+    }}
+    QComboBox QAbstractItemView {{
+        background-color: {p.panel_bg};
+        color: {p.text};
+        border: 1px solid {p.border};
+        selection-background-color: {p.accent};
+        selection-color: {p.panel_bg};
+        outline: 0;
+    }}
+
+    /* --- Checkbox --- */
+    QCheckBox {{
+        spacing: 8px;
+        color: {p.text};
+    }}
+    QCheckBox::indicator {{
+        width: 16px;
+        height: 16px;
+        border: 1px solid {p.border};
+        border-radius: 3px;
+        background-color: {p.panel_bg};
+    }}
+    QCheckBox::indicator:hover {{
+        border: 1px solid {p.accent};
+    }}
+    QCheckBox::indicator:checked {{
+        background-color: {p.accent};
+        border: 1px solid {p.accent};
+        image: none;
+    }}
+
+    /* --- Buttons --- */
+    QPushButton {{
+        background-color: {p.panel_bg};
+        color: {p.text};
+        border: 1px solid {p.border};
+        border-radius: 4px;
+        padding: 6px 16px;
+        min-width: 72px;
+    }}
+    QPushButton:hover {{
+        border: 1px solid {p.accent};
+    }}
+    QPushButton:pressed {{
+        background-color: {p.panel_alt_bg};
+    }}
+    QPushButton:default {{
+        background-color: {p.accent};
+        color: {p.panel_bg};
+        border: 1px solid {p.accent};
+        font-weight: bold;
+    }}
+    QPushButton:default:hover {{
+        background-color: {p.accent_hover};
+        border: 1px solid {p.accent_hover};
+    }}
+    QPushButton:disabled {{
+        color: {p.muted};
+        background-color: {p.panel_alt_bg};
+        border: 1px solid {p.border};
+    }}
+
+    /* --- Progress bar --- */
+    QProgressBar {{
+        background-color: {p.panel_alt_bg};
+        color: {p.text};
+        border: 1px solid {p.border};
+        border-radius: 4px;
+        text-align: center;
+        min-height: 20px;
+    }}
+    QProgressBar::chunk {{
+        background-color: {p.accent};
+        border-radius: 3px;
+    }}
+
+    /* --- Terminal (mini log) --- */
+    QPlainTextEdit#miniTerminal {{
+        background-color: {p.panel_alt_bg};
+        color: {p.text};
+        border: 1px solid {p.border};
+        border-radius: 4px;
+    }}
+
+    /* --- Frame separator --- */
+    QFrame#hLine {{
+        color: {p.border};
+        background-color: {p.border};
+        max-height: 1px;
+    }}
+
+    /* --- Gate glyph (state-driven color) --- */
+    QLabel#gateGlyph {{
+        color: {p.muted};
+        font-weight: bold;
+    }}
+    QLabel#gateGlyph[state="pending"] {{
+        color: {p.muted};
+    }}
+    QLabel#gateGlyph[state="checking"] {{
+        color: {p.accent};
+    }}
+    QLabel#gateGlyph[state="pass"] {{
+        color: {p.success};
+    }}
+    QLabel#gateGlyph[state="fail"] {{
+        color: {p.danger};
+    }}
+    QLabel#gateGlyph[state="skip"] {{
+        color: {p.muted};
+    }}
+    QLabel#gateLabel[state="pass"] {{
+        color: {p.text};
+    }}
+    QLabel#gateLabel[state="fail"] {{
+        color: {p.danger};
+    }}
+    QLabel#gateLabel[state="skip"] {{
+        color: {p.muted};
+    }}
+
+    /* --- Verdict header (ResultDialog) --- */
+    QLabel#verdictBanner {{
+        border-radius: 6px;
+        padding: 10px 14px;
+        font-size: 14pt;
+        font-weight: bold;
+    }}
+    QLabel#verdictBanner[verdict="pass"] {{
+        background-color: {p.panel_alt_bg};
+        color: {p.success};
+        border: 1px solid {p.success};
+    }}
+    QLabel#verdictBanner[verdict="fail"] {{
+        background-color: {p.panel_alt_bg};
+        color: {p.danger};
+        border: 1px solid {p.danger};
+    }}
+    """
+
+
+def _refresh_polish(widget: QWidget) -> None:
+    """Force Qt to re-evaluate QSS on ``widget`` after a dynamic
+    property change. Called from state-transition code."""
+    style = widget.style()
+    style.unpolish(widget)
+    style.polish(widget)
+    widget.update()
+
+
+def apply_theme(app: QApplication, name: str) -> None:
+    """Apply the palette named ``name`` to ``app`` (and to every
+    top-level widget already realised).
+
+    Unknown names fall back to Light with a warning so a stale
+    CLI value can't hard-crash the launcher."""
+    global _current_palette
+    if name not in _PALETTES:
+        logger.warning("Unknown theme %r; falling back to Light.", name)
+        name = "Light"
+    _current_palette = _PALETTES[name]
+    app.setStyleSheet(_build_qss(_current_palette))
+    # Any widgets that use dynamic-property selectors need a repolish
+    # to pick up the new stylesheet immediately.
+    for w in app.allWidgets():
+        _refresh_polish(w)
+
+
+# List of valid theme names for argparse ``choices=``.
+THEME_NAMES: tuple[str, ...] = tuple(_PALETTES.keys())
 
 
 # ----------------------------------------------------------------------
@@ -76,6 +396,16 @@ def build_gui_parser() -> argparse.ArgumentParser:
         description="Qt launcher for the TXM characterization report.",
         parents=[parent],
         conflict_handler="resolve",
+    )
+    parser.add_argument(
+        "--theme",
+        choices=THEME_NAMES,
+        default="Light",
+        help=(
+            "GUI color theme. One of: "
+            + ", ".join(THEME_NAMES)
+            + " (default: Light)."
+        ),
     )
     return parser
 
@@ -215,7 +545,7 @@ class LauncherDialog(QDialog):
                  prefs: OperatorPrefs,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
-        title = "OpenLIFU Verification - Run Report"
+        title = "OpenLIFU Verification \u2014 Run Report"
         if getattr(args, "dry_run", False):
             title += "  [DRY RUN]"
         self.setWindowTitle(title)
@@ -223,12 +553,44 @@ class LauncherDialog(QDialog):
         self._args = args
         self._prefs = prefs
 
-        # --- Widgets ---
-        self.tester_edit = QLineEdit(prefs.tester_name)
-        self.txm_edit = QLineEdit(prefs.txm_sn)
-        self.console_edit = QLineEdit(prefs.console_sn)
-        self.hydrophone_edit = QLineEdit(prefs.hydrophone_sn)
+        # --- Header banner ---
+        header = QLabel("OpenLIFU Verification")
+        hfont = QFont()
+        hfont.setPointSize(hfont.pointSize() + 6)
+        hfont.setBold(True)
+        header.setFont(hfont)
+        subtitle = QLabel(
+            "Configure the run below, then press "
+            "<b>Start</b> to begin characterization."
+        )
+        subtitle.setTextFormat(Qt.TextFormat.RichText)
+        subtitle.setProperty("role", "subtle")
+        subtitle.setWordWrap(True)
 
+        # --- Operator group ---
+        self.tester_edit = QLineEdit(prefs.tester_name)
+        self.tester_edit.setPlaceholderText("e.g. Jane Doe")
+        self.txm_edit = QLineEdit(prefs.txm_sn)
+        self.txm_edit.setPlaceholderText("TXM serial number")
+        self.console_edit = QLineEdit(prefs.console_sn)
+        self.console_edit.setPlaceholderText("Console serial number")
+        self.hydrophone_edit = QLineEdit(prefs.hydrophone_sn)
+        self.hydrophone_edit.setPlaceholderText("Hydrophone serial number")
+
+        op_group = QGroupBox("Operator && device")
+        op_form = QFormLayout(op_group)
+        op_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        op_form.setFormAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        op_form.setHorizontalSpacing(12)
+        op_form.setVerticalSpacing(8)
+        op_form.addRow("Tester name:", self.tester_edit)
+        op_form.addRow("TXM S/N:", self.txm_edit)
+        op_form.addRow("Console S/N:", self.console_edit)
+        op_form.addRow("Hydrophone S/N:", self.hydrophone_edit)
+
+        # --- Run configuration group ---
         # Frequency dropdown seeded from the CLI's --frequency-khz.
         # Only nominal drive frequencies (155 / 400 kHz) are offered
         # because the acceptance thresholds are only defined there.
@@ -247,14 +609,15 @@ class LauncherDialog(QDialog):
         )
         self.save_cal_checkbox.setChecked(True)
 
-        # --- Layout ---
-        form = QFormLayout()
-        form.addRow("Tester name:", self.tester_edit)
-        form.addRow("TXM S/N:", self.txm_edit)
-        form.addRow("Console S/N:", self.console_edit)
-        form.addRow("Hydrophone S/N:", self.hydrophone_edit)
-        form.addRow("Frequency:", self.freq_combo)
+        run_group = QGroupBox("Run configuration")
+        run_form = QFormLayout(run_group)
+        run_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        run_form.setHorizontalSpacing(12)
+        run_form.setVerticalSpacing(8)
+        run_form.addRow("Frequency:", self.freq_combo)
+        run_form.addRow("", self.save_cal_checkbox)
 
+        # --- Buttons ---
         self.start_button = QPushButton("Start")
         self.start_button.setDefault(True)
         cancel_button = QPushButton("Cancel")
@@ -266,9 +629,20 @@ class LauncherDialog(QDialog):
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
 
+        # --- Assemble ---
+        sep = QFrame()
+        sep.setObjectName("hLine")
+        sep.setFrameShape(QFrame.Shape.HLine)
+
         outer = QVBoxLayout(self)
-        outer.addLayout(form)
-        outer.addWidget(self.save_cal_checkbox)
+        outer.setContentsMargins(18, 16, 18, 14)
+        outer.setSpacing(12)
+        outer.addWidget(header)
+        outer.addWidget(subtitle)
+        outer.addWidget(sep)
+        outer.addWidget(op_group)
+        outer.addWidget(run_group)
+        outer.addStretch(1)
         outer.addWidget(button_box)
 
         # Wire up validation last so the initial state is applied.
@@ -276,6 +650,8 @@ class LauncherDialog(QDialog):
                      self.console_edit, self.hydrophone_edit):
             edit.textChanged.connect(self._refresh_start_enabled)
         self._refresh_start_enabled()
+
+        self.setMinimumWidth(460)
 
     # ------------------------------------------------------------------
     # Validation
@@ -488,17 +864,25 @@ class _GateRow(QWidget):
         self._state = self.PENDING
         self._frame = 0
 
+        # Glyph and label carry a dynamic ``state`` property that
+        # the app-wide QSS keys on; swapping themes therefore
+        # re-colors every gate automatically.
         self.glyph = QLabel("\u25cb")
+        self.glyph.setObjectName("gateGlyph")
+        self.glyph.setProperty("state", self.PENDING)
         gfont = QFont()
-        gfont.setPointSize(gfont.pointSize() + 2)
+        gfont.setPointSize(gfont.pointSize() + 3)
         self.glyph.setFont(gfont)
-        self.glyph.setFixedWidth(20)
-        self.glyph.setStyleSheet("color: #888888;")
+        self.glyph.setFixedWidth(22)
+        self.glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.text = QLabel(label)
+        self.text.setObjectName("gateLabel")
+        self.text.setProperty("state", self.PENDING)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(2, 1, 2, 1)
+        row.setContentsMargins(4, 2, 4, 2)
+        row.setSpacing(8)
         row.addWidget(self.glyph)
         row.addWidget(self.text, 1)
 
@@ -523,27 +907,26 @@ class _GateRow(QWidget):
         if rank[state] < rank[self._state]:
             return
         self._state = state
+        # Update the glyph character (color comes from QSS).
         if state == self.PENDING:
             self._timer.stop()
             self.glyph.setText("\u25cb")
-            self.glyph.setStyleSheet("color: #888888;")
         elif state == self.CHECKING:
-            self.glyph.setStyleSheet("color: #1f6feb;")
             self._frame = 0
             self.glyph.setText(self._CHECK_FRAMES[0])
             self._timer.start()
-        elif state == self.PASS:
+        elif state in (self.PASS, self.FAIL):
             self._timer.stop()
             self.glyph.setText("\u25cf")
-            self.glyph.setStyleSheet("color: #1a7a1a; font-weight: bold;")
-        elif state == self.FAIL:
-            self._timer.stop()
-            self.glyph.setText("\u25cf")
-            self.glyph.setStyleSheet("color: #b32020; font-weight: bold;")
         elif state == self.SKIP:
             self._timer.stop()
             self.glyph.setText("\u2013")
-            self.glyph.setStyleSheet("color: #888888;")
+        # Push the new state into the dynamic property and re-polish
+        # so the QSS attribute selector picks up the change.
+        self.glyph.setProperty("state", state)
+        self.text.setProperty("state", state)
+        _refresh_polish(self.glyph)
+        _refresh_polish(self.text)
 
     @property
     def state(self) -> str:
@@ -635,7 +1018,7 @@ class RunningDialog(QDialog):
     def __init__(self, *, dry_run: bool = False,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
-        title = "OpenLIFU Verification - Running"
+        title = "OpenLIFU Verification \u2014 Running"
         if dry_run:
             title += "  [DRY RUN]"
         self.setWindowTitle(title)
@@ -644,10 +1027,15 @@ class RunningDialog(QDialog):
         # signals completion.
         self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
 
+        # --- Header ---
+        header = QLabel("Characterization in progress")
+        hfont = QFont()
+        hfont.setPointSize(hfont.pointSize() + 4)
+        hfont.setBold(True)
+        header.setFont(hfont)
+
         self.section_label = QLabel("Current phase: preparing\u2026")
-        section_font = QFont()
-        section_font.setBold(True)
-        self.section_label.setFont(section_font)
+        self.section_label.setProperty("role", "subtle")
 
         # Chunky progress bar so it reads at a glance from across
         # the room.
@@ -655,16 +1043,22 @@ class RunningDialog(QDialog):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
-        self.progress.setMinimumHeight(28)
+        self.progress.setMinimumHeight(24)
 
-        # Acceptance-gate tracker (6 rows, states driven by log
-        # messages via ``AcceptanceTracker.on_log``).
+        # --- Acceptance-gate group ---
+        gates_group = QGroupBox("Acceptance gates")
+        gates_layout = QVBoxLayout(gates_group)
+        gates_layout.setContentsMargins(6, 8, 6, 6)
+        gates_layout.setSpacing(0)
         self.tracker = AcceptanceTracker()
+        gates_layout.addWidget(self.tracker)
 
-        # Mini terminal for INFO log messages. Small monospace font
-        # and a modest fixed height so it stays informative without
-        # dominating the dialog.
+        # --- Log group ---
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_group)
+        log_layout.setContentsMargins(6, 8, 6, 6)
         self.terminal = QPlainTextEdit()
+        self.terminal.setObjectName("miniTerminal")
         self.terminal.setReadOnly(True)
         self.terminal.setMaximumBlockCount(4000)
         mono = QFont("Consolas")
@@ -674,21 +1068,24 @@ class RunningDialog(QDialog):
             mono.setStyleHint(QFont.StyleHint.Monospace)
         mono.setPointSize(8)
         self.terminal.setFont(mono)
-        self.terminal.setFixedHeight(140)
+        self.terminal.setFixedHeight(150)
+        log_layout.addWidget(self.terminal)
+
+        # --- Assemble ---
+        sep = QFrame()
+        sep.setObjectName("hLine")
+        sep.setFrameShape(QFrame.Shape.HLine)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
+        layout.addWidget(header)
         layout.addWidget(self.section_label)
+        layout.addWidget(sep)
         layout.addWidget(self.progress)
-        gates_label = QLabel("Acceptance gates:")
-        gfont = QFont()
-        gfont.setBold(True)
-        gates_label.setFont(gfont)
-        layout.addWidget(gates_label)
-        layout.addWidget(self.tracker)
-        layout.addWidget(QLabel("Log:"))
-        layout.addWidget(self.terminal)
-        layout.addStretch(1)
-        self.resize(600, 640)
+        layout.addWidget(gates_group)
+        layout.addWidget(log_group)
+        self.resize(640, 720)
 
     # ------------------------------------------------------------------
     # Slot
@@ -729,17 +1126,17 @@ class ResultDialog(QDialog):
     def __init__(self, result: run_report.RunResult,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setWindowTitle("OpenLIFU Verification - Complete")
+        self.setWindowTitle("OpenLIFU Verification \u2014 Complete")
         self.setModal(True)
 
+        pal = current_palette()
         verdict = "PASS" if result.passed else "FAIL"
-        color = "#1a7a1a" if result.passed else "#b32020"
-        verdict_label = QLabel(f"Overall: <span style='color:{color};'>"
-                               f"<b>{verdict}</b></span>")
-        verdict_label.setTextFormat(Qt.TextFormat.RichText)
-        f = QFont()
-        f.setPointSize(f.pointSize() + 2)
-        verdict_label.setFont(f)
+        verdict_label = QLabel(
+            f"Overall verdict: {verdict}"
+        )
+        verdict_label.setObjectName("verdictBanner")
+        verdict_label.setProperty("verdict", "pass" if result.passed else "fail")
+        verdict_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Hyperlinks to the report directory and (when present) the
         # PDF file. QLabel with ``openExternalLinks=False`` and a
@@ -749,29 +1146,30 @@ class ResultDialog(QDialog):
         link_labels: list[QLabel] = []
         if result.run_dir is not None:
             link_labels.append(self._link_label(
-                "Open report folder", Path(result.run_dir)
+                "Open report folder", Path(result.run_dir), pal
             ))
         pdf = result.files.get("pdf") if result.files else None
         if pdf is not None and Path(pdf).is_file():
             link_labels.append(self._link_label(
-                "Open report PDF", Path(pdf)
+                "Open report PDF", Path(pdf), pal
             ))
         xlsx = result.files.get("xlsx") if result.files else None
         if xlsx is not None and Path(xlsx).is_file():
             link_labels.append(self._link_label(
-                "Open report XLSX", Path(xlsx)
+                "Open report XLSX", Path(xlsx), pal
             ))
 
         # Device-write status line (only shown when write was attempted).
         write_line: Optional[QLabel] = None
         if result.device_write_ok is True:
             write_line = QLabel(
-                "Calibration data written to device: <b>OK</b>."
+                f"Calibration data written to device: "
+                f"<b style='color:{pal.success};'>OK</b>."
             )
         elif result.device_write_ok is False:
             write_line = QLabel(
-                "Calibration data write to device: <b style='color:#b32020;'>"
-                "FAILED</b>."
+                f"Calibration data write to device: "
+                f"<b style='color:{pal.danger};'>FAILED</b>."
             )
         if write_line is not None:
             write_line.setTextFormat(Qt.TextFormat.RichText)
@@ -783,20 +1181,35 @@ class ResultDialog(QDialog):
         button_row.addStretch(1)
         button_row.addWidget(finish_button)
 
+        artifacts_label = QLabel("Artifacts")
+        artifacts_label.setProperty("role", "section")
+
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
         layout.addWidget(verdict_label)
-        for lbl in link_labels:
-            layout.addWidget(lbl)
+        if link_labels:
+            layout.addWidget(artifacts_label)
+            for lbl in link_labels:
+                layout.addWidget(lbl)
         if write_line is not None:
+            layout.addSpacing(4)
             layout.addWidget(write_line)
+        layout.addStretch(1)
         layout.addLayout(button_row)
 
+        self.setMinimumWidth(380)
+
     @staticmethod
-    def _link_label(text: str, target: Path) -> QLabel:
+    def _link_label(text: str, target: Path, pal: Palette) -> QLabel:
         """Build a QLabel that opens ``target`` in the system's
         default handler when clicked."""
         url = QUrl.fromLocalFile(str(target.resolve()))
-        label = QLabel(f'<a href="{url.toString()}">{text}</a>')
+        label = QLabel(
+            f'<a href="{url.toString()}" '
+            f'style="color:{pal.accent}; text-decoration:none;">'
+            f'&#128194; {text}</a>'
+        )
         label.setTextFormat(Qt.TextFormat.RichText)
         label.setOpenExternalLinks(False)
         label.setTextInteractionFlags(
@@ -854,6 +1267,17 @@ def main(argv=None) -> int:
     args.no_start_prompt = True
 
     app = QApplication.instance() or QApplication(sys.argv)
+    # Fusion is Qt's platform-neutral style; it plays nicely with
+    # heavy QSS overrides and looks identical on Windows / macOS /
+    # Linux so the theme renders the same everywhere.
+    try:
+        from PyQt6.QtWidgets import QStyleFactory
+        fusion = QStyleFactory.create("Fusion")
+        if fusion is not None:
+            app.setStyle(fusion)
+    except Exception:  # noqa: BLE001 - style is cosmetic only
+        pass
+    apply_theme(app, args.theme)
 
     # Prefs seeded from the on-disk cache and, optionally, the
     # hydrophone metadata (so the S/N field is pre-filled).
