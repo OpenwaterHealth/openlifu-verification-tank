@@ -89,6 +89,13 @@ def main():
                              "and hydrophone ID still load normally; only "
                              "the reported trace amplitudes stay in mV.")
     parser.add_argument("--num-modules", type=int, default=1)
+    parser.add_argument("--apodization", type=str, default=None,
+                        help="Element apodization mask as a 16-digit hex "
+                             "string (bit 0 = element 1). E.g. "
+                             "0x0000000000000001 fires element 1 only; "
+                             "0xFFFFFFFFFFFFFFFF (default) fires all "
+                             "elements. Use scripts/calc_apod.py to build "
+                             "one from a shape.")
     # --- Plot / output ---
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-plot", type=str, default="",
@@ -141,6 +148,7 @@ def main():
                 interval_msec=args.interval_msec,
                 pulse_count=args.pulse_count,
                 trigger_mode="single",
+                apodization=args.apodization,
             )
             ver.set_focus(args.x, args.y, args.z)
             ver.enable_hv_output(wait=True)

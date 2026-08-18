@@ -293,7 +293,8 @@ class VerificationTank:
                        pulse_count=1,
                        pulse_train_interval_msec = 0,
                        pulse_train_count = 1, 
-                       trigger_mode="single"):
+                       trigger_mode="single",
+                       apodization=None):
 
         pulse_interval_s = interval_msec * 1e-3
         # The SDK/firmware misbehaves when pulse_train_interval is 0. The
@@ -316,9 +317,26 @@ class VerificationTank:
             "pulse_train_count": pulse_train_count,
         }
 
-        # Dummy values for delays and apodizations
-        delays = np.zeros((1, self.arr.numelements()))
-        apodizations = np.ones((1, self.arr.numelements()))
+        # Delays stay flat (plane-wave); apodization is either the
+        # all-on default or a 64-bit mask expanded to the array size
+        # via :mod:`openlifu_verification.apodization`.
+        n_el = self.arr.numelements()
+        delays = np.zeros((1, n_el))
+        if apodization is None:
+            apodizations = np.ones((1, n_el))
+        else:
+            # Lazy import so the SDK-less apodization module is only
+            # loaded when someone actually uses this feature; keeps
+            # the fast-path unchanged for callers that don't.
+            from . import apodization as _apo
+            mask_int = _apo.normalize_to_int(apodization)
+            apo_row = _apo.mask_to_array(mask_int, n=n_el)
+            apodizations = apo_row.reshape(1, n_el)
+            logger.info(
+                "configure_lifu apodization: %s (%d/%d elements active)",
+                _apo.format_hex(mask_int),
+                int(apo_row.sum()), n_el,
+            )
 
         pin_order = np.argsort(self.arr.pins)
         solution = {
@@ -379,7 +397,8 @@ class VerificationTank:
                     pulse_count: int | None = None,
                     pulse_train_interval_msec: float | None = None,
                     pulse_train_count: int | None = None,
-                    trigger_mode: str | None = None) -> dict:
+                    trigger_mode: str | None = None,
+                    apodization=None) -> dict:
         """Configure the LIFU with sensible defaults for any ``None`` kwarg.
 
         Thin wrapper around :meth:`configure_lifu` that lets scripts
@@ -391,6 +410,11 @@ class VerificationTank:
         ``duration_usec`` is derived from ``cycles_per_burst /
         frequency_kHz * 1000`` when not passed explicitly, so callers
         can just specify "20 cycles" instead of computing the µs.
+
+        ``apodization`` accepts any representation supported by
+        :func:`openlifu_verification.apodization.normalize_to_int`
+        (hex string, int, or 0/1 array). ``None`` is the default
+        all-elements-on behavior.
 
         Returns the fully-resolved keyword dict actually sent to
         :meth:`configure_lifu` (useful for logging / metadata).
@@ -412,17 +436,26 @@ class VerificationTank:
                     else 0.0)
         ptc = int(pulse_train_count if pulse_train_count is not None else 1)
         tm = str(trigger_mode if trigger_mode is not None else self.DEFAULT_TRIGGER_MODE)
+        # Normalise the apodization so ``resolved`` carries a canonical
+        # hex string (or None) - much easier to log / diff than the
+        # raw user input.
+        if apodization is None:
+            apo_hex = None
+        else:
+            from . import apodization as _apo
+            apo_hex = _apo.format_hex(_apo.normalize_to_int(apodization))
         resolved = dict(
             frequency_kHz=freq, voltage=volt, duration_usec=duration,
             interval_msec=interval, pulse_count=pc,
             pulse_train_interval_msec=pti, pulse_train_count=ptc,
-            trigger_mode=tm,
+            trigger_mode=tm, apodization=apo_hex,
         )
         logger.info(
             "apply_pulse: frequency=%g kHz, voltage=%g V, duration=%g \u00b5s "
-            "(%d cycles), interval=%g ms, pulse_count=%d, trigger_mode=%s",
+            "(%d cycles), interval=%g ms, pulse_count=%d, trigger_mode=%s, "
+            "apodization=%s",
             freq, volt, duration, int(round(duration * freq / 1000.0)),
-            interval, pc, tm,
+            interval, pc, tm, apo_hex if apo_hex is not None else "all-on",
         )
         self.configure_lifu(**resolved)
         return resolved

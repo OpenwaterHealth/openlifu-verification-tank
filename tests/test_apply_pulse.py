@@ -96,3 +96,29 @@ def test_pulse_count_and_trigger_mode_forwarded():
 def test_pulse_count_defaults_to_class_constant_when_omitted():
     r = _call_apply_pulse(voltage=5.0)
     assert r["pulse_count"] == VerificationTank.DEFAULT_PULSE_COUNT
+
+
+def test_apodization_default_is_none():
+    """When the caller doesn't pass ``apodization``, the resolved
+    dict carries ``None`` so ``configure_lifu`` falls through to
+    its all-elements-on branch."""
+    r = _call_apply_pulse()
+    assert r["apodization"] is None
+
+
+def test_apodization_normalised_to_canonical_hex():
+    """Any accepted representation should end up as a 16-digit
+    upper-case ``0x...`` string in the resolved dict."""
+    r = _call_apply_pulse(apodization="0x1")
+    assert r["apodization"] == "0x0000000000000001"
+
+    r = _call_apply_pulse(apodization=0xDEADBEEF)
+    assert r["apodization"] == "0x00000000DEADBEEF"
+
+
+def test_apodization_bad_hex_raises():
+    """Malformed hex strings should surface immediately at the
+    apply_pulse boundary, not later inside configure_lifu."""
+    import pytest
+    with pytest.raises(ValueError):
+        _call_apply_pulse(apodization="0xNOTHEX")

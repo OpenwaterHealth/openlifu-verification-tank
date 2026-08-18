@@ -60,6 +60,13 @@ def main():
     parser.add_argument("--calibration-path", type=str,
                         default=str(paths.HYDROPHONE_STATE_PATH))
     parser.add_argument("--num-modules", type=int, default=1)
+    parser.add_argument("--apodization", type=str, default=None,
+                        help="Element apodization mask as a 16-digit hex "
+                             "string (bit 0 = element 1). E.g. "
+                             "0x0000000000000001 fires element 1 only; "
+                             "0xFFFFFFFFFFFFFFFF (default) fires all "
+                             "elements. Use scripts/calc_apod.py to build "
+                             "one from a shape.")
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument("--verbose", "-v", action="store_true")
     verbosity.add_argument("--quiet", "-q", action="store_true")
@@ -92,6 +99,7 @@ def main():
                 voltage=args.voltage,
                 duration_usec=args.duration_usec,
                 interval_msec=args.interval_msec,
+                apodization=args.apodization,
             )
             ver.set_focus(args.x, args.y, args.z)
             ver.enable_hv_output(wait=True)
