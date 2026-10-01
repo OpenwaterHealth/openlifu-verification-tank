@@ -1,6 +1,6 @@
 """Editable configuration for the characterization scans.
 
-Holds everything about *how* the sweep runs \u2014 spatial extents /
+Holds everything about *how* the sweep runs -- spatial extents /
 point counts, scope capture window + sampling, frequency & voltage
 sweep grids, and the PicoScope range plan for the voltage sweep.
 
@@ -48,7 +48,7 @@ class ScopeCapture:
 
     ``time_start_us`` / ``time_stop_us`` are given relative to the
     start of ultrasound emission (t=0 = emission), so a pulse arriving
-    at depth ``z`` mm shows up at ``t = z / SOS`` (\u00b5s in water).
+    at depth ``z`` mm shows up at ``t = z / SOS`` (us in water).
     """
     time_start_us: float = -14.0
     time_stop_us: float = 86.0
@@ -59,6 +59,15 @@ class ScopeCapture:
     #: Headroom above the predicted peak amplitude when auto-picking a
     #: scope range for the voltage sweep. 30 % is a reasonable default.
     voltage_scan_headroom_pct: float = 30.0
+    #: Lower-bound (us, relative to emission at t=0) for the first-RF-peak
+    #: search in :meth:`VerificationTank.calibrate_hydrophone_depth`.
+    #: Must sit comfortably after any trigger-flash / near-field EM
+    #: pickup but before the earliest expected acoustic arrival. For a
+    #: 50 mm nominal depth (33 us arrival) 25 us is safe; for shallower
+    #: hydrophone positions reduce accordingly. Applied to BOTH the
+    #: plane-wave depth calibration (D.3) and the focused-pulse arrival
+    #: in :meth:`Characterization.measure_waveform_at_peak`.
+    depth_cal_skip_us: float = 25.0
 
 
 @dataclass
@@ -91,6 +100,15 @@ class VoltageSweep:
     voltages_V: list[float] = field(default_factory=lambda: [
         5.0, 10.0, 15.0, 20.0, 25.0, 30.0,
     ])
+    #: Floor for the PicoScope vertical range (mV, +/-) used during the
+    #: voltage sweep. The actual range picked by
+    #: :meth:`Characterization.sweep_voltage` is
+    #: ``max(range_mv, auto_predicted_range)``, quantized up to the
+    #: next valid PicoScope range. Prevents an underestimated
+    #: prediction (e.g. from a clipped baseline capture) from sizing
+    #: the sweep too small. 200 mV gives ~720 kPa headroom at 400 kHz
+    #: for an HNR-0500.
+    range_mv: int = 200
 
 
 @dataclass

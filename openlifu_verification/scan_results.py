@@ -111,7 +111,7 @@ class ScanResult:
         Args:
             kind: Plot style.
 
-                - ``"auto"`` (default): pick based on coord layout \u2014
+                - ``"auto"`` (default): pick based on coord layout --
                   ``"line"`` for 1-D coords, ``"heatmap"`` for 2-D.
                 - ``"line"``: line plot of the reduction vs the single
                   coord axis. Requires 1-D coords.
@@ -123,7 +123,7 @@ class ScanResult:
                 - ``"trace_image"``: imshow of all traces along the
                   coord axis (only meaningful for 1-D sweeps).
 
-            reduce: Reduction used by ``"line"``/``"heatmap"`` \u2014
+            reduce: Reduction used by ``"line"``/``"heatmap"`` --
                 ``"vpp"`` (default), ``"vmin"``, or ``"vmax"``.
             index: Trace picker for ``"trace"``.
             ax: Optional matplotlib Axes to draw into.
@@ -131,7 +131,7 @@ class ScanResult:
             save_as: If truthy, save the figure to this path.
             title: Override the auto-generated title.
             arrival_us: If given and ``kind=="trace"``, overlay a
-                vertical dashed line at this time (\u00b5s) labeled
+                vertical dashed line at this time (us) labeled
                 "arrival". Ignored for other plot kinds.
             **kwargs: Passed through to the underlying matplotlib call
                 (``plot``/``imshow``).
@@ -191,13 +191,13 @@ class ScanResult:
             idx = self._resolve_trace_index(index)
             trace = self.traces[idx] * y_scale
             ax.plot(self.t, trace, **kwargs)
-            ax.set_xlabel("time (\u00b5s)")
+            ax.set_xlabel("time (us)")
             ax.set_ylabel(self._trace_label(y_unit))
             ax.grid(True)
             if arrival_us is not None and np.isfinite(arrival_us):
                 ax.axvline(float(arrival_us), color="tab:red",
                            linestyle="--", linewidth=1,
-                           label=f"arrival = {float(arrival_us):.2f} \u00b5s")
+                           label=f"arrival = {float(arrival_us):.2f} us")
                 ax.legend(loc="best")
 
         elif kind == "trace_image":
@@ -214,7 +214,7 @@ class ScanResult:
                         float(x[0]), float(x[-1])],
                 **kwargs,
             )
-            ax.set_xlabel("time (\u00b5s)")
+            ax.set_xlabel("time (us)")
             ax.set_ylabel(self._coord_axis_label(xname))
             fig.colorbar(im, ax=ax, label=self._trace_label(y_unit))
 

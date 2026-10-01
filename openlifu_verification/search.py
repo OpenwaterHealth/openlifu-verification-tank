@@ -76,7 +76,7 @@ def gradient_search(
     step on each axis rotates the basis by 45\u00b0; a pure quadratic
     refinement rotates by an arbitrary angle). Once both axes are
     in the subsample regime (center dominates on both axes) the
-    probe grid shrinks by half \u2014 but only down to ``min_step``.
+    probe grid shrinks by half -- but only down to ``min_step``.
     Below ``min_step`` the algorithm switches to a **symmetry
     polish** phase: the probe spacing stays fixed at ``min_step``
     and each iteration moves the center to the estimated
@@ -113,8 +113,8 @@ def gradient_search(
             require the mountain to roll off symmetrically. On a
             noisy top, setting this too small makes the parabola
             fit dominated by RMS noise; the default of 0.2 mm
-            (200 \u00b5m) is roughly the transducer's spot
-            radius \u2014 large enough that the side probes see a
+            (200 um) is roughly the transducer's spot
+            radius -- large enough that the side probes see a
             meaningful pressure drop. Set to 0 or a very small
             value to recover the old "always shrink" behavior.
         max_polish_iter: Cap on how many symmetry-polish iterations
@@ -218,7 +218,7 @@ def gradient_search(
 
     step = float(initial_step)
     # Clamp min_step to be at most initial_step (otherwise we'd
-    # start at the floor, which is fine \u2014 but never let it exceed
+    # start at the floor, which is fine -- but never let it exceed
     # the starting spacing).
     min_step = max(0.0, min(float(min_step), step))
     iteration = 0
@@ -298,7 +298,7 @@ def gradient_search(
         # --- Per-axis refinement ---
         # For each axis independently:
         #   * If a neighbor beats the center, we're in "shift" mode
-        #     on that axis \u2014 the peak lies beyond the sampled
+        #     on that axis -- the peak lies beyond the sampled
         #     interval; the raw target is \u00b1h toward the higher
         #     neighbor.
         #   * Elif the center dominates both neighbors, fit a
@@ -312,8 +312,8 @@ def gradient_search(
         # winning neighbor is above the center) so that when one
         # direction is a much stronger climb we skew toward it
         # rather than moving 45\u00b0 diagonally. We also cap the
-        # combined step magnitude to ``h`` \u2014 the user's "step
-        # size" \u2014 so a single iteration never jumps more than
+        # combined step magnitude to ``h`` -- the user's "step
+        # size" -- so a single iteration never jumps more than
         # one probe spacing when we haven't yet bracketed the peak
         # on every axis.
         #
@@ -524,13 +524,13 @@ def gradient_search(
 # grid_walk_search: fixed-grid walk + LSQ paraboloid centering
 # ----------------------------------------------------------------------
 def _fit_paraboloid_vertex(points, *, guard_radius=None):
-    """Least-squares fit ``z = A x\u00b2 + B y\u00b2 + C xy + D x + E y + F``
+    """Least-squares fit ``z = A x**2 + B y**2 + C xy + D x + E y + F``
     to ``points`` (iterable of ``(x, y, z)``) and return the vertex
     ``(xv, yv, zv)`` where the gradient vanishes.
 
     Returns ``None`` if:
       * fewer than 6 points (system is underdetermined),
-      * the Hessian is not concave-down (``4AB - C\u00b2 <= 0`` or
+      * the Hessian is not concave-down (``4AB - C**2 <= 0`` or
         ``A >= 0``),
       * or the vertex lies farther than ``guard_radius`` from the
         centroid of the input points (fit is extrapolating).
@@ -550,7 +550,7 @@ def _fit_paraboloid_vertex(points, *, guard_radius=None):
     det = 4.0 * a * b - c * c
     if det <= 1e-18 or a >= 0.0:
         # Not a concave-down elliptic paraboloid (saddle, plane, or
-        # concave-up bowl) \u2014 no interior maximum.
+        # concave-up bowl) -- no interior maximum.
         return None
     # Solve [[2A, C], [C, 2B]] @ [x; y] = -[D; E]
     xv = (c * e - 2.0 * b * d) / det
@@ -595,8 +595,8 @@ def grid_walk_search(
        none exceed the center, sample the 4 diagonals of the best
        node. If any diagonal exceeds the center, resume step 2
        from there. Otherwise the max is a local grid maximum with
-       all 8 neighbors lower \u2014 converged.
-    4. **Paraboloid fit**: fit ``z = A x\u00b2 + B y\u00b2 + C xy + D x
+       all 8 neighbors lower -- converged.
+    4. **Paraboloid fit**: fit ``z = A x**2 + B y**2 + C xy + D x
        + E y + F`` by least squares to all cached samples within
        ``fit_window`` grid nodes of the converged best. Return the
        vertex as ``(center_x, center_y)``. If the fit isn't
@@ -618,7 +618,7 @@ def grid_walk_search(
         step: Grid spacing (mm). Also the side length of the fit
             window's central cell. Choose so a probe at ``\u00b1step``
             from a peak sees a clearly detectable roll-off vs the
-            per-shot noise level. Default 0.2 mm (200 \u00b5m).
+            per-shot noise level. Default 0.2 mm (200 um).
         max_evaluations: Cap on total new measurements before
             giving up. Cached re-visits don't count. Default 50.
         max_iter: Cap on walk iterations (independent of
@@ -766,7 +766,7 @@ def grid_walk_search(
                                       f"({best_ij[0]:+d},{best_ij[1]:+d})")
             continue
 
-        # All 8 neighbors sampled and lower \u2014 bracketed.
+        # All 8 neighbors sampled and lower -- bracketed.
         converged = True
         _emit_iter_end(converged=True, done=False,
                        info_extra=f"bracketed at ({best_ij[0]:+d},"
@@ -796,7 +796,7 @@ def grid_walk_search(
     else:
         center_x, center_y = grid_max_x, grid_max_y
         center_rms = grid_max_r
-        info_fit = (f"paraboloid fit rejected \u2014 fell back to "
+        info_fit = (f"paraboloid fit rejected -- fell back to "
                     f"grid-max ({grid_max_x:.4f}, {grid_max_y:.4f}) mm")
     center_history.append((center_x, center_y))
     _emit_iter_end(converged=converged, done=True, info_extra=info_fit)
@@ -849,7 +849,7 @@ def make_live_figure():
     ax_scatter = fig.add_subplot(gs[:, 1])
 
     trace_line, = ax_trace.plot([], [], lw=1)
-    ax_trace.set_xlabel("time (\u00b5s)")
+    ax_trace.set_xlabel("time (us)")
     ax_trace.set_ylabel("hydrophone")
     ax_trace.grid(True)
     ax_trace.set_title("latest trace")

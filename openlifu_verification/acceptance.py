@@ -70,7 +70,7 @@ def _peak_depth_from_dict(data: dict) -> "PeakDepth":
 
 @dataclass
 class ArrivalTime:
-    """Round-trip arrival time (\u00b5s) for the setup pulse."""
+    """Round-trip arrival time (us) for the setup pulse."""
     nominal_us: float = 33.3          # ~50 mm / 1500 m/s
     tol_pct: float = 10.0
 
@@ -163,7 +163,7 @@ class Temperature:
 class Firmware:
     """Minimum firmware versions (dotted semver strings, e.g. ``"1.2.4"``).
 
-    Empty strings disable the check for that device \u2014 useful during
+    Empty strings disable the check for that device -- useful during
     bring-up when a device may report ``""`` for its firmware
     version. Version comparison uses tuple-of-ints ordering after
     stripping a leading ``"v"`` and ignoring build/pre-release
@@ -278,7 +278,7 @@ class AcceptanceCriteria:
     def pnp_min_for(self, freq_kHz: float) -> Optional[float]:
         """Look up the minimum PNP for a nominal frequency.
 
-        Returns ``None`` if the frequency is not listed \u2014 the grader
+        Returns ``None`` if the frequency is not listed -- the grader
         will then mark it ``NA`` rather than fail.
         """
         key = str(int(round(float(freq_kHz))))

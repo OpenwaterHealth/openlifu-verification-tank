@@ -1,11 +1,11 @@
 {
     "type": "TransducerArray",
-    "id": "openlifu_2x180_evt1",
-    "name": "OpenLIFU 2x 180kHz EVT1",
+    "id": "openlifu_2x_evt1",
+    "name": "OpenLIFU 2x EVT1",
     "modules": [
         {
-            "id": "openlifu_tm180_evt1",
-            "name": "OpenLIFU 180kHz Transmit Module",
+            "id": "openlifu_tm400_evt1",
+            "name": "OpenLIFU 400kHz Transmit Module",
             "elements": [
                 {
                     "index": 1,
@@ -1224,7 +1224,7 @@
                     "units": "mm"
                 }
             ],
-            "frequency": 180000.0,
+            "frequency": 400600.0,
             "units": "mm",
             "attrs": {},
             "registration_surface_filename": null,
@@ -1255,7 +1255,7 @@
                     1.0
                 ]
             ],
-            "sensitivity": 1000,
+            "sensitivity": 1350.0,
             "module_invert": [
                 false
             ],
@@ -1287,8 +1287,8 @@
             ]
         },
         {
-            "id": "openlifu_tm180_evt1",
-            "name": "OpenLIFU 180kHz Transmit Module",
+            "id": "openlifu_tm400_evt1",
+            "name": "OpenLIFU 400kHz Transmit Module",
             "elements": [
                 {
                     "index": 1,
@@ -2507,7 +2507,7 @@
                     "units": "mm"
                 }
             ],
-            "frequency": 180000.0,
+            "frequency": 400600.0,
             "units": "mm",
             "attrs": {},
             "registration_surface_filename": null,
@@ -2538,7 +2538,7 @@
                     1.0
                 ]
             ],
-            "sensitivity": 1000,
+            "sensitivity": 1350.0,
             "module_invert": [
                 false
             ],
@@ -2571,6 +2571,7 @@
         }
     ],
     "attrs": {
+
         "standoff_transform": [
             [
                 1.0,
@@ -2597,7 +2598,7 @@
                 1.0
             ]
         ],
-        "registration_surface_filename": "openlifu_2x180_evt1.surf.obj",
-        "transducer_body_filename": "openlifu_2x180_evt1.body.obj"
+        "registration_surface_filename": "openlifu_2x_evt1.surf.obj",
+        "transducer_body_filename": "openlifu_2x_evt1.body.obj"
     }
 }

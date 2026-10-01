@@ -45,7 +45,7 @@ def test_defaults_when_nothing_passed():
     r = _call_apply_pulse()
     assert r["frequency_kHz"] == VerificationTank.DEFAULT_FREQUENCY_KHZ
     assert r["voltage"] == VerificationTank.DEFAULT_VOLTAGE_V
-    # cycles / freq_kHz => ms; \u00d71000 => \u00b5s.
+    # cycles / freq_kHz => ms; \u00d71000 => us.
     expected_duration = (VerificationTank.DEFAULT_CYCLES_PER_BURST
                          / VerificationTank.DEFAULT_FREQUENCY_KHZ) * 1000.0
     assert r["duration_usec"] == expected_duration

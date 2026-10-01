@@ -153,7 +153,7 @@ def main():
     # time-of-flight from the transducer face to the hydrophone.
     arrival_us = _find_arrival_us(scan_result.t, scan_result.traces[0])
     if arrival_us is not None:
-        logger.info("Estimated arrival time: %.2f \u00b5s", arrival_us)
+        logger.info("Estimated arrival time: %.2f us", arrival_us)
     else:
         logger.info("Could not estimate arrival time from trace.")
     scan_result.plot(kind="trace", show=True, arrival_us=arrival_us)

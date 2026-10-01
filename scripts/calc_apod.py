@@ -23,9 +23,8 @@ Examples::
     python scripts/calc_apod.py --type disk --x0 0 --y0 0 --r 6 --invert
 
 The ``--transducer`` flag selects which JSON pinmap to consult;
-by default the tool auto-detects ``transducers/openlifu_1x400_evt1.json``
-matching the ``--num-modules`` / ``--frequency-khz`` flags used
-elsewhere.
+by default the tool auto-detects ``transducers/openlifu_1x_evt1.json``
+(or ``openlifu_2x_evt1.json``) matching the ``--num-modules`` flag.
 """
 from __future__ import annotations
 
@@ -43,10 +42,10 @@ from openlifu_verification.verificationtank import _TransducerData
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 
 
-def _default_transducer_path(num_modules: int, frequency_khz: float) -> Path:
+def _default_transducer_path(num_modules: int) -> Path:
     """Mirror ``VerificationTank`` transducer path resolution."""
     return (REPO_ROOT / "transducers" /
-            f"openlifu_{num_modules}x{int(frequency_khz)}_evt1.json")
+            f"openlifu_{num_modules}x_evt1.json")
 
 
 def _load_transducer(path: Path) -> _TransducerData:
@@ -219,11 +218,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--transducer", type=Path, default=None,
                         help="Path to the transducer pinmap JSON. "
                              "Default: auto-detect from "
-                             "--num-modules / --frequency-khz.")
+                             "--num-modules.")
     parser.add_argument("--num-modules", type=int, default=1,
                         help="Auto-detect: modules count. Default 1.")
-    parser.add_argument("--frequency-khz", type=float, default=400.0,
-                        help="Auto-detect: nominal frequency. Default 400.")
 
     # Output controls.
     parser.add_argument("--no-map", action="store_true",
@@ -236,9 +233,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     # Resolve transducer path.
-    path = args.transducer or _default_transducer_path(
-        args.num_modules, args.frequency_khz
-    )
+    path = args.transducer or _default_transducer_path(args.num_modules)
     try:
         arr = _load_transducer(path)
     except FileNotFoundError as e:

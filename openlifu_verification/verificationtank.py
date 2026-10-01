@@ -3,6 +3,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -14,6 +15,7 @@ from .paths import HYDROPHONE_STATE_PATH
 from .pulse_align import align_pulse_traces
 
 from openlifu_sdk.io import LIFUInterface
+from openlifu_sdk.io.exceptions import LIFUError, LIFUNotConnectedError
 from openlifu_sdk.io.LIFUTXDevice import Tx7332DelayProfile, Tx7332PulseProfile
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,27 @@ SPEED_OF_SOUND = 1490  # m/s in water
 SYSTEM_TRANSMIT_DELAY_US = 113.5
 HYDROPHONE_CHANNEL = 'A'
 TRIGGER_CHANNEL = 'B'
+
+
+class HardwareNotConnectedError(ConnectionError):
+    """Raised on ``VerificationTank`` startup when a required piece of
+    hardware (TX console, HV supply, etc.) is not connected.
+
+    Distinct from a generic ``ConnectionError`` / ``Exception`` so
+    callers (e.g. the GUI) can present a short, actionable dialog
+    instead of a raw traceback dump.
+    """
+
+    def __init__(self, message: str, *, hardware: str = "hardware",
+                 code: Optional[str] = None):
+        super().__init__(message)
+        #: Short human-readable name of the disconnected component,
+        #: e.g. ``"TX console"``, ``"HV output"``, ``"QPX600DP"``.
+        self.hardware = hardware
+        #: Optional stable error code (e.g. the SDK's ``"LIFU-1001"``)
+        #: for the operator to quote in bug reports. ``None`` when we
+        #: raised the error ourselves without an underlying SDK cause.
+        self.code = code
 
 
 class _TransducerData:
@@ -199,19 +222,73 @@ class VerificationTank:
                 )
             self.lifu.__enter__()
             if self.hv is not None:
-                self.hv.__enter__()
+                try:
+                    self.hv.__enter__()
+                except Exception as e:  # noqa: BLE001 - reraise as friendly
+                    raise HardwareNotConnectedError(
+                        "External HV supply (QPX600DP) is not connected.\n\n"
+                        "Please check:\n"
+                        "  \u2022 QPX600DP is powered on\n"
+                        "  \u2022 USB / serial cable is plugged in\n"
+                        "  \u2022 No other application is holding the port\n\n"
+                        f"Underlying error: {e}",
+                        hardware="QPX600DP",
+                    ) from e
 
+            # Query connectivity BEFORE touching any HV / TX SDK
+            # method. ``disable_hv_output`` etc. talk to the console
+            # directly and raise ``LIFUNotConnectedError`` if the
+            # relevant rail isn't up; a friendly startup dialog is
+            # much more useful than that raw traceback.
             tx_connected, hv_connected = self.lifu.is_device_connected()
+
+            if not tx_connected:
+                raise HardwareNotConnectedError(
+                    "TX console is not connected.\n\n"
+                    "Please check:\n"
+                    "  \u2022 The console is powered on\n"
+                    "  \u2022 The USB cable to the PC is plugged in\n"
+                    "  \u2022 No other application (e.g. openlifu-app) "
+                    "is holding the port\n\n"
+                    "Then click Start again.",
+                    hardware="TX console",
+                )
+            logger.info(f"  TX Connected: {tx_connected}")
+            logger.info("\u2705 LIFU Device fully connected.")
+
+            # The LIFU console reports its HV rail separately from the
+            # TX board. When we're using the internal supply
+            # (``ext_power_supply=False``) an unreachable HV rail
+            # means the console can't produce drive voltage and the
+            # sweep will fail partway through with a much less
+            # actionable error. Catch it up front, before any HV
+            # command is issued to the SDK.
+            if not self.ext_power_supply and not hv_connected:
+                raise HardwareNotConnectedError(
+                    "TX console HV output is not connected.\n\n"
+                    "Please check:\n"
+                    "  \u2022 The console\u2019s HV supply is powered "
+                    "on (front-panel indicator)\n"
+                    "  \u2022 The HV cable between the console and the "
+                    "TX module is seated at both ends\n"
+                    "  \u2022 If running from an external supply, "
+                    "instantiate ``VerificationTank(ext_power_supply="
+                    "True)``\n\n"
+                    "Then click Start again.",
+                    hardware="HV output",
+                    code="LIFU-1001",
+                )
+
             self.disable_hv_output()
 
-            if tx_connected:
-                logger.info(f"  TX Connected: {tx_connected}")
-                logger.info("✅ LIFU Device fully connected.")
-            else:
-                raise ConnectionError("❌ TX NOT fully connected.")
-
             if not self.lifu.txdevice.ping():
-                raise ConnectionError("Failed to ping the transmitter device.")
+                raise HardwareNotConnectedError(
+                    "TX console did not respond to ping.\n\n"
+                    "The USB link is up but the transmitter firmware "
+                    "isn't answering. Power-cycle the console and "
+                    "click Start again.",
+                    hardware="TX console",
+                )
 
             tx_firmware_version = self.lifu.txdevice.get_version()
             logger.info(f"TX Firmware Version: {tx_firmware_version}")
@@ -225,7 +302,7 @@ class VerificationTank:
 
             transducers_path = Path(__file__).parent.parent.resolve()
             self.arr = _TransducerData.from_file(
-                f"{transducers_path}/transducers/openlifu_{self.num_modules}x{self.frequency}_evt1.json"
+                f"{transducers_path}/transducers/openlifu_{self.num_modules}x_evt1.json"
             )
             self.arr.sort_by_pin()
 
@@ -278,6 +355,27 @@ class VerificationTank:
                 hydro_desc, self.hydrophone_position.tolist(), src_desc,
             )
 
+        except HardwareNotConnectedError:
+            # Already a friendly, GUI-ready error. Clean up and let it
+            # propagate untouched so callers can catch by type.
+            self.__exit__(None, None, None)
+            raise
+        except LIFUNotConnectedError as e:
+            # SDK-level "device not connected" from any spot in the
+            # startup sequence (HV rail dropped mid-init, TX comms
+            # died, etc.). Convert to the friendly wrapper so the GUI
+            # shows a clean dialog instead of a raw traceback.
+            code = f"LIFU-{e.code}" if e.code is not None else None
+            code_suffix = f" (ERR CODE: {code})" if code else ""
+            hardware = "HV output" if "HV" in str(e) else "TX console"
+            self.__exit__(None, None, None)
+            raise HardwareNotConnectedError(
+                f"Device not found ({e}).\n\n"
+                "Check the console connections and try again"
+                f"{code_suffix}.",
+                hardware=hardware,
+                code=code,
+            ) from e
         except Exception as e:
             logger.error(f"Error during initialization: {e}")
             self.__exit__(None, None, None)
@@ -451,7 +549,7 @@ class VerificationTank:
             trigger_mode=tm, apodization=apo_hex,
         )
         logger.info(
-            "apply_pulse: frequency=%g kHz, voltage=%g V, duration=%g \u00b5s "
+            "apply_pulse: frequency=%g kHz, voltage=%g V, duration=%g us "
             "(%d cycles), interval=%g ms, pulse_count=%d, trigger_mode=%s, "
             "apodization=%s",
             freq, volt, duration, int(round(duration * freq / 1000.0)),
@@ -1834,7 +1932,7 @@ class VerificationTank:
 
         Args:
             frequencies_kHz: 1-D iterable of frequencies to sweep.
-            duration_usec: Pulse duration (\u00b5s) reused at every point;
+            duration_usec: Pulse duration (us) reused at every point;
                 the number of cycles per pulse is
                 ``int(duration_usec * frequency_kHz / 1000)``.
             time_start_s, time_stop_s, sampling_interval_ns: Capture
@@ -2036,7 +2134,7 @@ class VerificationTank:
         When ``n_averages > 1`` the hydrophone trace is captured that
         many times back-to-back, optionally aligned by
         cross-correlation (:func:`~openlifu_verification.pulse_align.align_pulse_traces`)
-        and coherently averaged before RMS/vpp are computed \u2014 giving
+        and coherently averaged before RMS/vpp are computed -- giving
         a much lower-noise measurement at the cost of ``n_averages``\u00d7
         the wall-time.
 
@@ -2055,7 +2153,7 @@ class VerificationTank:
         Returns:
             Dict with:
 
-            - ``t``: 1-D time axis (\u00b5s), zero at emission.
+            - ``t``: 1-D time axis (us), zero at emission.
             - ``trace``: 1-D signal, in ``units``. When
               ``n_averages > 1``, the coherently averaged trace.
             - ``rms``: scalar RMS over the whole window.
@@ -2247,7 +2345,7 @@ class VerificationTank:
         speed of sound to yield the axial distance.
 
         This method updates ``self.hydrophone_position[2]`` in place
-        when ``store=True`` (default). It does *not* touch x/y \u2014
+        when ``store=True`` (default). It does *not* touch x/y --
         run :meth:`find_peak` afterwards for those.
 
         Args:
@@ -2258,13 +2356,13 @@ class VerificationTank:
             n_pulses: Number of pulses to fire in one rapid-block
                 capture (default 32). More pulses \u2192 lower noise
                 floor but more wall-time.
-            duration_usec: Burst duration in \u00b5s (default 8).
+            duration_usec: Burst duration in us (default 8).
                 Short bursts localize the envelope peak better than
                 the standard 20-cycle burst.
             interval_msec: Interval between pulses in the train (ms).
                 Defaults to :attr:`DEFAULT_INTERVAL_MSEC`.
             skip_us: Exclude everything before this time from the
-                arrival-time search (default 12 \u00b5s) to avoid
+                arrival-time search (default 12 us) to avoid
                 locking onto the trigger-flash / cross-talk.
             time_start_us, time_stop_us, sampling_interval_ns:
                 Scope capture window and timebase.
@@ -2293,7 +2391,7 @@ class VerificationTank:
 
               - ``distance_mm``: Estimated array\u2192hydrophone
                 distance in mm.
-              - ``arrival_us``: Estimated arrival time (\u00b5s,
+              - ``arrival_us``: Estimated arrival time (us,
                 post quarter-cycle correction, **before** the
                 max-delay adjustment).
               - ``first_peak_us``: Raw first-RF-peak time before
@@ -2391,7 +2489,7 @@ class VerificationTank:
         if arr is None:
             raise RuntimeError(
                 "Could not locate a first-arrival RF peak in "
-                f"[{skip_us:.1f}, {t_us[-1]:.1f}] \u00b5s. "
+                f"[{skip_us:.1f}, {t_us[-1]:.1f}] us. "
                 "Increase --voltage or check that the hydrophone is "
                 "wetted and in front of the array.",
             )
@@ -2400,9 +2498,9 @@ class VerificationTank:
             (arr.arrival_us - max_delay_us) * 1e-6 * SPEED_OF_SOUND * 1e3
         )
         logger.info(
-            "calibrate_hydrophone_depth: first_peak=%.3f \u00b5s, "
-            "quarter_cycle=%.3f \u00b5s, arrival=%.3f \u00b5s, "
-            "max_delay=%.3f \u00b5s, distance=%.3f mm "
+            "calibrate_hydrophone_depth: first_peak=%.3f us, "
+            "quarter_cycle=%.3f us, arrival=%.3f us, "
+            "max_delay=%.3f us, distance=%.3f mm "
             "(SoS=%d m/s, %d pulses, focus=%s)",
             arr.first_peak_us, arr.quarter_cycle_us, arr.arrival_us,
             max_delay_us, distance_mm, SPEED_OF_SOUND, n_pulses,
@@ -2491,10 +2589,10 @@ class VerificationTank:
 
             grid_step: [``grid``] Grid spacing (mm). This is the
                 spatial scale over which we require the pressure
-                field to roll off measurably \u2014 pick it a couple
+                field to roll off measurably -- pick it a couple
                 times bigger than the per-shot RMS noise "wobble"
                 divided by the local slope. Default 0.2 mm
-                (200 \u00b5m).
+                (200 um).
             max_evaluations: [``grid``] Cap on total new
                 measurements. Default 50.
             fit_window: [``grid``] Radius (grid nodes) around the
@@ -2535,7 +2633,7 @@ class VerificationTank:
                 boundary. Default ``False``.
 
         Returns:
-            ``(x, y)`` \u2014 the located (centered) peak in mm.
+            ``(x, y)`` -- the located (centered) peak in mm.
         """
         from . import search
 

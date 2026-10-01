@@ -13,7 +13,7 @@ exclusion region so you can iterate on ``--skip-us``,
 By default the demo fires a plane wave (all elements simultaneous),
 so ``distance_mm`` is the array-to-hydrophone axial distance
 directly. Pass ``--z-focus-mm`` to steer to a real on-axis focus
-instead \u2014 the picker's arrival is then reduced by the transducer's
+instead -- the picker's arrival is then reduced by the transducer's
 max element delay so the reported distance is still the one-way
 normal distance from the array face to the hydrophone. When the
 hydrophone sits at the focus this cancels exactly; off-focus this is
@@ -64,7 +64,7 @@ def main():
                         help="HV rail (V). Plane-wave excitation spreads "
                              "energy so we default to 30 V to keep SNR up.")
     parser.add_argument("--duration-usec", type=float, default=8.0,
-                        help="Per-pulse duration in \u00b5s (default 8).")
+                        help="Per-pulse duration in us (default 8).")
     parser.add_argument("--pulse-count", "-n", type=int, default=32,
                         help="Pulses fired per trigger; averaged coherently. "
                              "Default 32.")
@@ -77,7 +77,7 @@ def main():
     parser.add_argument("--hydro-range-mv", type=int, default=100)
     parser.add_argument("--skip-us", type=float, default=12.0,
                         help="Ignore samples before this time when hunting "
-                             "for the first arrival (default 12 \u00b5s to skip "
+                             "for the first arrival (default 12 us to skip "
                              "the trigger flash / cross-talk).")
     parser.add_argument("--align", action=argparse.BooleanOptionalAction,
                         default=True,
@@ -149,14 +149,14 @@ def main():
                   else f"focus @ z = {result['z_focus_mm']:.2f} mm")
     print(f"  excitation        : {focus_desc}")
     print(f"  n_pulses averaged : {result['n_pulses_used']}")
-    print(f"  first RF peak     : {result['first_peak_us']:.3f} \u00b5s")
+    print(f"  first RF peak     : {result['first_peak_us']:.3f} us")
     print(f"  peak value        : {result['first_peak_value']:.4g} mV")
     print(f"  threshold         : {result['threshold']:.4g} mV")
-    print(f"  quarter-cycle corr: {result['quarter_cycle_us']:.3f} \u00b5s")
-    print(f"  raw arrival       : {result['arrival_us']:.3f} \u00b5s")
-    print(f"  max element delay : {result['max_delay_us']:.3f} \u00b5s")
+    print(f"  quarter-cycle corr: {result['quarter_cycle_us']:.3f} us")
+    print(f"  raw arrival       : {result['arrival_us']:.3f} us")
+    print(f"  max element delay : {result['max_delay_us']:.3f} us")
     corrected_us = result["arrival_us"] - result["max_delay_us"]
-    print(f"  corrected arrival : {corrected_us:.3f} \u00b5s")
+    print(f"  corrected arrival : {corrected_us:.3f} us")
     print(f"  SoS               : {result['sos_m_per_s']:.0f} m/s")
     print(f"  distance          : {result['distance_mm']:.3f} mm")
 
@@ -175,25 +175,24 @@ def main():
                alpha=0.8,
                label=f"prominence threshold ({result['threshold']:.3g} mV)")
     ax.axvspan(t_us[0], args.skip_us, color="grey", alpha=0.15,
-               label=f"skip < {args.skip_us:g} \u00b5s")
+               label=f"skip < {args.skip_us:g} us")
     ax.axvline(result["first_peak_us"], color="tab:orange",
                ls="--", lw=1.2, label="1st RF peak (above threshold)")
     ax.axvline(result["arrival_us"], color="tab:red",
                ls="--", lw=1.5,
-               label=(f"arrival = peak \u2212 \u00bc cycle "
-                      f"({result['quarter_cycle_us']:.2f} \u00b5s)"))
+               label=(f"arrival = peak - quarter-cycle "
+                      f"({result['quarter_cycle_us']:.2f} us)"))
     if result["max_delay_us"] > 0:
-        corrected_us = result["arrival_us"] - result["max_delay_us"]
-        ax.axvline(corrected_us, color="tab:green",
+        ax.axvline(result["max_delay_us"], color="tab:green",
                    ls="-.", lw=1.5,
-                   label=(f"corrected = arrival \u2212 max_delay "
-                          f"({result['max_delay_us']:.2f} \u00b5s)"))
-    ax.set_xlabel("time (\u00b5s, relative to emission)")
+                   label=(f"corrected origin = max_delay "
+                          f"({result['max_delay_us']:.2f} us)"))
+    ax.set_xlabel("time (us, relative to emission)")
     ax.set_ylabel("hydrophone (mV, averaged)")
     focus_title = ("plane wave" if result["z_focus_mm"] is None
                    else f"focus @ z = {result['z_focus_mm']:.1f} mm")
     ax.set_title(
-        f"Arrival-time calibration ({focus_title})  \u2192  "
+        f"Arrival-time calibration ({focus_title}):  "
         f"distance = {result['distance_mm']:.3f} mm"
     )
     ax.grid(True, alpha=0.3)

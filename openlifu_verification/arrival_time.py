@@ -14,7 +14,7 @@ leverages the predictable sinusoidal shape of the RF signal:
    own signature.
 3. That first positive crest sits a quarter-cycle after the
    sinusoid's leading zero-crossing (the moment the wavefront
-   "actually arrived"), so subtract ``250 / frequency_kHz`` \u00b5s.
+   "actually arrived"), so subtract ``250 / frequency_kHz`` us.
 
 Combined with a plane-wave excitation (all elements fire
 simultaneously, so ``max(tof) == min(tof) == 0``), this gives a direct
@@ -43,12 +43,12 @@ class ArrivalResult:
     """Output of :func:`find_first_arrival_us`.
 
     Attributes:
-        first_peak_us: Time (\u00b5s) of the first RF local maximum
+        first_peak_us: Time (us) of the first RF local maximum
             after ``skip_us`` that exceeded the prominence threshold.
         first_peak_value: Trace value at that peak, in the trace's
             native units.
         arrival_us: ``first_peak_us`` minus a quarter carrier cycle
-            \u2014 the estimated moment the sinusoidal wavefront's
+            -- the estimated moment the sinusoidal wavefront's
             leading zero-crossing arrived.
         quarter_cycle_us: The ``250 / frequency_kHz`` correction
             applied.
@@ -79,16 +79,16 @@ def find_first_arrival_us(t_us: np.ndarray,
     leading zero-crossing.
 
     Args:
-        t_us: Sample-time axis in \u00b5s (monotonically increasing).
-        trace: 1-D trace (native units \u2014 mV or Pa, doesn't
+        t_us: Sample-time axis in us (monotonically increasing).
+        trace: 1-D trace (native units -- mV or Pa, doesn't
             matter, the picker is amplitude-independent).
         frequency_kHz: Carrier frequency in kHz; used for the
             quarter-cycle correction.
-        skip_us: Ignore everything before this time (\u00b5s). Defaults
-            to 12 \u00b5s to skip the trigger flash / cross-talk.
+        skip_us: Ignore everything before this time (us). Defaults
+            to 12 us to skip the trigger flash / cross-talk.
         min_prominence_frac: Local maxima whose value is below
             ``min_prominence_frac`` * global-positive-peak are rejected
-            as noise. Default 0.05 (5% of the burst peak) \u2014 well
+            as noise. Default 0.05 (5% of the burst peak) -- well
             above typical noise floors for a 32-pulse coherent average,
             and comfortably below the leading crest of a boxcar-onset
             tone-burst.
@@ -139,7 +139,7 @@ def find_first_arrival_us(t_us: np.ndarray,
     dt_us = float(t_win[1] - t_win[0])
     first_peak_us = float(t_win[idx_peak]) + frac * dt_us
 
-    # 1 / freq_kHz = period in ms; * 1000 => \u00b5s; / 4 => quarter cycle
+    # 1 / freq_kHz = period in ms; * 1000 => us; / 4 => quarter cycle
     # => quarter_cycle_us = 250 / freq_kHz.
     quarter_cycle_us = 250.0 / float(frequency_kHz)
     arrival_us = first_peak_us - quarter_cycle_us

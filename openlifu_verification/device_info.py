@@ -42,7 +42,7 @@ class DeviceInfo:
         """Pull every field we can from ``ver`` (a :class:`VerificationTank`).
 
         Failures on individual reads are logged and left empty rather
-        than raising \u2014 the report can still be filled with the
+        than raising -- the report can still be filled with the
         remaining values.
         """
         info = cls(test_date=datetime.date.today().isoformat())

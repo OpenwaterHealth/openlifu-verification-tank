@@ -28,7 +28,7 @@ def main():
     num_modules = 1
     settings = {
         "frequency_kHz": VerificationTank.DEFAULT_FREQUENCY_KHZ,
-        "voltage": 10.0,
+        "voltage": 20.0,
         "duration_usec": (10 / VerificationTank.DEFAULT_FREQUENCY_KHZ) * 1000.0,
         "interval_msec": 50,
         "pulse_count": 3,
@@ -127,6 +127,9 @@ def main():
                     print(f"  focus:    {focus}")
                     for k, v in settings.items():
                         print(f"  {k}: {v}")
+                elif command == "poll":
+                    trigger_ = ver.lifu.txdevice.get_trigger_json()
+                    print(f"  trigger: {trigger_}")
                 elif "=" in command:
                     key, _, raw_value = command.partition("=")
                     key = key.strip()

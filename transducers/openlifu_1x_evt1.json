@@ -1,6 +1,6 @@
 {
-    "id": "openlifu_1x180_evt1",
-    "name": "OpenLIFU 1x 180kHz Demo",
+    "id": "openlifu_1x_evt1",
+    "name": "OpenLIFU 1x EVT1",
     "elements": [
         {
             "index": 1,
@@ -1219,11 +1219,11 @@
             "units": "mm"
         }
     ],
-    "frequency": 180000.0,
+    "frequency": 400600.0,
     "units": "mm",
     "attrs": {},
-    "registration_surface_filename": "openlifu_1x180_evt1.surf.obj",
-    "transducer_body_filename": "openlifu_1x180_evt1.body.obj",
+    "registration_surface_filename": "openlifu_1x_evt1.surf.obj",
+    "transducer_body_filename": "openlifu_1x_evt1.body.obj",
     "standoff_transform": [
         [
             1.0,

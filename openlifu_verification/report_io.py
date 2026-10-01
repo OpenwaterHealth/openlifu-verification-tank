@@ -2,14 +2,14 @@
 
 Writes a completed :class:`TestReport` to disk in four representations:
 
-- **XLSX** \u2014 an app-compatible "Report" sheet (columns
+- **XLSX** -- an app-compatible "Report" sheet (columns
   ``Index / Item / Value``) plus a "Figures" sheet with embedded PNGs
   and a "Grading" sheet with pass/fail annotations.
-- **PDF** \u2014 one figure per page via
+- **PDF** -- one figure per page via
   :class:`matplotlib.backends.backend_pdf.PdfPages`.
-- **CSV bundle** \u2014 one CSV per scan under ``raw/`` plus a flat
+- **CSV bundle** -- one CSV per scan under ``raw/`` plus a flat
   ``summary.csv`` of every report row.
-- **device_config.json** \u2014 matches the schema consumed by
+- **device_config.json** -- matches the schema consumed by
   ``openlifu_sdk.io.LIFUConfig`` (as used by the openlifu-test-app),
   with the ``module.sensitivity`` matrix computed from the freq
   sweep + a vendored ``FOCAL_GAIN_LUT``.
@@ -315,9 +315,9 @@ def build_figures(report: TestReport) -> dict:
         arrival_us = wf.get("arrival_us")
         if arrival_us is not None and np.isfinite(arrival_us):
             ax.axvline(float(arrival_us), color="tab:red", lw=0.8,
-                       label=f"arrival {float(arrival_us):.2f} \u00b5s")
+                       label=f"arrival {float(arrival_us):.2f} us")
             ax.legend(loc="upper right", fontsize=8)
-        ax.set_xlabel("Time (\u00b5s)")
+        ax.set_xlabel("Time (us)")
         ax.set_ylabel(ylabel)
         pnp_kPa = float(wf.get("pnp_MPa", float("nan"))) * 1000.0
         ax.set_title(
@@ -357,7 +357,7 @@ def build_figures(report: TestReport) -> dict:
         fit = slope_kPa_per_V * volts + intercept_kPa
         fig, ax = plt.subplots(figsize=(6, 3.2))
         ax.plot(volts, pnp_kPa, "o", label="measured")
-        ax.plot(volts, fit, "-", lw=1, label=f"fit (R\u00b2={r2:.4f})")
+        ax.plot(volts, fit, "-", lw=1, label=f"fit (R**2={r2:.4f})")
         ax.set_xlabel("HV rail (V)")
         ax.set_ylabel("PNP (kPa)")
         ax.set_title(f"Figure 7: Voltage linearity @ {report.frequency_kHz:.0f} kHz")
@@ -494,11 +494,11 @@ def write_xlsx(report: TestReport, path: Path, figures: Optional[dict] = None) -
         exp = arr.get("expected_us")
         got = arr.get("arrival_us")
         sws.append(["Arrival check",
-                    f"got {got:.2f}\u00b5s vs expected {exp:.2f}\u00b5s "
+                    f"got {got:.2f}us vs expected {exp:.2f}us "
                     f"({'PASS' if arr.get('passed') else 'FAIL'})"
                     if got is not None else "no signal"])
     if report.voltage_response:
-        sws.append(["Voltage linearity R\u00b2",
+        sws.append(["Voltage linearity R**2",
                     f"{report.voltage_response.get('r2', float('nan')):.4f}"])
     verdict_cell = sws.cell(row=2, column=2)
     verdict_cell.fill = green if report.overall_pass else red

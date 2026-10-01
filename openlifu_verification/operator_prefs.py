@@ -79,7 +79,7 @@ class OperatorPrefs:
         for required fields.
 
         ``freq_kHz`` is displayed but not stored (it comes from the CLI
-        flag) \u2014 shown so the operator can double-check they set the
+        flag) -- shown so the operator can double-check they set the
         right label.
         """
         if freq_kHz is not None:

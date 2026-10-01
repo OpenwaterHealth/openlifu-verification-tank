@@ -3,7 +3,7 @@ import logging as _logging
 from .picoscope import Picoscope
 from .qpx600dp import QPX600DP
 from .scan_results import ScanResult
-from .verificationtank import VerificationTank
+from .verificationtank import HardwareNotConnectedError, VerificationTank
 from .hydrophone import Hydrophone
 from .operator_prefs import OperatorPrefs
 from .acceptance import AcceptanceCriteria
@@ -48,6 +48,7 @@ __all__ = [
     "ScanResult",
     "VerificationTank",
     "Hydrophone",
+    "HardwareNotConnectedError",
     "OperatorPrefs",
     "AcceptanceCriteria",
     "DeviceInfo",

@@ -56,7 +56,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from openlifu_verification import Hydrophone, OperatorPrefs
+from openlifu_verification import HardwareNotConnectedError, Hydrophone, OperatorPrefs
 
 
 logger = logging.getLogger(__name__)
@@ -500,6 +500,10 @@ class _RunSignals(QObject):
 
     finished = pyqtSignal(object)  # emits RunResult (or None on error)
     failed = pyqtSignal(str)       # emits traceback string
+    #: Emitted when the run aborted because a required piece of
+    #: hardware is disconnected. Payload is a short, user-facing
+    #: message (no traceback).
+    hardware_disconnected = pyqtSignal(str, str)  # (hardware, message)
 
 
 class _WorkerThread(QThread):
@@ -515,6 +519,9 @@ class _WorkerThread(QThread):
         try:
             result = run_report.run(self._args)
             self._signals.finished.emit(result)
+        except HardwareNotConnectedError as e:
+            logger.error("Hardware not connected (%s): %s", e.hardware, e)
+            self._signals.hardware_disconnected.emit(str(e.hardware), str(e))
         except Exception:  # noqa: BLE001 - report + swallow to GUI
             tb = traceback.format_exc()
             logger.error("Run failed:\n%s", tb)
@@ -545,7 +552,7 @@ class LauncherDialog(QDialog):
                  prefs: OperatorPrefs,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
-        title = "OpenLIFU Verification \u2014 Run Report"
+        title = "OpenLIFU Verification -- Run Report"
         if getattr(args, "dry_run", False):
             title += "  [DRY RUN]"
         self.setWindowTitle(title)
@@ -1018,7 +1025,7 @@ class RunningDialog(QDialog):
     def __init__(self, *, dry_run: bool = False,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
-        title = "OpenLIFU Verification \u2014 Running"
+        title = "OpenLIFU Verification -- Running"
         if dry_run:
             title += "  [DRY RUN]"
         self.setWindowTitle(title)
@@ -1126,7 +1133,7 @@ class ResultDialog(QDialog):
     def __init__(self, result: run_report.RunResult,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setWindowTitle("OpenLIFU Verification \u2014 Complete")
+        self.setWindowTitle("OpenLIFU Verification -- Complete")
         self.setModal(True)
 
         pal = current_palette()
@@ -1324,6 +1331,7 @@ def main(argv=None) -> int:
     signals = _RunSignals()
     result_holder: dict[str, Optional[run_report.RunResult]] = {"r": None}
     error_holder: dict[str, Optional[str]] = {"tb": None}
+    hw_holder: dict[str, Optional[tuple[str, str]]] = {"info": None}
 
     def _on_finished(res):
         result_holder["r"] = res
@@ -1333,8 +1341,15 @@ def main(argv=None) -> int:
         error_holder["tb"] = tb
         running.reject()
 
+    def _on_hardware_disconnected(hardware, message):
+        hw_holder["info"] = (hardware, message)
+        running.reject()
+
     signals.finished.connect(_on_finished, Qt.ConnectionType.QueuedConnection)
     signals.failed.connect(_on_failed, Qt.ConnectionType.QueuedConnection)
+    signals.hardware_disconnected.connect(
+        _on_hardware_disconnected, Qt.ConnectionType.QueuedConnection,
+    )
 
     worker = _WorkerThread(args, signals)
     worker.start()
@@ -1345,6 +1360,15 @@ def main(argv=None) -> int:
     # (e.g. under a test harness) don't stack duplicates on the root
     # logger.
     logging.getLogger().removeHandler(handler)
+
+    if hw_holder["info"] is not None:
+        hardware, message = hw_holder["info"]
+        QMessageBox.warning(
+            None,
+            f"{hardware} not connected",
+            message,
+        )
+        return 2
 
     if error_holder["tb"] is not None:
         QMessageBox.critical(

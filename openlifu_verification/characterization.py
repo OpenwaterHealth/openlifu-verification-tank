@@ -37,7 +37,7 @@ from scipy.signal import hilbert
 from .acceptance import AcceptanceCriteria
 from .device_info import DeviceInfo
 from .operator_prefs import OperatorPrefs
-from .scan_config import ScanConfig, choose_range_mv
+from .scan_config import PICOSCOPE_RANGES_MV, ScanConfig, choose_range_mv
 from .scan_results import ScanResult
 
 logger = logging.getLogger(__name__)
@@ -104,7 +104,7 @@ ROW = {
     "focused_depth_mm":      "D.16",
 }
 
-# Voltage-linearity R\u00b2 lives at F.8 (the row on which the F section's
+# Voltage-linearity R**2 lives at F.8 (the row on which the F section's
 # PASS/FAIL is graded). Individual F.2 - F.7 PNP rows are informational
 # only.
 ROW["voltage_r2"] = "F.8"
@@ -191,7 +191,7 @@ class TestReport:
 def _find_arrival_us(t_us: np.ndarray, trace: np.ndarray,
                      *, envelope_frac: float = 0.15,
                      skip_us: float = 0.0) -> Optional[float]:
-    """First-arrival time (\u00b5s) via Hilbert-envelope threshold crossing.
+    """First-arrival time (us) via Hilbert-envelope threshold crossing.
 
     Returns ``None`` if no sample of the envelope exceeds ``envelope_frac``
     of the peak envelope (i.e. no clear signal).
@@ -313,7 +313,7 @@ class Characterization:
 
     Args:
         ver: A live :class:`VerificationTank` (or :class:`DryRunTank`).
-        prefs: :class:`OperatorPrefs` \u2014 supplies tester name, serial
+        prefs: :class:`OperatorPrefs` -- supplies tester name, serial
             numbers, hydrophone S/N.
         criteria: :class:`AcceptanceCriteria`. If ``None``, defaults
             are used and every graded row will still get a threshold
@@ -436,8 +436,8 @@ class Characterization:
         }
         self.report.arrival_check = result
         logger.info(
-            "Arrival check: measured=%s expected=%.2f\u00b5s tol=\u00b1%.2f\u00b5s \u2192 %s",
-            f"{arrival_us:.2f}\u00b5s" if arrival_us is not None else "n/a",
+            "Arrival check: measured=%s expected=%.2fus tol=\u00b1%.2fus \u2192 %s",
+            f"{arrival_us:.2f}us" if arrival_us is not None else "n/a",
             expected_us, tol_us, "PASS" if passed else "FAIL",
         )
         return result
@@ -446,7 +446,7 @@ class Characterization:
                                     voltage_V: Optional[float] = None,
                                     n_pulses: int = 32,
                                     duration_usec: float = 8.0,
-                                    skip_us: float = 12.0,
+                                    skip_us: Optional[float] = None,
                                     ) -> dict:
         """Run the plane-wave depth calibration.
 
@@ -462,9 +462,10 @@ class Characterization:
                 to ``self.voltage_V`` (i.e. reuses the acceptance
                 rail).
             n_pulses: Number of pulses in the averaged burst.
-            duration_usec: Per-pulse duration (\u00b5s).
+            duration_usec: Per-pulse duration (us).
             skip_us: Ignore samples before this time when hunting
-                for the first arrival.
+                for the first arrival. Defaults to
+                ``scan_config.scope.depth_cal_skip_us``.
 
         Returns:
             The full result dict from
@@ -473,15 +474,18 @@ class Characterization:
         v = float(self.voltage_V if voltage_V is None else voltage_V)
         cfg = self.scan_config
         scope_kw = cfg.scope_kwargs()
+        skip = (float(skip_us) if skip_us is not None
+                else float(cfg.scope.depth_cal_skip_us))
         logger.info(
-            "Plane-wave depth calibration: %d pulses @ %.1f V, %.1f \u00b5s each",
-            n_pulses, v, duration_usec,
+            "Plane-wave depth calibration: %d pulses @ %.1f V, %.1f us each, "
+            "skip_us=%.1f",
+            n_pulses, v, duration_usec, skip,
         )
         result = self.ver.calibrate_hydrophone_depth(
             voltage_V=v,
             n_pulses=n_pulses,
             duration_usec=duration_usec,
-            skip_us=skip_us,
+            skip_us=skip,
             time_start_us=scope_kw.get("time_start_s", 0.0) * 1e6
                 if scope_kw.get("time_start_s") is not None else 0.0,
             time_stop_us=scope_kw.get("time_stop_s", 100e-6) * 1e6
@@ -497,7 +501,7 @@ class Characterization:
             ROW["plane_wave_arrival_us"],
             "Plane-Wave Arrival Time",
             float(result["arrival_us"]),
-            unit="\u00b5s",
+            unit="us",
         )
         self.report.set_row(
             ROW["plane_wave_depth_mm"],
@@ -506,14 +510,14 @@ class Characterization:
             unit="mm",
         )
         logger.info(
-            "Plane-wave depth: arrival=%.3f \u00b5s, distance=%.3f mm "
+            "Plane-wave depth: arrival=%.3f us, distance=%.3f mm "
             "(hydrophone_position[2] updated)",
             float(result["arrival_us"]), float(result["distance_mm"]),
         )
         # Grade D.3 inline so the operator sees the plane-wave depth
         # verdict alongside the raw measurement.
         self._grade_hydrophone_depth()
-        # calibrate_hydrophone_depth leaves the LIFU armed with 8 \u00b5s
+        # calibrate_hydrophone_depth leaves the LIFU armed with 8 us
         # / 30 V / 32-pulse / single-trigger settings. Restore the
         # acceptance rail + default 20-cycle burst so find_peak and
         # the beam scans that follow don't fire the wrong pulse.
@@ -662,7 +666,7 @@ class Characterization:
                 voltage_V=float(self.voltage_V),
                 n_pulses=32,
                 duration_usec=8.0,
-                skip_us=12.0,
+                skip_us=float(cfg.scope.depth_cal_skip_us),
                 time_start_us=(scope_kw.get("time_start_s", 0.0) or 0.0)
                               * 1e6,
                 time_stop_us=(scope_kw.get("time_stop_s", 100e-6) or 100e-6)
@@ -740,7 +744,7 @@ class Characterization:
         self.report.set_row(ROW["focused_arrival_us"],
                             "Focused Pulse Arrival Time",
                             arrival_us if arrival_us is not None else float("nan"),
-                            unit="\u00b5s")
+                            unit="us")
         self.report.set_row(ROW["focused_depth_mm"],
                             "Focused Pulse Hydrophone Depth",
                             axial_depth_mm, unit="mm")
@@ -748,7 +752,7 @@ class Characterization:
             "Waveform at peak: PNP=%.3f MPa, arrival=%s, depth=%.2f mm "
             "(sos=%.0f m/s)",
             pnp_MPa,
-            f"{arrival_us:.2f}\u00b5s" if arrival_us is not None else "n/a",
+            f"{arrival_us:.2f}us" if arrival_us is not None else "n/a",
             axial_depth_mm, sos_m_per_s,
         )
         # Grade inline so the operator sees the PASS/FAIL verdict
@@ -813,7 +817,7 @@ class Characterization:
         The scope's vertical range is picked once as the widest
         predicted across all voltages, so every point is captured in a
         single rapid-block pass. The trade-off is coarser vertical
-        resolution on the low-voltage points, but the linearity R\u00b2
+        resolution on the low-voltage points, but the linearity R**2
         computation is unaffected because peak amplitude is what
         matters.
 
@@ -833,6 +837,39 @@ class Characterization:
         # if we can't predict amplitudes yet (no baseline waveform,
         # no hydrophone).
         base_peak_mV = self._predict_peak_mV_at_ref()
+        baseline_range_mV = int(cfg.scope.hydrophone_range_mv)
+        # If the baseline waveform_at_peak capture saturated the scope,
+        # the predicted peak equals the range and every downstream
+        # scaling estimate would come out too small (the classic
+        # "linear R^2=1.0 straight line clipped to the range ceiling"
+        # symptom). Re-probe on progressively wider ranges until the
+        # capture is comfortably unclipped, and use that peak instead.
+        SATURATION_FRAC = 0.95
+        if (base_peak_mV is not None
+                and base_peak_mV >= SATURATION_FRAC * baseline_range_mV):
+            logger.warning(
+                "waveform_at_peak was clipped (%.1f mV >= %.0f%% of "
+                "+/-%d mV baseline range); re-probing on wider range "
+                "before sizing voltage sweep",
+                base_peak_mV, SATURATION_FRAC * 100.0, baseline_range_mV,
+            )
+            reprobed = self._probe_unclipped_peak_mV(
+                saturation_frac=SATURATION_FRAC,
+            )
+            if reprobed is not None:
+                logger.info(
+                    "Re-probed unclipped peak = %.1f mV "
+                    "(was %.1f mV clipped at +/-%d mV)",
+                    reprobed, base_peak_mV, baseline_range_mV,
+                )
+                base_peak_mV = reprobed
+            else:
+                logger.warning(
+                    "Could not obtain an unclipped peak on any wider "
+                    "range; sweep range will fall back to voltage_sweep."
+                    "range_mv floor.",
+                )
+                base_peak_mV = None
         widest_range = None
         if base_peak_mV is not None and self.voltage_V > 0:
             headroom = cfg.scope.voltage_scan_headroom_pct
@@ -841,7 +878,17 @@ class Characterization:
                                 headroom_pct=headroom)
                 for v in volts
             )
-        if widest_range is not None and hasattr(self.ver, "set_hydrophone_range"):
+        # Apply the configured voltage-sweep floor (quantized up to a
+        # valid PicoScope range). Guarantees the sweep uses at least
+        # this range even when the auto prediction is missing or too
+        # small (e.g. clipped baseline waveform, no hydrophone).
+        sweep_floor_mV = int(cfg.voltage_sweep.range_mv)
+        sweep_floor = next((r for r in PICOSCOPE_RANGES_MV
+                            if r >= sweep_floor_mV),
+                           PICOSCOPE_RANGES_MV[-1])
+        widest_range = (sweep_floor if widest_range is None
+                        else max(widest_range, sweep_floor))
+        if hasattr(self.ver, "set_hydrophone_range"):
             try:
                 self.ver.set_hydrophone_range(int(widest_range))
                 logger.info(
@@ -875,15 +922,15 @@ class Characterization:
             row_id = f"F.{i}"
             label = f"PNP ({int(round(v))}V/{int(round(2*v))}Vpp)"
             self.report.set_row(row_id, label, float(p), unit="MPa")
-        # F.8 carries the linearity R\u00b2 (the metric the section's
+        # F.8 carries the linearity R**2 (the metric the section's
         # PASS/FAIL is graded on). The individual F.2 - F.7 PNP rows
         # stay ungraded (status="NA") so their values aren't
         # misinterpreted as per-voltage acceptance results.
-        self.report.set_row(ROW["voltage_r2"], "Voltage Linearity R\u00b2",
+        self.report.set_row(ROW["voltage_r2"], "Voltage Linearity R**2",
                             float(r2))
-        logger.info("Voltage linearity: slope=%.4f MPa/V  R\u00b2=%.4f",
+        logger.info("Voltage linearity: slope=%.4f MPa/V  R**2=%.4f",
                     slope, r2)
-        # Grade inline so R\u00b2 PASS/FAIL is logged as soon as the
+        # Grade inline so R**2 PASS/FAIL is logged as soon as the
         # sweep finishes.
         self._grade_voltage_linearity()
         return result
@@ -905,11 +952,11 @@ class Characterization:
         re-steer to the current ``hydrophone_position``.
 
         :meth:`VerificationTank.calibrate_hydrophone_depth` mutates the
-        LIFU (voltage=30 V, duration=8 \u00b5s, pulse_count=32,
+        LIFU (voltage=30 V, duration=8 us, pulse_count=32,
         trigger_mode="single") AND calls ``set_focus(0, 0, z_focus)``,
         never restoring either. Any phase that fires pulses afterwards
-        \u2014 :meth:`find_peak`, the beam scans, the frequency /
-        voltage sweeps \u2014 would inherit those stale settings and see
+        -- :meth:`find_peak`, the beam scans, the frequency /
+        voltage sweeps -- would inherit those stale settings and see
         a transient short-burst field at the wrong rail steered at
         the array center (a sidelobe when the peak is off-axis)
         instead of the steady-state 20-cycle burst focused at the
@@ -972,6 +1019,83 @@ class Characterization:
         peak_v = peak / pa_per_v
         return peak_v * 1000.0  # mV
 
+    def _probe_unclipped_peak_mV(self, *,
+                                 max_range_mv: int = 5000,
+                                 saturation_frac: float = 0.95,
+                                 ) -> Optional[float]:
+        """Fire a single pulse at the calibrated peak on progressively
+        wider scope ranges until the capture is unclipped.
+
+        Used by :meth:`sweep_voltage` when the baseline
+        ``waveform_at_peak`` capture appears to have saturated the
+        PicoScope. Iterates :data:`PICOSCOPE_RANGES_MV` starting above
+        the current baseline range; on each range fires
+        :meth:`VerificationTank.measure_pressure` at the calibrated
+        hydrophone position (same pulse settings as the acceptance
+        run) and returns the peak amplitude in mV as soon as the
+        capture stays below ``saturation_frac`` of that range.
+
+        Restores the baseline scope range on return.
+
+        Returns:
+            Peak amplitude in mV at the current ``self.voltage_V``, or
+            ``None`` if no wider range yielded an unclipped capture
+            (e.g. no hydrophone, no scope, or truly saturating at
+            ``max_range_mv``).
+        """
+        if not hasattr(self.ver, "set_hydrophone_range"):
+            return None
+        pos = self.ver.hydrophone_position
+        cfg = self.scan_config
+        baseline_range = int(cfg.scope.hydrophone_range_mv)
+        scope_kw = cfg.scope_kwargs()
+        hyd = getattr(self.ver, "hydrophone", None)
+        pa_per_v: Optional[float] = None
+        if hyd is not None:
+            try:
+                pa_per_v = float(hyd.get_frequency_response(
+                    self.frequency_kHz * 1e3))
+                if pa_per_v <= 0:
+                    pa_per_v = None
+            except Exception:
+                pa_per_v = None
+        try:
+            for r in PICOSCOPE_RANGES_MV:
+                if r <= baseline_range:
+                    continue
+                if r > max_range_mv:
+                    break
+                try:
+                    self.ver.set_hydrophone_range(int(r))
+                except Exception as e:
+                    logger.debug("set_hydrophone_range(%d) failed: %s", r, e)
+                    continue
+                meas = self.ver.measure_pressure(
+                    float(pos[0]), float(pos[1]), float(pos[2]),
+                    **scope_kw,
+                )
+                if meas is None:
+                    logger.debug("Probe at +/-%d mV: scope timeout", r)
+                    continue
+                trace = np.asarray(meas["trace"], dtype=float)
+                if trace.size == 0:
+                    continue
+                if meas.get("units") == "Pa":
+                    if pa_per_v is None:
+                        continue
+                    peak_mV = float(np.max(np.abs(trace))) / pa_per_v * 1e3
+                else:
+                    peak_mV = float(np.max(np.abs(trace)))
+                logger.info(
+                    "Probe at +/-%d mV: peak=%.1f mV (%.0f%% of range)",
+                    r, peak_mV, 100.0 * peak_mV / float(r),
+                )
+                if peak_mV < saturation_frac * float(r):
+                    return peak_mV
+            return None
+        finally:
+            self._apply_baseline_range()
+
     # ------------------------------------------------------------------
     # Grading
     # ------------------------------------------------------------------
@@ -1005,8 +1129,8 @@ class Characterization:
         expected_us = arr.get("expected_us")
         tol_us = arr.get("tol_us")
         if expected_us is not None and tol_us is not None:
-            note = (f"measured={arr.get('arrival_us', float('nan')):.2f} \u00b5s, "
-                    f"expected={expected_us:.2f} \u00b1 {tol_us:.2f} \u00b5s "
+            note = (f"measured={arr.get('arrival_us', float('nan')):.2f} us, "
+                    f"expected={expected_us:.2f} \u00b1 {tol_us:.2f} us "
                     f"(tol \u00b1{self.criteria.arrival_time.tol_pct:g}%)")
         else:
             note = arr.get("reason", "")
@@ -1077,7 +1201,7 @@ class Characterization:
         return passed
 
     def _grade_voltage_linearity(self) -> Optional[bool]:
-        """Stamp the F.8 R\u00b2 row with PASS/FAIL and log the verdict.
+        """Stamp the F.8 R**2 row with PASS/FAIL and log the verdict.
         The individual F.2 - F.7 PNP rows are left with ``status="NA"``
         so their values aren't misinterpreted as per-voltage
         acceptance results."""
@@ -1087,7 +1211,7 @@ class Characterization:
         r2 = float(vr["r2"])
         r2_min = float(self.criteria.voltage_linearity.r2_min)
         passed = r2 >= r2_min
-        note = f"R\u00b2 = {r2:.4f} (min {r2_min})"
+        note = f"R**2 = {r2:.4f} (min {r2_min})"
         if ROW["voltage_r2"] in self.report.rows:
             self.report.grade_row(ROW["voltage_r2"], passed=passed,
                                   threshold=r2_min, note=note)
@@ -1096,7 +1220,7 @@ class Characterization:
         return passed
 
     def _grade_peak_offset(self) -> Optional[bool]:
-        """Peak offset from nominal (0, 0). No dedicated report row \u2014
+        """Peak offset from nominal (0, 0). No dedicated report row --
         log-only for now."""
         if not self.report.peak_xy_mm:
             return None

@@ -145,11 +145,11 @@ def main():
     parser.add_argument("--depth-pulse-count", type=int, default=32,
                         help="[depth-cal] Pulses averaged (default 32).")
     parser.add_argument("--depth-duration-usec", type=float, default=8.0,
-                        help="[depth-cal] Per-pulse duration (default 8 \u00b5s).")
+                        help="[depth-cal] Per-pulse duration (default 8 us).")
     parser.add_argument("--depth-skip-us", type=float, default=12.0,
                         help="[depth-cal] Ignore samples before this time "
                              "when searching for the first arrival "
-                             "(default 12 \u00b5s).")
+                             "(default 12 us).")
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument("--verbose", "-v", action="store_true")
     verbosity.add_argument("--quiet", "-q", action="store_true")
@@ -189,7 +189,7 @@ def main():
                 )
                 logger.info(
                     "Depth calibration \u2192 z = %.3f mm "
-                    "(arrival=%.3f \u00b5s, %d pulses)",
+                    "(arrival=%.3f us, %d pulses)",
                     depth_result["distance_mm"],
                     depth_result["arrival_us"],
                     depth_result["n_pulses_used"],

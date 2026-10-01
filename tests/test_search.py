@@ -361,7 +361,7 @@ def test_grid_walk_pauses_at_iteration_boundaries():
     )
     # At minimum: 1 seed emit, >=1 walk emit, 1 final fit emit.
     assert len(iter_ends) >= 3
-    # The final emit corresponds to convergence + fit \u2014 verify
+    # The final emit corresponds to convergence + fit -- verify
     # the last on_progress call carried ``done=True``.
     last_done: list[bool] = []
 

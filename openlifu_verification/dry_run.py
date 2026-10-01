@@ -136,8 +136,8 @@ class DryRunTank:
     def _synth_trace(self, amp_Pa, z_mm, t_us):
         """Return a synthetic trace: raised-cosine burst at expected arrival.
 
-        ``t_us`` is the emission-referenced time axis (\u00b5s), so the
-        arrival time is simply ``z_mm / SOS`` (SOS = 1.5 mm/\u00b5s in
+        ``t_us`` is the emission-referenced time axis (us), so the
+        arrival time is simply ``z_mm / SOS`` (SOS = 1.5 mm/us in
         water) with no transmit-delay offset applied.
         """
         arrival_us = float(z_mm) / 1.5
@@ -156,7 +156,7 @@ class DryRunTank:
         return trace
 
     def _make_time_axis(self, time_start_s, time_stop_s, sampling_interval_ns):
-        """Emission-referenced time axis in \u00b5s (matches VerificationTank)."""
+        """Emission-referenced time axis in us (matches VerificationTank)."""
         n = int(round((time_stop_s - time_start_s) / (sampling_interval_ns * 1e-9))) + 1
         return np.linspace(time_start_s * 1e6, time_stop_s * 1e6, n)
 

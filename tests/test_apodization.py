@@ -298,20 +298,20 @@ class TestWithTransducer:
     """Verify the positional helpers work with the real
     :class:`_TransducerData` loaded from a JSON file."""
 
-    def test_1x400_all(self):
+    def test_1x_all(self):
         # Import lazily so pytest collection doesn't touch numpy-heavy
         # SDK imports.
         from openlifu_verification.verificationtank import _TransducerData
-        path = "transducers/openlifu_1x400_evt1.json"
+        path = "transducers/openlifu_1x_evt1.json"
         arr = _TransducerData.from_file(path)
         arr.sort_by_pin()
 
         mask = apo.element_disk(arr, 0.0, 0.0, r=1000.0)
         assert apo.count_active(mask) == arr.numelements()
 
-    def test_1x400_center(self):
+    def test_1x_center(self):
         from openlifu_verification.verificationtank import _TransducerData
-        path = "transducers/openlifu_1x400_evt1.json"
+        path = "transducers/openlifu_1x_evt1.json"
         arr = _TransducerData.from_file(path)
         arr.sort_by_pin()
 
