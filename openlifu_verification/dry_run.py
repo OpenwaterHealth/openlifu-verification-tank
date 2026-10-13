@@ -10,8 +10,8 @@ hardware.
 
 Every measurement is a rotated-anisotropic 2-D Gaussian in ``(x, y)``,
 scaled by voltage and modulated by a low-Q frequency-response curve
-centered on ``nominal_frequency_kHz``. Traces are single-cycle
-raised-cosine bursts arriving at ``z / 1.5`` µs in the
+centered on ``nominal_frequency_kHz``. Traces are 20-cycle tone
+bursts (one-cycle cosine ramps) arriving at ``z / 1.5`` µs in the
 emission-relative time frame that :class:`VerificationTank` also
 exposes.
 """
@@ -45,14 +45,16 @@ class DryRunTank:
         system_transmit_delay_us: float = 114.0,
         rng_seed: Optional[int] = 0,
         use_calibration: bool = True,
+        fw_version: str = "1.2.4",                       # >= acceptance default
     ):
         self.frequency = float(frequency)
         self.hydrophone_position = np.array(hydrophone_position, dtype=float).reshape(3)
         self.system_transmit_delay_us = float(system_transmit_delay_us)
         self.hv_voltage: Optional[float] = None
         self.hydrophone_channel = "A"
-        # Placeholder for the SDK-shaped bits that DeviceInfo pokes at.
-        self.lifu = None
+        # SDK-shaped stub so DeviceInfo can read FW versions / HW IDs
+        # (an empty FW version fails the firmware acceptance gate).
+        self.lifu = _DryLifu(fw_version)
         # Ground truth used for signal synthesis.
         self._peak_xy = tuple(peak_xy)
         self._peak_sigma = tuple(peak_sigma)
@@ -134,7 +136,7 @@ class DryRunTank:
         return self._peak_amp_Pa * gauss * freq_gain * v_scale
 
     def _synth_trace(self, amp_Pa, z_mm, t_us):
-        """Return a synthetic trace: raised-cosine burst at expected arrival.
+        """Return a synthetic trace: tone burst at expected arrival.
 
         ``t_us`` is the emission-referenced time axis (us), so the
         arrival time is simply ``z_mm / SOS`` (SOS = 1.5 mm/us in
@@ -145,11 +147,18 @@ class DryRunTank:
         cycles = 20.0
         f_Hz = self.frequency * 1e3
         burst_dur_us = 1e6 * cycles / f_Hz
+        # Flat-top tone burst with one-cycle cosine ramps, so the
+        # envelope onset is sharp like a real burst (a full-length
+        # raised cosine delays the 15% arrival threshold by ~6 us).
+        ramp_us = 1e6 / f_Hz
+        rel = t_us - arrival_us
         env = np.zeros_like(t_us)
-        mask = (t_us >= arrival_us) & (t_us <= arrival_us + burst_dur_us)
-        # raised-cosine envelope
-        tau = (t_us[mask] - arrival_us) / burst_dur_us
-        env[mask] = 0.5 * (1 - np.cos(2 * np.pi * tau))
+        mask = (rel >= 0.0) & (rel <= burst_dur_us)
+        env[mask] = 1.0
+        up = (rel >= 0.0) & (rel < ramp_us)
+        env[up] = 0.5 * (1 - np.cos(np.pi * rel[up] / ramp_us))
+        down = (rel > burst_dur_us - ramp_us) & (rel <= burst_dur_us)
+        env[down] = 0.5 * (1 - np.cos(np.pi * (burst_dur_us - rel[down]) / ramp_us))
         carrier = np.sin(2 * np.pi * f_Hz * (t_us - arrival_us) * 1e-6)
         trace = amp_Pa * env * carrier
         trace += self._rng.normal(0.0, self._noise_Pa, size=trace.shape)
@@ -435,6 +444,28 @@ class DryRunTank:
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
             },
         )
+
+
+class _DryDevice:
+    """Stub TXM / HV controller exposing what :class:`DeviceInfo` reads."""
+
+    def __init__(self, fw_version: str, hwid_hex: str):
+        self._fw_version = fw_version
+        self._hwid_hex = hwid_hex
+
+    def get_version(self, *_):
+        return self._fw_version
+
+    def get_hardware_id(self, *_, raw_hex=False):
+        return self._hwid_hex
+
+
+class _DryLifu:
+    """Stub ``LIFUInterface`` holding a dry TXM and console."""
+
+    def __init__(self, fw_version: str):
+        self.txdevice = _DryDevice(fw_version, "d00000000000000000000001")
+        self.hvcontroller = _DryDevice(fw_version, "d00000000000000000000002")
 
 
 class _DryHydrophone:

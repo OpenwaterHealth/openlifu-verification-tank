@@ -26,18 +26,20 @@ import argparse
 import json
 import logging
 import sys
+import threading
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from openlifu_verification import (
     Characterization,
     DryRunTank,
     Hydrophone,
     OperatorPrefs,
+    RunAborted,
     ScanConfig,
     VerificationTank,
     characterization,
@@ -61,9 +63,13 @@ def _configure_root_logger(log_file: Path | None = None) -> None:
         h.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
         root.addHandler(h)
     if log_file is not None:
-        fh = logging.FileHandler(log_file)
-        fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s"))
-        root.addHandler(fh)
+        target = str(Path(log_file).resolve())
+        already = any(isinstance(h, logging.FileHandler)
+                      and h.baseFilename == target for h in root.handlers)
+        if not already:
+            fh = logging.FileHandler(log_file)
+            fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s"))
+            root.addHandler(fh)
     root.setLevel(logging.INFO)
 
 
@@ -216,20 +222,42 @@ class RunResult:
     (``"xlsx"``, ``"pdf"``, ``"device_config"``) to the corresponding
     Paths. ``exit_code`` is what ``main`` returns to the OS: 0 on
     pass, 1 on fail, 130 on user abort, 2 on unexpected error.
+    ``aborted`` is set when the run was stopped via ``abort_event``.
     """
     passed: bool = False
     run_dir: Optional[Path] = None
     files: dict[str, Path] = field(default_factory=dict)
     exit_code: int = 1
     device_write_ok: Optional[bool] = None
+    aborted: bool = False
 
 
-def run(args: argparse.Namespace) -> RunResult:
+#: Signature of the ``on_complete`` hook accepted by :func:`run`. The
+#: second argument writes the run's device config to the TXM and
+#: returns success; it is ``None`` when there is nothing writable
+#: (report FAILED, or the frequency sweep was skipped).
+OnComplete = Callable[["RunResult", Optional[Callable[[], bool]]], None]
+
+
+def run(args: argparse.Namespace, *,
+        abort_event: Optional[threading.Event] = None,
+        on_complete: Optional[OnComplete] = None) -> RunResult:
     """Execute the report pipeline with parsed ``args``.
 
     Split out of :func:`main` so a GUI launcher can call the same
     code path in-process, then read ``RunResult.run_dir`` /
     ``RunResult.passed`` to build a completion dialog.
+
+    Args:
+        abort_event: When set, the characterization stops after the
+            phase in progress and the result comes back with
+            ``aborted=True`` (no report is written).
+        on_complete: Called after the report is written, while the
+            hardware is still connected (HV is switched off first).
+            Receives the result and a device-write callable (see
+            :data:`OnComplete`). The connection is closed when the
+            hook returns, so a GUI can block here until the operator
+            has decided whether to write.
     """
     _configure_root_logger(args.log_file)
     if getattr(args, "verbose", False):
@@ -340,7 +368,13 @@ def run(args: argparse.Namespace) -> RunResult:
                 skip_2d=args.skip_2d,
                 skip_frequency=args.skip_frequency,
                 skip_voltage=args.skip_voltage,
+                abort_event=abort_event,
             )
+        except RunAborted:
+            logger.warning("Run aborted by operator; no report written.")
+            result.exit_code = 130
+            result.aborted = True
+            return result
         except KeyboardInterrupt:
             print("\nInterrupted during characterization.", file=sys.stderr)
             result.exit_code = 130
@@ -413,6 +447,24 @@ def run(args: argparse.Namespace) -> RunResult:
                     ok = _write_config_to_device(ver, config_path)
                     result.device_write_ok = bool(ok)
                     print(f"  Write to device: {'OK' if ok else 'FAILED'}")
+
+        if on_complete is not None:
+            write_fn: Optional[Callable[[], bool]] = None
+            if result.passed and not args.skip_frequency:
+                if args.dry_run:
+                    def write_fn() -> bool:
+                        logger.info("DRY RUN: would write %s to device.",
+                                    config_path.name)
+                        return True
+                else:
+                    def write_fn() -> bool:
+                        return _write_config_to_device(ver, config_path)
+            # Don't leave HV up while the operator reviews the result.
+            try:
+                ver.disable_hv_output()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not disable HV before review: %s", e)
+            on_complete(result, write_fn)
 
     return result
 

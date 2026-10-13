@@ -27,6 +27,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -41,6 +42,12 @@ from .scan_config import PICOSCOPE_RANGES_MV, ScanConfig, choose_range_mv
 from .scan_results import ScanResult
 
 logger = logging.getLogger(__name__)
+
+
+class RunAborted(Exception):
+    """Raised by :meth:`Characterization.run` when the caller's abort
+    event is set. Checked between phases, so the phase in progress
+    always completes before the run stops."""
 
 
 # ----------------------------------------------------------------------
@@ -346,6 +353,7 @@ class Characterization:
         self.frequency_kHz = float(frequency_kHz)
         self.voltage_V = float(voltage_V)
         self.plot = bool(plot)
+        self._abort_event: Optional[threading.Event] = None
 
         self.report = TestReport(
             prefs=prefs,
@@ -566,6 +574,7 @@ class Characterization:
             dim="x", scan_range=(-ext, ext), num=pts,
             absolute=False, **scope_kw,
         )
+        self._check_abort()
 
         ext_e = cfg.elevation_1d.extent_mm
         pts_e = cfg.elevation_1d.points
@@ -575,6 +584,7 @@ class Characterization:
             dim="y", scan_range=(-ext_e, ext_e), num=pts_e,
             absolute=False, **scope_kw,
         )
+        self._check_abort()
 
         ext_a = cfg.axial_1d.extent_mm
         pts_a = cfg.axial_1d.points
@@ -584,6 +594,7 @@ class Characterization:
             dim="z", scan_range=(-ext_a, ext_a), num=pts_a,
             absolute=False, **scope_kw,
         )
+        self._check_abort()
 
         ext2 = cfg.scan_2d.extent_mm
         pts2 = cfg.scan_2d.points
@@ -1530,13 +1541,28 @@ class Characterization:
     # ------------------------------------------------------------------
     # Full pipeline
     # ------------------------------------------------------------------
+    def _check_abort(self) -> None:
+        """Raise :class:`RunAborted` if the run's abort event is set."""
+        if self._abort_event is not None and self._abort_event.is_set():
+            logger.warning("Abort requested; stopping characterization.")
+            raise RunAborted("Characterization aborted by operator.")
+
     def run(self, *,
             skip_2d: bool = False,
             skip_frequency: bool = False,
-            skip_voltage: bool = False) -> TestReport:
-        """Run every phase in order and grade."""
+            skip_voltage: bool = False,
+            abort_event: Optional[threading.Event] = None) -> TestReport:
+        """Run every phase in order and grade.
+
+        If ``abort_event`` is given, it is checked between phases (and
+        between the individual beam scans); once set, the current
+        phase finishes and :class:`RunAborted` is raised.
+        """
+        self._abort_event = abort_event
+        self._check_abort()
         self.collect_test_info()
         self.warmup_and_arrival_check()
+        self._check_abort()
         # Refine hydrophone depth via plane-wave arrival BEFORE the
         # peak search so find_peak fires focused pulses at the true
         # array-to-hydrophone distance rather than the operator's
@@ -1549,6 +1575,7 @@ class Characterization:
                 "continuing with the seeded hydrophone_position[2]=%.2f mm.",
                 e, float(self.ver.hydrophone_position[2]),
             )
+        self._check_abort()
         # Wipe any XY drift from a prior calibration / leftover run
         # so the peak search is guaranteed to start from a known,
         # transducer-centered reference. Axial (z) is left intact
@@ -1558,14 +1585,22 @@ class Characterization:
         logger.info("Running fresh find_peak from (x=0, y=0, z=%.2f mm).",
                     float(self.ver.hydrophone_position[2]))
         self.find_peak_xy(x0=0.0, y0=0.0)
-        self.run_beam_scans() if not skip_2d else logger.info("Skipping beam scans (--skip-2d).")
+        self._check_abort()
+        if not skip_2d:
+            self.run_beam_scans()
+            self._check_abort()
+        else:
+            logger.info("Skipping beam scans (--skip-2d).")
         self.measure_waveform_at_peak()
+        self._check_abort()
         if not skip_frequency:
             self.sweep_frequency()
+            self._check_abort()
         else:
             logger.info("Skipping frequency sweep.")
         if not skip_voltage:
             self.sweep_voltage()
+            self._check_abort()
         else:
             logger.info("Skipping voltage sweep.")
         self.grade()

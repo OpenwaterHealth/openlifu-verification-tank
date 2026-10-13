@@ -2,10 +2,16 @@
 
 Presents a small dialog that collects the operator's tester name,
 the three serial numbers (TX, console, hydrophone), and a frequency
-choice, plus a "save calibration data to device" checkbox. Clicking
-Start runs the same pipeline as :mod:`run_report` on a background
-thread while a Running dialog shows a live progress bar, the current
-phase label, and a mini terminal that mirrors the INFO log stream.
+choice. Clicking Start runs the same pipeline as :mod:`run_report`
+on a background thread while a Running dialog shows a live progress
+bar, the current phase label, and a mini terminal that mirrors the
+INFO log stream. The Running dialog's Abort button stops the run
+after the step in progress and returns to the launcher.
+
+When the run completes, the result dialog offers "Write Data to
+Device" (PASS only), "Scan Another" (back to the launcher), and
+"Exit". The hardware connection stays open until one of the latter
+two is chosen so the write can happen from the result dialog.
 
 The launcher deliberately reuses ``run_report.run()`` in-process so
 the two entry points share every behavior (arg parsing, artifact
@@ -22,8 +28,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import queue
 import re
 import sys
+import threading
 import traceback
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
@@ -35,10 +43,9 @@ from typing import Optional
 import run_report
 
 from PyQt6.QtCore import Qt, QObject, QThread, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QFont, QTextCursor
+from PyQt6.QtGui import QDesktopServices, QFont, QFontMetrics, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -498,8 +505,12 @@ class _RunSignals(QObject):
     """Qt signal bundle so the worker can post progress + result back
     to the GUI thread without touching widgets directly."""
 
-    finished = pyqtSignal(object)  # emits RunResult (or None on error)
+    finished = pyqtSignal(object, bool)  # (RunResult, can_write)
     failed = pyqtSignal(str)       # emits traceback string
+    #: Emitted when the run stopped because the operator pressed Abort.
+    aborted = pyqtSignal()
+    #: Emitted after a device write requested from the result dialog.
+    write_done = pyqtSignal(bool)
     #: Emitted when the run aborted because a required piece of
     #: hardware is disconnected. Payload is a short, user-facing
     #: message (no traceback).
@@ -507,18 +518,61 @@ class _RunSignals(QObject):
 
 
 class _WorkerThread(QThread):
-    """Executes :func:`run_report.run` on a background QThread."""
+    """Executes :func:`run_report.run` on a background QThread.
+
+    After the report is written the worker parks inside
+    ``run_report.run``'s ``on_complete`` hook (hardware still
+    connected, HV off) and services commands from the GUI:
+    :meth:`request_write` pushes the device config, :meth:`release`
+    lets the run finish and disconnect.
+    """
 
     def __init__(self, args: argparse.Namespace,
                  signals: _RunSignals, parent: Optional[QObject] = None):
         super().__init__(parent)
         self._args = args
         self._signals = signals
+        self._abort_event = threading.Event()
+        self._commands: queue.Queue[str] = queue.Queue()
+        self._completed = False
+
+    # --- Called from the GUI thread ---
+    def request_abort(self) -> None:
+        self._abort_event.set()
+
+    def request_write(self) -> None:
+        self._commands.put("write")
+
+    def release(self) -> None:
+        self._commands.put("close")
+
+    # --- Worker thread ---
+    def _on_complete(self, result, write_fn) -> None:
+        self._completed = True
+        self._signals.finished.emit(result, write_fn is not None)
+        while True:
+            cmd = self._commands.get()
+            if cmd == "close":
+                return
+            if cmd == "write" and write_fn is not None:
+                try:
+                    ok = bool(write_fn())
+                except Exception:  # noqa: BLE001 - report to GUI
+                    logger.exception("Device write failed")
+                    ok = False
+                self._signals.write_done.emit(ok)
 
     def run(self) -> None:  # noqa: D401 - QThread entry point
         try:
-            result = run_report.run(self._args)
-            self._signals.finished.emit(result)
+            result = run_report.run(
+                self._args,
+                abort_event=self._abort_event,
+                on_complete=self._on_complete,
+            )
+            if result.aborted:
+                self._signals.aborted.emit()
+            elif not self._completed:
+                self._signals.finished.emit(result, False)
         except HardwareNotConnectedError as e:
             logger.error("Hardware not connected (%s): %s", e.hardware, e)
             self._signals.hardware_disconnected.emit(str(e.hardware), str(e))
@@ -544,8 +598,8 @@ class LauncherDialog(QDialog):
     is non-empty. On accept, the dialog persists an ``OperatorPrefs``
     snapshot (so ``run_report.run`` picks up the values through its
     normal load path) and the caller reads
-    :attr:`selected_frequency_kHz` and :attr:`write_config_requested`
-    to fold into the arg namespace before starting the worker.
+    :attr:`selected_frequency_kHz` to fold into the arg namespace
+    before starting the worker.
     """
 
     def __init__(self, args: argparse.Namespace,
@@ -592,9 +646,9 @@ class LauncherDialog(QDialog):
         )
         op_form.setHorizontalSpacing(12)
         op_form.setVerticalSpacing(8)
-        op_form.addRow("Tester name:", self.tester_edit)
-        op_form.addRow("TXM S/N:", self.txm_edit)
-        op_form.addRow("Console S/N:", self.console_edit)
+        op_form.addRow("Tester:", self.tester_edit)
+        op_form.addRow("Assigned TXM S/N:", self.txm_edit)
+        op_form.addRow("Test Console S/N:", self.console_edit)
         op_form.addRow("Hydrophone S/N:", self.hydrophone_edit)
 
         # --- Run configuration group ---
@@ -608,30 +662,21 @@ class LauncherDialog(QDialog):
         if idx >= 0:
             self.freq_combo.setCurrentIndex(idx)
 
-        # Checkbox default is CHECKED per spec; the pass-gate + actual
-        # write logic lives in run_report.run() so the GUI only decides
-        # whether to set --write-config.
-        self.save_cal_checkbox = QCheckBox(
-            "Save calibration data to device on PASS"
-        )
-        self.save_cal_checkbox.setChecked(True)
-
         run_group = QGroupBox("Run configuration")
         run_form = QFormLayout(run_group)
         run_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         run_form.setHorizontalSpacing(12)
         run_form.setVerticalSpacing(8)
         run_form.addRow("Frequency:", self.freq_combo)
-        run_form.addRow("", self.save_cal_checkbox)
 
         # --- Buttons ---
         self.start_button = QPushButton("Start")
         self.start_button.setDefault(True)
-        cancel_button = QPushButton("Cancel")
+        exit_button = QPushButton("Exit")
         button_box = QDialogButtonBox(Qt.Orientation.Horizontal)
         button_box.addButton(self.start_button,
                              QDialogButtonBox.ButtonRole.AcceptRole)
-        button_box.addButton(cancel_button,
+        button_box.addButton(exit_button,
                              QDialogButtonBox.ButtonRole.RejectRole)
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
@@ -685,10 +730,6 @@ class LauncherDialog(QDialog):
             console_sn=self.console_edit.text().strip(),
         )
         return p
-
-    @property
-    def write_config_requested(self) -> bool:
-        return self.save_cal_checkbox.isChecked()
 
     @property
     def selected_frequency_kHz(self) -> float:
@@ -1016,11 +1057,14 @@ class AcceptanceTracker(QWidget):
 class RunningDialog(QDialog):
     """Modal progress dialog shown while the pipeline runs.
 
-    Cancelling this dialog is a no-op on the underlying thread (the
-    characterization has hardware side effects and can't be safely
-    torn down mid-scan). The dialog is dismissed automatically once
-    the worker signals ``finished`` or ``failed``.
+    The dialog can't be dismissed by the operator (Esc / close are
+    ignored); the Abort button asks the worker to stop after the step
+    in progress. The caller closes the dialog via ``done()`` once the
+    worker signals ``finished``, ``aborted``, or ``failed``.
     """
+
+    #: Emitted once when the operator presses Abort.
+    abort_requested = pyqtSignal()
 
     def __init__(self, *, dry_run: bool = False,
                  parent: Optional[QWidget] = None):
@@ -1078,6 +1122,18 @@ class RunningDialog(QDialog):
         self.terminal.setFixedHeight(150)
         log_layout.addWidget(self.terminal)
 
+        # --- Abort ---
+        self._aborting = False
+        self.abort_button = QPushButton("Abort")
+        self.abort_button.setToolTip(
+            "Stop the scan after the current step and return to the "
+            "start screen."
+        )
+        self.abort_button.clicked.connect(self._on_abort_clicked)
+        abort_row = QHBoxLayout()
+        abort_row.addStretch(1)
+        abort_row.addWidget(self.abort_button)
+
         # --- Assemble ---
         sep = QFrame()
         sep.setObjectName("hLine")
@@ -1092,7 +1148,20 @@ class RunningDialog(QDialog):
         layout.addWidget(self.progress)
         layout.addWidget(gates_group)
         layout.addWidget(log_group)
+        layout.addLayout(abort_row)
         self.resize(640, 720)
+
+    def reject(self) -> None:  # noqa: D401 - Qt override
+        """Ignore Esc; the run can only be stopped via Abort."""
+
+    def _on_abort_clicked(self) -> None:
+        self._aborting = True
+        self.abort_button.setEnabled(False)
+        self.abort_button.setText("Aborting\u2026")
+        self.section_label.setText(
+            "Abort requested \u2013 stopping after the current step\u2026"
+        )
+        self.abort_requested.emit()
 
     # ------------------------------------------------------------------
     # Slot
@@ -1121,20 +1190,38 @@ class RunningDialog(QDialog):
             # after the run has moved on.
             if pct > self.progress.value():
                 self.progress.setValue(pct)
-            self.section_label.setText(f"Current phase: {label}")
+            if not self._aborting:
+                self.section_label.setText(f"Current phase: {label}")
 
 
 # ----------------------------------------------------------------------
 # Result dialog
 # ----------------------------------------------------------------------
 class ResultDialog(QDialog):
-    """Modal completion dialog: verdict + hyperlink + Finish."""
+    """Modal completion dialog: verdict, artifact links, and the
+    Write Data to Device / Scan Another / Exit choices.
 
-    def __init__(self, result: run_report.RunResult,
+    The device write itself runs on the worker thread: clicking Write
+    emits :attr:`write_requested`, and the caller routes the worker's
+    reply into :meth:`on_write_done`. After ``exec()`` returns,
+    :attr:`choice` is ``"another"`` or ``"exit"``.
+    """
+
+    write_requested = pyqtSignal()
+
+    _TIP_NOT_PASSING = ("Calibration Data can only be written from a "
+                        "successful report")
+    _TIP_NO_DATA = ("No calibration data was generated for this run "
+                    "(frequency sweep skipped)")
+    _TIP_WRITTEN = "Calibration Data already Written"
+
+    def __init__(self, result: run_report.RunResult, *,
+                 can_write: bool,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setWindowTitle("OpenLIFU Verification -- Complete")
+        self.setWindowTitle("OpenLIFU Calibration -- Complete")
         self.setModal(True)
+        self.choice = "exit"
 
         pal = current_palette()
         verdict = "PASS" if result.passed else "FAIL"
@@ -1166,27 +1253,48 @@ class ResultDialog(QDialog):
                 "Open report XLSX", Path(xlsx), pal
             ))
 
-        # Device-write status line (only shown when write was attempted).
-        write_line: Optional[QLabel] = None
-        if result.device_write_ok is True:
-            write_line = QLabel(
-                f"Calibration data written to device: "
-                f"<b style='color:{pal.success};'>OK</b>."
-            )
-        elif result.device_write_ok is False:
-            write_line = QLabel(
-                f"Calibration data write to device: "
-                f"<b style='color:{pal.danger};'>FAILED</b>."
-            )
-        if write_line is not None:
-            write_line.setTextFormat(Qt.TextFormat.RichText)
+        # Device-write status line; filled in by ``on_write_done``.
+        self.write_line = QLabel()
+        self.write_line.setTextFormat(Qt.TextFormat.RichText)
+        self.write_line.setVisible(False)
 
-        finish_button = QPushButton("Finish")
-        finish_button.setDefault(True)
-        finish_button.clicked.connect(self.accept)
+        self.write_button = QPushButton("Write Data to Device")
+        self.write_button.clicked.connect(self._on_write_clicked)
+        if not result.passed:
+            self.write_button.setEnabled(False)
+            self.write_button.setToolTip(self._TIP_NOT_PASSING)
+        elif not can_write:
+            self.write_button.setEnabled(False)
+            self.write_button.setToolTip(self._TIP_NO_DATA)
+        else:
+            self.write_button.setDefault(True)
+
+        self.another_button = QPushButton("Scan Another")
+        self.another_button.clicked.connect(
+            lambda: self._finish_with("another"))
+        self.exit_button = QPushButton("Exit")
+        self.exit_button.clicked.connect(lambda: self._finish_with("exit"))
+
+        # Keep the blue "default" highlight on Write only; auto-default
+        # buttons would otherwise take it over whenever they get focus.
+        for b in (self.write_button, self.another_button, self.exit_button):
+            b.setAutoDefault(False)
+        # The ``:default`` stylesheet rule renders the label bold, but
+        # Qt sizes the button for the regular font. Reserve room for
+        # the bold text via a per-widget ``min-width`` (content box),
+        # which takes precedence over the app-wide ``min-width: 72px``.
+        # Polish first so ``font()`` reflects the stylesheet font-size.
+        self.write_button.ensurePolished()
+        bold = QFont(self.write_button.font())
+        bold.setBold(True)
+        text_w = QFontMetrics(bold).horizontalAdvance(self.write_button.text())
+        self.write_button.setStyleSheet(f"min-width: {text_w + 4}px;")
+
         button_row = QHBoxLayout()
+        button_row.addWidget(self.write_button)
         button_row.addStretch(1)
-        button_row.addWidget(finish_button)
+        button_row.addWidget(self.another_button)
+        button_row.addWidget(self.exit_button)
 
         artifacts_label = QLabel("Artifacts")
         artifacts_label.setProperty("role", "section")
@@ -1199,13 +1307,70 @@ class ResultDialog(QDialog):
             layout.addWidget(artifacts_label)
             for lbl in link_labels:
                 layout.addWidget(lbl)
-        if write_line is not None:
-            layout.addSpacing(4)
-            layout.addWidget(write_line)
+        layout.addSpacing(4)
+        layout.addWidget(self.write_line)
         layout.addStretch(1)
         layout.addLayout(button_row)
 
-        self.setMinimumWidth(380)
+        self.setMinimumWidth(460)
+
+    # ------------------------------------------------------------------
+    # Write flow
+    # ------------------------------------------------------------------
+    def _on_write_clicked(self) -> None:
+        for b in (self.write_button, self.another_button, self.exit_button):
+            b.setEnabled(False)
+        self.write_button.setText("Writing\u2026")
+        self.write_requested.emit()
+
+    def on_write_done(self, ok: bool) -> None:
+        """Slot for the worker's ``write_done`` signal."""
+        pal = current_palette()
+        self.write_button.setText("Write Data to Device")
+        self.another_button.setEnabled(True)
+        self.exit_button.setEnabled(True)
+        if ok:
+            self.write_button.setEnabled(False)
+            self.write_button.setToolTip(self._TIP_WRITTEN)
+            self.write_line.setText(
+                f"Calibration data written to device: "
+                f"<b style='color:{pal.success};'>OK</b>."
+            )
+        else:
+            # Leave the button enabled so the operator can retry.
+            self.write_button.setEnabled(True)
+            self.write_line.setText(
+                f"Calibration data write to device: "
+                f"<b style='color:{pal.danger};'>FAILED</b>. "
+                f"See the log for details."
+            )
+        self.write_line.setVisible(True)
+
+    # ------------------------------------------------------------------
+    # Leaving the dialog
+    # ------------------------------------------------------------------
+    def _finish_with(self, choice: str) -> None:
+        if self.write_button.isEnabled():
+            answer = QMessageBox.warning(
+                self,
+                "Calibration data not written",
+                "The Calibration Data has not been written to the "
+                "Device. Are you sure you want to Continue?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.choice = choice
+        self.done(QDialog.DialogCode.Accepted)
+
+    def reject(self) -> None:  # noqa: D401 - Qt override
+        """Treat Esc / window close as Exit (same unwritten-data
+        warning), and ignore it while a write is in flight."""
+        if not self.exit_button.isEnabled():
+            return
+        self._finish_with("exit")
 
     @staticmethod
     def _link_label(text: str, target: Path, pal: Palette) -> QLabel:
@@ -1295,23 +1460,34 @@ def main(argv=None) -> int:
         prefs.test_app_version = ""
     _prefill_hydrophone_sn(prefs, args.hydrophone)
 
-    launcher = LauncherDialog(args, prefs)
-    if launcher.exec() != QDialog.DialogCode.Accepted:
-        logger.info("Run cancelled at launcher dialog.")
-        return 130
+    # GUI writes from the result dialog, never inside run_report.run.
+    args.write_config = False
+    args.confirm_write_config = False
 
-    # Persist the collected prefs so :func:`run_report.run` (and any
-    # future runs) can pick them up through its normal load path.
-    collected = launcher.collected_prefs
-    collected.save(args.prefs)
+    exit_code = 130
+    while True:
+        launcher = LauncherDialog(args, prefs)
+        if launcher.exec() != QDialog.DialogCode.Accepted:
+            logger.info("Launcher closed.")
+            return exit_code
 
-    # Reflect the launcher's choices back into the arg namespace
-    # before handing off to the worker. The pass gate for the device
-    # write lives inside ``run_report.run``.
-    args.frequency_khz = launcher.selected_frequency_kHz
-    args.write_config = launcher.write_config_requested
-    args.confirm_write_config = False  # GUI never re-prompts
+        # Persist the collected prefs so :func:`run_report.run` (and
+        # the next launcher) pick them up through the normal load path.
+        prefs = launcher.collected_prefs
+        prefs.save(args.prefs)
+        args.frequency_khz = launcher.selected_frequency_kHz
 
+        choice, exit_code = _run_once(args)
+        if choice == "exit":
+            return exit_code
+
+
+def _run_once(args: argparse.Namespace) -> tuple[str, int]:
+    """Run one characterization with the Running + Result dialogs.
+
+    Returns ``(choice, exit_code)`` where ``choice`` is ``"another"``
+    (go back to the launcher) or ``"exit"``.
+    """
     # Attach the Qt log handler + build the RunningDialog. The bridge
     # signal is queued so slots always run on the GUI thread. Attach
     # BEFORE emitting the launch-config log line so the mini terminal
@@ -1324,68 +1500,82 @@ def main(argv=None) -> int:
     )
 
     logger.info(
-        "GUI launching run: freq=%g kHz write_config=%s dry_run=%s",
-        args.frequency_khz, args.write_config, bool(args.dry_run),
+        "GUI launching run: freq=%g kHz dry_run=%s",
+        args.frequency_khz, bool(args.dry_run),
     )
 
     signals = _RunSignals()
-    result_holder: dict[str, Optional[run_report.RunResult]] = {"r": None}
-    error_holder: dict[str, Optional[str]] = {"tb": None}
-    hw_holder: dict[str, Optional[tuple[str, str]]] = {"info": None}
+    outcome: dict = {"kind": None, "result": None, "can_write": False,
+                     "tb": None, "hw": None}
+    done = QDialog.DialogCode.Accepted
 
-    def _on_finished(res):
-        result_holder["r"] = res
-        running.accept()
+    def _on_finished(res, can_write):
+        outcome.update(kind="finished", result=res, can_write=can_write)
+        running.done(done)
+
+    def _on_aborted():
+        outcome["kind"] = "aborted"
+        running.done(done)
 
     def _on_failed(tb):
-        error_holder["tb"] = tb
-        running.reject()
+        outcome.update(kind="failed", tb=tb)
+        running.done(done)
 
     def _on_hardware_disconnected(hardware, message):
-        hw_holder["info"] = (hardware, message)
-        running.reject()
+        outcome.update(kind="hw", hw=(hardware, message))
+        running.done(done)
 
-    signals.finished.connect(_on_finished, Qt.ConnectionType.QueuedConnection)
-    signals.failed.connect(_on_failed, Qt.ConnectionType.QueuedConnection)
-    signals.hardware_disconnected.connect(
-        _on_hardware_disconnected, Qt.ConnectionType.QueuedConnection,
-    )
+    queued = Qt.ConnectionType.QueuedConnection
+    signals.finished.connect(_on_finished, queued)
+    signals.aborted.connect(_on_aborted, queued)
+    signals.failed.connect(_on_failed, queued)
+    signals.hardware_disconnected.connect(_on_hardware_disconnected, queued)
 
     worker = _WorkerThread(args, signals)
+    running.abort_requested.connect(worker.request_abort)
     worker.start()
     running.exec()
-    worker.wait()
 
-    # Detach the log handler so subsequent invocations of ``main()``
-    # (e.g. under a test harness) don't stack duplicates on the root
-    # logger.
-    logging.getLogger().removeHandler(handler)
+    try:
+        if outcome["kind"] == "finished":
+            result = outcome["result"]
+            dlg = ResultDialog(result, can_write=outcome["can_write"])
+            dlg.write_requested.connect(worker.request_write)
+            signals.write_done.connect(dlg.on_write_done, queued)
+            dlg.exec()
+            # Let the worker leave on_complete and disconnect.
+            worker.release()
+            worker.wait()
+            return dlg.choice, result.exit_code
 
-    if hw_holder["info"] is not None:
-        hardware, message = hw_holder["info"]
-        QMessageBox.warning(
-            None,
-            f"{hardware} not connected",
-            message,
-        )
-        return 2
+        worker.wait()
 
-    if error_holder["tb"] is not None:
-        QMessageBox.critical(
-            None,
-            "Run failed",
-            "The characterization pipeline raised an unexpected "
-            "exception. Details:\n\n" + error_holder["tb"],
-        )
-        return 2
+        if outcome["kind"] == "aborted":
+            QMessageBox.information(
+                None,
+                "Scan aborted",
+                "The scan was aborted. No report was generated.\n\n"
+                "Returning to the start screen.",
+            )
+            return "another", 130
 
-    result = result_holder["r"]
-    if result is None:
-        # Shouldn't happen (either finished or failed always fires).
-        return 2
+        if outcome["kind"] == "hw":
+            hardware, message = outcome["hw"]
+            QMessageBox.warning(None, f"{hardware} not connected", message)
+            return "another", 2
 
-    ResultDialog(result).exec()
-    return result.exit_code
+        if outcome["kind"] == "failed":
+            QMessageBox.critical(
+                None,
+                "Run failed",
+                "The characterization pipeline raised an unexpected "
+                "exception. Details:\n\n" + outcome["tb"],
+            )
+        return "exit", 2
+    finally:
+        # Detach the log handler so the next run doesn't stack
+        # duplicates on the root logger.
+        logging.getLogger().removeHandler(handler)
 
 
 if __name__ == "__main__":
