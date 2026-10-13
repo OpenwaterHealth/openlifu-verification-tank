@@ -464,8 +464,8 @@ class Characterization:
             n_pulses: Number of pulses in the averaged burst.
             duration_usec: Per-pulse duration (us).
             skip_us: Ignore samples before this time when hunting
-                for the first arrival. Defaults to
-                ``scan_config.scope.depth_cal_skip_us``.
+                for the first arrival. ``None`` (default) lets the
+                primitive auto-compute it from pulse geometry.
 
         Returns:
             The full result dict from
@@ -474,18 +474,17 @@ class Characterization:
         v = float(self.voltage_V if voltage_V is None else voltage_V)
         cfg = self.scan_config
         scope_kw = cfg.scope_kwargs()
-        skip = (float(skip_us) if skip_us is not None
-                else float(cfg.scope.depth_cal_skip_us))
         logger.info(
             "Plane-wave depth calibration: %d pulses @ %.1f V, %.1f us each, "
-            "skip_us=%.1f",
-            n_pulses, v, duration_usec, skip,
+            "skip_us=%s",
+            n_pulses, v, duration_usec,
+            "auto" if skip_us is None else f"{float(skip_us):.1f}",
         )
         result = self.ver.calibrate_hydrophone_depth(
             voltage_V=v,
             n_pulses=n_pulses,
             duration_usec=duration_usec,
-            skip_us=skip,
+            skip_us=None if skip_us is None else float(skip_us),
             time_start_us=scope_kw.get("time_start_s", 0.0) * 1e6
                 if scope_kw.get("time_start_s") is not None else 0.0,
             time_stop_us=scope_kw.get("time_stop_s", 100e-6) * 1e6
@@ -666,7 +665,7 @@ class Characterization:
                 voltage_V=float(self.voltage_V),
                 n_pulses=32,
                 duration_usec=8.0,
-                skip_us=float(cfg.scope.depth_cal_skip_us),
+                skip_us=None,  # auto-compute from pulse geometry
                 time_start_us=(scope_kw.get("time_start_s", 0.0) or 0.0)
                               * 1e6,
                 time_stop_us=(scope_kw.get("time_stop_s", 100e-6) or 100e-6)

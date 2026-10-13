@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Optional
 
@@ -59,15 +59,6 @@ class ScopeCapture:
     #: Headroom above the predicted peak amplitude when auto-picking a
     #: scope range for the voltage sweep. 30 % is a reasonable default.
     voltage_scan_headroom_pct: float = 30.0
-    #: Lower-bound (us, relative to emission at t=0) for the first-RF-peak
-    #: search in :meth:`VerificationTank.calibrate_hydrophone_depth`.
-    #: Must sit comfortably after any trigger-flash / near-field EM
-    #: pickup but before the earliest expected acoustic arrival. For a
-    #: 50 mm nominal depth (33 us arrival) 25 us is safe; for shallower
-    #: hydrophone positions reduce accordingly. Applied to BOTH the
-    #: plane-wave depth calibration (D.3) and the focused-pulse arrival
-    #: in :meth:`Characterization.measure_waveform_at_peak`.
-    depth_cal_skip_us: float = 25.0
 
 
 @dataclass
@@ -146,14 +137,24 @@ class ScanConfig:
             logger.warning("scan config %s does not exist; using defaults", path)
             return cls()
         data = json.loads(path.read_text(encoding="utf-8"))
+
+        def build(sub_cls, key):
+            section = data.get(key, {})
+            known = {f.name for f in fields(sub_cls)}
+            unknown = set(section) - known
+            if unknown:
+                logger.warning("scan config [%s]: ignoring unknown keys %s",
+                               key, sorted(unknown))
+            return sub_cls(**{k: v for k, v in section.items() if k in known})
+
         return cls(
-            scope=ScopeCapture(**data.get("scope", {})),
-            lateral_1d=Scan1D(**data.get("lateral_1d", {})),
-            elevation_1d=Scan1D(**data.get("elevation_1d", {})),
-            axial_1d=Scan1D(**data.get("axial_1d", {})),
-            scan_2d=Scan2D(**data.get("scan_2d", {})),
-            frequency_sweep=FrequencySweep(**data.get("frequency_sweep", {})),
-            voltage_sweep=VoltageSweep(**data.get("voltage_sweep", {})),
+            scope=build(ScopeCapture, "scope"),
+            lateral_1d=build(Scan1D, "lateral_1d"),
+            elevation_1d=build(Scan1D, "elevation_1d"),
+            axial_1d=build(Scan1D, "axial_1d"),
+            scan_2d=build(Scan2D, "scan_2d"),
+            frequency_sweep=build(FrequencySweep, "frequency_sweep"),
+            voltage_sweep=build(VoltageSweep, "voltage_sweep"),
             acceptance=AcceptanceCriteria.from_dict(data.get("acceptance", {})),
             sos_water_m_per_s=float(
                 data.get("sos_water_m_per_s", cls.sos_water_m_per_s)
