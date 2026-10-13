@@ -67,7 +67,7 @@ def find_first_arrival_us(t_us: np.ndarray,
                           trace: np.ndarray,
                           *,
                           frequency_kHz: float,
-                          skip_us: float = 12.0,
+                          skip_us: Optional[float] = None,
                           min_prominence_frac: float = 0.05,
                           ) -> Optional[ArrivalResult]:
     """Locate the first arrival of a narrow-band pulse.
@@ -84,8 +84,11 @@ def find_first_arrival_us(t_us: np.ndarray,
             matter, the picker is amplitude-independent).
         frequency_kHz: Carrier frequency in kHz; used for the
             quarter-cycle correction.
-        skip_us: Ignore everything before this time (us). Defaults
-            to 12 us to skip the trigger flash / cross-talk.
+        skip_us: Ignore everything before this time (us). ``None``
+            (default) searches from the start of the trace; callers
+            that know the pulse geometry (e.g.
+            :meth:`VerificationTank.calibrate_hydrophone_depth`)
+            should pass a window that clears the transmit EM pickup.
         min_prominence_frac: Local maxima whose value is below
             ``min_prominence_frac`` * global-positive-peak are rejected
             as noise. Default 0.05 (5% of the burst peak) -- well
@@ -102,6 +105,8 @@ def find_first_arrival_us(t_us: np.ndarray,
     if t_us.size != trace.size or t_us.size < 3:
         return None
 
+    if skip_us is None:
+        skip_us = float(t_us[0])
     mask = t_us >= float(skip_us)
     if mask.sum() < 3:
         return None

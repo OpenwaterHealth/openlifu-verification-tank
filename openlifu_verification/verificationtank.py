@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 _PACKAGE_LOGGER = logging.getLogger("openlifu_verification")
 PICOSCOPE_RESOLUTION = "15BIT"
 SPEED_OF_SOUND = 1490  # m/s in water
+AUTO_SKIP_GUARD_US = 6.0  # us to add to the auto-calculated skip window
+ZERO_WINDOW_US = 4.0
 # Fixed electrical delay between the scope trigger's rising edge and
 # the actual start of ultrasound emission (visible in traces as a
 # small burst of EM pickup at t=0). Used to convert measured
@@ -2322,7 +2324,7 @@ class VerificationTank:
                                     n_pulses: int = 32,
                                     duration_usec: float = 8.0,
                                     interval_msec: float | None = None,
-                                    skip_us: float = 12.0,
+                                    skip_us: float | None = None,
                                     time_start_us: float = 0.0,
                                     time_stop_us: float = 100.0,
                                     sampling_interval_ns: float = 100.0,
@@ -2362,8 +2364,12 @@ class VerificationTank:
             interval_msec: Interval between pulses in the train (ms).
                 Defaults to :attr:`DEFAULT_INTERVAL_MSEC`.
             skip_us: Exclude everything before this time from the
-                arrival-time search (default 12 us) to avoid
-                locking onto the trigger-flash / cross-talk.
+                arrival-time search. ``None`` (default) auto-computes
+                it as ``duration_usec + max_delay_us +
+                AUTO_SKIP_GUARD_US`` so the dead zone brackets the
+                transmit burst's EM pickup window (the last element
+                finishes radiating at ``max_delay_us +
+                duration_usec``). Pass a float to force an override.
             time_start_us, time_stop_us, sampling_interval_ns:
                 Scope capture window and timebase.
             hydrophone_range_mv: Optional override for the scope
@@ -2481,6 +2487,68 @@ class VerificationTank:
             aligned = traces_mv
         mean_trace = aligned.mean(axis=0)
 
+        # Auto-compute the dead zone when the caller didn't force one.
+        # The last element to fire finishes radiating at
+        # ``max_delay_us + duration_usec``, so EM pickup from the
+        # transmit burst can leak into the hydrophone cable up to that
+        # time plus however long the preamp takes to settle.
+        # AUTO_SKIP_GUARD_US is an empirically comfortable settling
+        # margin for the 400 kHz TXMs; override via ``skip_us`` if
+        # needed.
+        if skip_us is None:
+            skip_us = float(duration_usec) + float(max_delay_us) + AUTO_SKIP_GUARD_US
+            logger.debug(
+                "calibrate_hydrophone_depth: auto skip_us=%.2f us "
+                "(duration=%.2f + max_delay=%.2f + %.2f us guard)",
+                skip_us, duration_usec, max_delay_us, AUTO_SKIP_GUARD_US,
+            )
+        else:
+            skip_us = float(skip_us)
+
+        # DC-remove the averaged trace before picking. Plane-wave
+        # excitations fire every element at the same instant, which
+        # produces a much larger instantaneous current step on the HV
+        # rail than a staggered focused shot. That step couples
+        # capacitively into the hydrophone preamp's AC-coupling
+        # network and leaves a slowly-decaying baseline sitting
+        # underneath the acoustic burst. A positive baseline inflates
+        # ``global_peak`` and lets pre-arrival noise clear the
+        # prominence threshold; a negative one suppresses the real
+        # crest.
+        #
+        # The baseline window is the first ZERO_WINDOW_US immediately
+        # after ``skip_us`` -- the EM pickup inside the skip window is
+        # exactly what we're trying to reject, so sampling it would
+        # defeat the correction. Immediately after the burst ends is
+        # quiet (acoustic hasn't arrived yet; EM pickup has settled)
+        # and still well before the earliest expected arrival.
+        baseline_window_us = ZERO_WINDOW_US
+        base_mask = (t_us >= skip_us) & (t_us < skip_us + baseline_window_us)
+        if int(base_mask.sum()) >= 8:
+            baseline_mv = float(np.median(mean_trace[base_mask]))
+        else:
+            # Window too narrow (short capture / coarse sampling);
+            # widen to the first 10 % of the post-skip window so we
+            # still get a usable baseline estimate.
+            tail_mask = t_us >= skip_us
+            if int(tail_mask.sum()) >= 8:
+                n_tail = int(tail_mask.sum())
+                tail_idx = np.flatnonzero(tail_mask)
+                n_take = max(8, n_tail // 10)
+                base_mask = np.zeros_like(tail_mask)
+                base_mask[tail_idx[:n_take]] = True
+                baseline_mv = float(np.median(mean_trace[base_mask]))
+            else:
+                baseline_mv = 0.0
+        mean_trace = mean_trace - baseline_mv
+        logger.debug(
+            "calibrate_hydrophone_depth: subtracted baseline=%.3f mV "
+            "(from %d samples in [%.2f, %.2f] us)",
+            baseline_mv, int(base_mask.sum()),
+            skip_us, skip_us + baseline_window_us,
+        )
+
+
         arr = find_first_arrival_us(
             t_us, mean_trace,
             frequency_kHz=float(self.frequency),
@@ -2525,6 +2593,9 @@ class VerificationTank:
             "mean_trace": mean_trace,
             "t_us": t_us,
             "n_pulses_used": int(traces_mv.shape[0]),
+            "baseline_mv": baseline_mv,
+            "baseline_window_us": float(baseline_window_us),
+            "skip_us": float(skip_us),
         }
 
     def find_peak(self, *,

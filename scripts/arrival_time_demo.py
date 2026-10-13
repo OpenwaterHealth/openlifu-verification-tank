@@ -22,11 +22,11 @@ a first-order approximation.
 Example::
 
     python scripts/arrival_time_demo.py --hydrophone 2246 \\
-        --voltage 30 --duration-usec 8 --pulse-count 32 --skip-us 12
+        --voltage 30 --duration-usec 8 --pulse-count 32
 
     # Same, but steer to an on-axis focus at 30 mm:
     python scripts/arrival_time_demo.py --hydrophone 2246 \\
-        --voltage 30 --duration-usec 8 --pulse-count 32 --skip-us 12 \\
+        --voltage 30 --duration-usec 8 --pulse-count 32 \\
         --z-focus-mm 30
 
 The reported ``distance_mm`` is the one-way distance from the array
@@ -75,10 +75,13 @@ def main():
     parser.add_argument("--time-stop-us", type=float, default=100.0)
     parser.add_argument("--sampling-interval-ns", type=float, default=100.0)
     parser.add_argument("--hydro-range-mv", type=int, default=100)
-    parser.add_argument("--skip-us", type=float, default=12.0,
-                        help="Ignore samples before this time when hunting "
-                             "for the first arrival (default 12 us to skip "
-                             "the trigger flash / cross-talk).")
+    parser.add_argument("--skip-us", type=float, default=None,
+                        help="Ignore samples before this time (us) when "
+                             "hunting for the first arrival. Default: "
+                             "auto = duration_usec + max_delay_us + "
+                             "AUTO_SKIP_GUARD_US "
+                             "(brackets the transmit-burst EM pickup "
+                             "window). Pass a number to override.")
     parser.add_argument("--align", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Cross-correlate pulses before averaging.")
@@ -174,8 +177,10 @@ def main():
     ax.axhline(result["threshold"], color="tab:orange", lw=0.8, ls=":",
                alpha=0.8,
                label=f"prominence threshold ({result['threshold']:.3g} mV)")
-    ax.axvspan(t_us[0], args.skip_us, color="grey", alpha=0.15,
-               label=f"skip < {args.skip_us:g} us")
+    ax.axvspan(t_us[0], result["skip_us"], color="grey", alpha=0.15,
+               label=f"skip < {result['skip_us']:g} us")
+    ax.axvspan(result["skip_us"], result["skip_us"] + result["baseline_window_us"], color="tab:orange", alpha=0.15,
+               label=f"baseline window ({result['baseline_window_us']:.3g} us)")
     ax.axvline(result["first_peak_us"], color="tab:orange",
                ls="--", lw=1.2, label="1st RF peak (above threshold)")
     ax.axvline(result["arrival_us"], color="tab:red",

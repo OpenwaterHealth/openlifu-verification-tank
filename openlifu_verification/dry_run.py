@@ -191,7 +191,7 @@ class DryRunTank:
                                     n_pulses: int = 32,
                                     duration_usec: float = 8.0,
                                     interval_msec=None,
-                                    skip_us: float = 12.0,
+                                    skip_us: float | None = None,
                                     time_start_us: float = 0.0,
                                     time_stop_us: float = 100.0,
                                     sampling_interval_ns: float = 100.0,

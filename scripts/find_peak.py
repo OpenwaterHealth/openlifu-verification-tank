@@ -146,10 +146,11 @@ def main():
                         help="[depth-cal] Pulses averaged (default 32).")
     parser.add_argument("--depth-duration-usec", type=float, default=8.0,
                         help="[depth-cal] Per-pulse duration (default 8 us).")
-    parser.add_argument("--depth-skip-us", type=float, default=12.0,
+    parser.add_argument("--depth-skip-us", type=float, default=None,
                         help="[depth-cal] Ignore samples before this time "
-                             "when searching for the first arrival "
-                             "(default 12 us).")
+                             "when searching for the first arrival. "
+                             "Default: auto = duration + max_delay + "
+                             "AUTO_SKIP_GUARD_US.")
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument("--verbose", "-v", action="store_true")
     verbosity.add_argument("--quiet", "-q", action="store_true")
