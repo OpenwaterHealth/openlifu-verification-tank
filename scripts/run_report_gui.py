@@ -552,7 +552,7 @@ class LauncherDialog(QDialog):
                  prefs: OperatorPrefs,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
-        title = "OpenLIFU Verification -- Run Report"
+        title = "OpenLIFU Calibration Tool"
         if getattr(args, "dry_run", False):
             title += "  [DRY RUN]"
         self.setWindowTitle(title)
@@ -561,7 +561,7 @@ class LauncherDialog(QDialog):
         self._prefs = prefs
 
         # --- Header banner ---
-        header = QLabel("OpenLIFU Verification")
+        header = QLabel("OpenLIFU Calibration")
         hfont = QFont()
         hfont.setPointSize(hfont.pointSize() + 6)
         hfont.setBold(True)
