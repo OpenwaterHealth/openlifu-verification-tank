@@ -55,10 +55,9 @@ def main():
                              "and hydrophone ID still load normally; only "
                              "the trace/rms/vpp reporting stays in mV.")
     # --- Misc ---
-    parser.add_argument("--chunk-size", type=int, default=0)
     parser.add_argument("--n-averages", type=int, default=1,
-                        help="Repeat every frequency this many times and "
-                             "coherently average.")
+                        help="Pulses fired per frequency (one LIFU pulse "
+                             "train per frequency), coherently averaged.")
     parser.add_argument("--align", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Cross-correlate repeats before averaging.")
@@ -119,7 +118,6 @@ def main():
             result = ver.scan_frequency(
                 frequencies_kHz=frequencies,
                 duration_usec=resolved["duration_usec"],
-                chunk_size=args.chunk_size,
                 n_averages=args.n_averages,
                 align=args.align,
                 progress=progress,

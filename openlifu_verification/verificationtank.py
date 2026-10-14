@@ -165,6 +165,10 @@ class VerificationTank:
         self.hv_enabled = False
         self.hv_voltage = None
         self.arr = None
+        # Last configure_lifu kwargs and set_focus args, so sweeps that
+        # temporarily reconfigure the LIFU can restore them.
+        self.lifu_config = None
+        self.focus_args = None
         # Hydrophone calibration + geometry. ``hydrophone_position`` is
         # the *actual* (calibrated) x,y,z of the hydrophone tip in the
         # transducer coord frame; scans use it as their origin so a
@@ -487,6 +491,14 @@ class VerificationTank:
             profile_index=profile_index,
             profile_increment=profile_increment,
             trigger_mode=trigger_mode)
+        self.lifu_config = dict(
+            frequency_kHz=frequency_kHz, voltage=voltage,
+            duration_usec=duration_usec, interval_msec=interval_msec,
+            pulse_count=pulse_count,
+            pulse_train_interval_msec=pulse_train_interval_msec,
+            pulse_train_count=pulse_train_count,
+            trigger_mode=trigger_mode, apodization=apodization,
+        )
 
     def apply_pulse(self, *,
                     frequency_kHz: float | None = None,
@@ -608,6 +620,7 @@ class VerificationTank:
             for addr, reg_values in data_regs.items():
                 if not self.lifu.txdevice.write_block(identifier=txi, start_address=addr, reg_values=reg_values):
                     logger.error(f"Error applying TX CHIP ID: {txi} registers")
+        self.focus_args = (x, y, z, apodizations)
 
     def set_pulse(self, frequency_kHz, duration_usec):
         pulse_profile = Tx7332PulseProfile(
@@ -973,8 +986,17 @@ class VerificationTank:
             raise ValueError("No Picoscope Connected")
         try:
             if not self.scope.wait_ready(timeout_s=timeout_s):
+                # GetNoOfCaptures is only defined once the run has
+                # completed or been stopped, so stop first.
+                self.scope.stop()
+                try:
+                    got = self.scope.get_no_of_captures()
+                except Exception:  # noqa: BLE001 - diagnostic only
+                    got = "?"
                 logger.warning(
-                    "Rapid-block wait_ready timed out after %.3f s", timeout_s or -1.0
+                    "Rapid-block wait_ready timed out after %.3f s: "
+                    "scope captured %s of %d segments (missed trigger(s))",
+                    timeout_s or -1.0, got, plan["n_captures"],
                 )
                 return None
             result = self.scope.get_data_rapid(
@@ -1921,7 +1943,6 @@ class VerificationTank:
                        time_start_s=-14e-6,
                        time_stop_s=86e-6,
                        sampling_interval_ns=100,
-                       chunk_size=0,
                        timeout_s=None,
                        n_averages=1,
                        align=True,
@@ -1929,8 +1950,17 @@ class VerificationTank:
                        progress="bar") -> ScanResult:
         """Sweep the TX pulse frequency at the current focus.
 
-        Requires that :meth:`set_focus` and :meth:`enable_hv_output`
-        have already been called.
+        Requires that :meth:`apply_pulse` / :meth:`configure_lifu`,
+        :meth:`set_focus` and :meth:`enable_hv_output` have already
+        been called.
+
+        Uses the same capture path as :meth:`capture_pulse_train`
+        (``pulse_sequence.py`` / :meth:`calibrate_hydrophone_depth`):
+        the LIFU is reconfigured once for a single-mode train of
+        ``n_averages`` pulses, then for each frequency the pulse
+        registers are rewritten and one ``start_trigger`` fires the
+        whole train into its own ``n_averages``-segment rapid block.
+        The previous LIFU config and focus are restored afterwards.
 
         Args:
             frequencies_kHz: 1-D iterable of frequencies to sweep.
@@ -1939,16 +1969,26 @@ class VerificationTank:
                 ``int(duration_usec * frequency_kHz / 1000)``.
             time_start_s, time_stop_s, sampling_interval_ns: Capture
                 window.
-            chunk_size: Rapid-block chunk size (0 = whole sweep).
-            timeout_s: Passed through to
-                :meth:`finish_rapid_capture`.
-            progress: See :meth:`run_rapid_sweep`.
+            timeout_s: Per-frequency capture timeout. ``None`` uses
+                ``n_averages * interval + 2 s``.
+            n_averages: Pulses per frequency (coherently averaged).
+            align: Cross-correlate pulses before averaging.
+            align_max_shift_samples: Optional cap on the lag search.
+            progress: ``"bar"`` / ``"log"`` / ``"both"`` / ``None`` or a
+                callable, see :meth:`run_rapid_sweep`.
 
         Returns:
             A :class:`ScanResult` with ``scan_type="frequency"`` and
             coord ``freq_kHz``.
         """
+        if self.lifu_config is None:
+            raise RuntimeError(
+                "scan_frequency needs a configured LIFU; call apply_pulse first."
+            )
         freqs = np.asarray(list(frequencies_kHz), dtype=float)
+        n_averages = int(n_averages)
+        if n_averages < 1:
+            raise ValueError("n_averages must be >= 1")
         if freqs.size:
             logger.info(
                 "scan_frequency: %d freqs from %g to %g kHz, duration=%g µs; "
@@ -1959,23 +1999,90 @@ class VerificationTank:
                 n_averages,
             )
 
-        def apply_point(freq_kHz):
-            self.set_pulse(frequency_kHz=freq_kHz, duration_usec=duration_usec)
+        base_config = dict(self.lifu_config)
+        focus_args = self.focus_args
+        interval_s = float(base_config["interval_msec"]) * 1e-3
+        if timeout_s is None:
+            timeout_s = n_averages * interval_s + 2.0
 
-        outputs, timings, averaging = self.run_averaged_sweep(
-            points=freqs.tolist(),
-            apply_point=apply_point,
-            time_start_s=time_start_s,
-            time_stop_s=time_stop_s,
-            sampling_interval_ns=sampling_interval_ns,
-            n_averages=n_averages,
-            align=align,
-            align_max_shift_samples=align_max_shift_samples,
-            chunk_size=chunk_size or len(freqs),
-            timeout_s=timeout_s,
-            progress=progress,
-            progress_label="scan_freq",
+        def _restore_focus():
+            if focus_args is not None:
+                x, y, z, apo = focus_args
+                self.set_focus(x, y, z, apodizations=apo)
+
+        progress_cb, bar, close_bar = self._make_progress(
+            progress, len(freqs), "scan_freq",
         )
+        outputs, timings, averaging = [], [], []
+        hydro = self.hydrophone_channel
+        try:
+            # Same LIFU setup as capture_pulse_train callers: single
+            # mode, one train of n_averages pulses per start_trigger.
+            self.configure_lifu(**{
+                **base_config,
+                "duration_usec": float(duration_usec),
+                "pulse_count": n_averages,
+                "pulse_train_interval_msec": 0,
+                "pulse_train_count": 1,
+                "trigger_mode": "single",
+            })
+            _restore_focus()
+
+            for f in freqs:
+                t0 = time.perf_counter()
+                self.set_pulse(frequency_kHz=float(f), duration_usec=duration_usec)
+                t_apply = time.perf_counter() - t0
+                t0 = time.perf_counter()
+                bulk = self.capture_pulse_train(
+                    n_pulses=n_averages,
+                    time_start_s=time_start_s,
+                    time_stop_s=time_stop_s,
+                    sampling_interval_ns=sampling_interval_ns,
+                    timeout_s=timeout_s,
+                )
+                t_capture = time.perf_counter() - t0
+                pt = {"apply_s": t_apply, "trigger_s": t_capture,
+                      "iter_total_s": t_apply + t_capture,
+                      "captured": bulk is not None}
+                timings.append(pt)
+
+                if bulk is None:
+                    logger.warning("scan_frequency: %g kHz timed out", f)
+                    outputs.append(None)
+                    averaging.append({"n_averages": n_averages, "n_captured": 0,
+                                      "lags_s": np.zeros(n_averages),
+                                      "noise_rms": float("nan")})
+                else:
+                    dt_s = float(bulk["sampling_interval_ns"]) * 1e-9
+                    stack = np.atleast_2d(np.asarray(bulk[hydro], dtype=float))
+                    if align and stack.shape[0] >= 2:
+                        aligned, lags_s = align_pulse_traces(
+                            stack, dt_s=dt_s,
+                            max_shift_samples=align_max_shift_samples,
+                            reference="first",
+                        )
+                    else:
+                        aligned, lags_s = stack, np.zeros(stack.shape[0])
+                    noise_std = aligned.std(axis=0, ddof=0)
+                    outputs.append({"time": bulk["time"], hydro: aligned.mean(axis=0)})
+                    averaging.append({
+                        "n_averages": n_averages,
+                        "n_captured": stack.shape[0],
+                        "lags_s": lags_s,
+                        "noise_rms": float(np.sqrt(np.mean(noise_std ** 2))),
+                    })
+
+                if bar is not None:
+                    bar.set_postfix_str(f"{f:g} kHz", refresh=False)
+                    bar.update(1)
+                if progress_cb is not None:
+                    progress_cb(float(f), pt)
+        finally:
+            if close_bar:
+                bar.close()
+            self.configure_lifu(**base_config)
+            _restore_focus()
+
         traces, t_axis, ok_mask = self._stack_hydrophone_traces(outputs)
         if traces is None:
             raise RuntimeError("No points captured in scan_frequency.")
@@ -1988,7 +2095,7 @@ class VerificationTank:
             traces=traces,
             coords={"freq_kHz": good_freqs_kHz},
             hydrophone_channel=self.hydrophone_channel,
-            chunk_size=chunk_size or len(freqs),
+            chunk_size=n_averages,
             timings=_collect_timings(timings),
             units=units,
             metadata={
@@ -2423,6 +2530,7 @@ class VerificationTank:
             )
 
         resolved = self.apply_pulse(
+            frequency_kHz=self.frequency,
             voltage=voltage_V,
             duration_usec=duration_usec,
             interval_msec=interval_msec,

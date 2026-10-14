@@ -852,6 +852,19 @@ class Picoscope:
         )
         return max_samples.value
 
+    def get_no_of_captures(self) -> int:
+        """Return how many rapid-block segments were captured.
+
+        Only valid after the run has completed (``wait_ready``) or been
+        interrupted with :meth:`stop`; mid-run values are undefined.
+        """
+        n = ctypes.c_uint32(0)
+        self.status["getNoOfCaptures"] = ps.ps5000aGetNoOfCaptures(
+            self.chandle, ctypes.byref(n)
+        )
+        assert_pico_ok(self.status["getNoOfCaptures"])
+        return n.value
+
     def reset_rapid_block(self):
         """Reset the device to a single memory segment (regular block mode)."""
         if not self._is_open:
