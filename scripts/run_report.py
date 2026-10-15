@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import logging.handlers
 import sys
 import threading
 import time
@@ -267,7 +268,31 @@ def run(args: argparse.Namespace, *,
             :data:`OnComplete`). The connection is closed when the
             hook returns, so a GUI can block here until the operator
             has decided whether to write.
+
+    Every log record emitted during the run is also saved to
+    ``<run_dir>/<stem>_console.log`` (buffered in memory until the
+    report folder exists, then written live). Runs that abort or
+    halt before the report is written leave no log file.
     """
+    console_log = logging.handlers.MemoryHandler(
+        capacity=sys.maxsize, flushLevel=logging.CRITICAL + 1
+    )
+    root = logging.getLogger()
+    root.addHandler(console_log)
+    try:
+        return _run(args, abort_event, on_complete, console_log)
+    finally:
+        root.removeHandler(console_log)
+        target = console_log.target
+        console_log.close()  # flushes any tail into the log file
+        if target is not None:
+            target.close()
+
+
+def _run(args: argparse.Namespace,
+         abort_event: Optional[threading.Event],
+         on_complete: Optional[OnComplete],
+         console_log: logging.handlers.MemoryHandler) -> RunResult:
     _configure_root_logger(args.log_file)
     if getattr(args, "verbose", False):
         set_log_level("DEBUG", sdk_level="DEBUG")
@@ -413,6 +438,15 @@ def run(args: argparse.Namespace, *,
         # Match the on-disk stem (SN + test start timestamp) so the
         # printed paths point at real files.
         file_stem = report_io.report_file_stem(report)
+        log_path = run_dir / f"{file_stem}_console.log"
+        log_fh = logging.FileHandler(log_path, encoding="utf-8")
+        log_fh.setFormatter(logging.Formatter(
+            "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+        ))
+        console_log.setTarget(log_fh)
+        console_log.flush()
+        # Write each later record straight through (device write etc.).
+        console_log.flushLevel = logging.NOTSET
         xlsx_path = run_dir / f"{file_stem}_Report.xlsx"
         pdf_path = run_dir / f"{file_stem}_Report.pdf"
         config_path = run_dir / f"{file_stem}_device_config.json"
@@ -421,12 +455,14 @@ def run(args: argparse.Namespace, *,
         print(f"  PDF  : {pdf_path}")
         if not args.skip_frequency:
             print(f"  JSON : {config_path}")
+        print(f"  LOG  : {log_path}")
         print(f"  Verdict: {'PASS' if report.overall_pass else 'FAIL'}")
 
         result.passed = bool(report.overall_pass)
         result.run_dir = run_dir
         result.files["xlsx"] = xlsx_path
         result.files["pdf"] = pdf_path
+        result.files["console_log"] = log_path
         if not args.skip_frequency:
             result.files["device_config"] = config_path
         result.exit_code = 0 if result.passed else 1
