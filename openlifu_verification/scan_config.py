@@ -59,6 +59,9 @@ class ScopeCapture:
     #: Headroom above the predicted peak amplitude when auto-picking a
     #: scope range for the voltage sweep. 30 % is a reasonable default.
     voltage_scan_headroom_pct: float = 30.0
+    #: Pulses coherently averaged per point in the beam scans, the
+    #: waveform-at-peak capture, and the frequency / voltage sweeps.
+    n_averages: int = 5
 
 
 @dataclass
@@ -81,8 +84,6 @@ class FrequencySweep:
     offsets_kHz: list[float] = field(default_factory=lambda: [
         -25.0, -20.0, -15.0, -10.0, -5.0, 0.0, 5.0, 10.0,
     ])
-    #: Cycles per burst; the pulse duration is ``cycles / frequency``.
-    cycles_per_burst: float = 20.0
 
 
 @dataclass
@@ -182,10 +183,18 @@ class ScanConfig:
     # ------------------------------------------------------------------
     # Convenience accessors
     # ------------------------------------------------------------------
-    def scope_kwargs(self) -> dict:
-        """Kwargs common to every scope-driven phase method."""
+    def scope_kwargs(self, *, min_time_stop_us: Optional[float] = None) -> dict:
+        """Kwargs common to every scope-driven phase method.
+
+        ``min_time_stop_us`` extends ``time_stop_us`` when a phase
+        needs a longer window (e.g. long bursts at 155 kHz); the
+        configured value is used when it is already long enough.
+        """
+        stop_us = float(self.scope.time_stop_us)
+        if min_time_stop_us is not None:
+            stop_us = max(stop_us, float(min_time_stop_us))
         return {
             "time_start_s": self.scope.time_start_us * 1e-6,
-            "time_stop_s":  self.scope.time_stop_us * 1e-6,
+            "time_stop_s":  stop_us * 1e-6,
             "sampling_interval_ns": self.scope.sampling_interval_ns,
         }

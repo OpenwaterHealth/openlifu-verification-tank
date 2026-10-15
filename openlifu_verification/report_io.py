@@ -34,6 +34,7 @@ from .characterization import (
     FREQ_SWEEP_OFFSETS_KHZ,
     ROW,
     TestReport,
+    _1d_scan_pnp_peak,
     _pnp_MPa,
 )
 from .scan_results import ScanResult
@@ -240,12 +241,16 @@ def build_figures(report: TestReport) -> dict:
     # Figure 2: 1-D lateral (x sweep).
     lat = scans.get("lateral_1d")
     if lat is not None:
-        xs = lat.coords.get("xfoci")
-        traces = lat.traces
-        pnp_kPa = _pnp_MPa_grid(traces) * 1000.0
+        # Same reduction the grader uses, so the marked peak is the
+        # point that was actually graded.
+        xs, pnp_MPa, ipk = _1d_scan_pnp_peak(lat)
+        pnp_kPa = pnp_MPa * 1000.0
         x0 = _scan_origin(lat, 0)
         fig, ax = plt.subplots(figsize=(6, 3.2))
         ax.plot(xs, pnp_kPa, "o-", lw=1.5)
+        ax.plot(xs[ipk], pnp_kPa[ipk], "r*", ms=12,
+                label=f"peak \u0394x = {xs[ipk]:+.2f} mm")
+        ax.legend(loc="upper right", fontsize=8)
         ax.axvline(0.0, color="0.7", lw=0.7)
         ax.set_xlabel(f"\u0394x (x\u2080 = {x0:.2f} mm)")
         ax.set_ylabel("PNP (kPa)")
@@ -258,17 +263,14 @@ def build_figures(report: TestReport) -> dict:
     # Figure 3: 1-D elevation (y sweep).
     elev = scans.get("elevation_1d")
     if elev is not None:
-        ys = elev.coords.get("yfoci")
-        traces = elev.traces
-        # scan_1d returns (N, T); older scan_lateral (num_x=1, num_y=N)
-        # returned (N, 1, T). Handle both.
-        traces_2d = np.atleast_2d(traces)
-        if traces_2d.ndim == 3 and traces_2d.shape[1] == 1:
-            traces_2d = traces_2d[:, 0, :]
-        pnp_kPa = _pnp_MPa_grid(traces_2d) * 1000.0
+        ys, pnp_MPa, ipk = _1d_scan_pnp_peak(elev)
+        pnp_kPa = pnp_MPa * 1000.0
         y0 = _scan_origin(elev, 1)
         fig, ax = plt.subplots(figsize=(6, 3.2))
         ax.plot(ys, pnp_kPa, "o-", lw=1.5, color="tab:orange")
+        ax.plot(ys[ipk], pnp_kPa[ipk], "r*", ms=12,
+                label=f"peak \u0394y = {ys[ipk]:+.2f} mm")
+        ax.legend(loc="upper right", fontsize=8)
         ax.axvline(0.0, color="0.7", lw=0.7)
         ax.set_xlabel(f"\u0394y (y\u2080 = {y0:.2f} mm)")
         ax.set_ylabel("PNP (kPa)")

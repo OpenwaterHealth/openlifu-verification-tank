@@ -40,6 +40,7 @@ from .device_info import DeviceInfo
 from .operator_prefs import OperatorPrefs
 from .scan_config import PICOSCOPE_RANGES_MV, ScanConfig, choose_range_mv
 from .scan_results import ScanResult
+from .verificationtank import VerificationTank
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ ROW = {
     # 1-D lateral / elevation peak-offset rows sit right below their
     # respective figure rows (D.7, D.9). They grade the separation
     # between the 1-D scan peak and the 2-D-derived hydrophone
-    # position against ``criteria.peak_offset.max_1d_axis_mm``.
+    # position against ``criteria.peak_offset.max_1d_axis_mm_for(freq)``.
     "lateral_peak_offset_mm":   "D.8",
     "elevation_image":       "D.9",
     "elevation_peak_offset_mm": "D.10",
@@ -225,6 +226,23 @@ def _pnp_MPa(trace_Pa: np.ndarray) -> float:
     return float(-np.min(trace_Pa)) / 1e6
 
 
+def _1d_scan_pnp_peak(scan) -> tuple[np.ndarray, np.ndarray, int]:
+    """Return ``(coord, pnp_MPa, argmax)`` for a 1-D scan.
+
+    Single source of truth for the 1-D peak used both by the grader
+    and by the report figure, so the plotted maximum and the graded
+    offset always agree.
+    """
+    coord = np.ravel(np.asarray(next(iter(scan.coords.values())), dtype=float))
+    traces = np.asarray(scan.traces, dtype=float)
+    traces = traces.reshape(-1, traces.shape[-1])
+    pnp = -traces.min(axis=-1) / 1e6
+    if pnp.size != coord.size or pnp.size == 0:
+        raise ValueError(
+            f"1-D scan has {pnp.size} traces but {coord.size} coords")
+    return coord, pnp, int(np.argmax(pnp))
+
+
 def _linear_r2(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
     """Return ``(slope, intercept, r2)`` for the best-fit line."""
     slope, intercept = np.polyfit(x, y, 1)
@@ -331,6 +349,7 @@ class Characterization:
         frequency_kHz: Nominal center frequency of the device under
             test (155 or 400). Must match ``ver.frequency``.
         voltage_V: HV rail voltage for the peak scans + freq sweep.
+            Defaults to ``VerificationTank.default_voltage_for(frequency_kHz)``.
         plot: Passed through to :meth:`VerificationTank.find_peak`.
 
     Attributes:
@@ -343,7 +362,7 @@ class Characterization:
                  scan_config: Optional[ScanConfig] = None,
                  output_dir: Optional[Path] = None,
                  frequency_kHz: float = 400.0,
-                 voltage_V: float = 20.0,
+                 voltage_V: Optional[float] = None,
                  plot: bool = False):
         self.ver = ver
         self.prefs = prefs
@@ -351,6 +370,8 @@ class Characterization:
         self.scan_config = scan_config or ScanConfig()
         self.output_dir = Path(output_dir) if output_dir is not None else None
         self.frequency_kHz = float(frequency_kHz)
+        if voltage_V is None:
+            voltage_V = VerificationTank.default_voltage_for(self.frequency_kHz)
         self.voltage_V = float(voltage_V)
         self.plot = bool(plot)
         self._abort_event: Optional[threading.Event] = None
@@ -413,7 +434,7 @@ class Characterization:
         self._apply_baseline_range()
         meas = self.ver.measure_pressure(
             float(pos[0]), float(pos[1]), float(pos[2]),
-            **self.scan_config.scope_kwargs(),
+            **self._burst_scope_kwargs(),
         )
         if meas is None:
             result = {"passed": False, "reason": "scope timeout"}
@@ -539,6 +560,8 @@ class Characterization:
         pipeline always seeds the search from a known reference,
         independent of any prior calibration or leftover position.
         """
+        for k, v in self._burst_scope_kwargs().items():
+            kw.setdefault(k, v)
         x, y = self.ver.find_peak(x0=x0, y0=y0,
                                   plot=self.plot, store=True, save=False,
                                   keep_plot_open=False, **kw)
@@ -565,14 +588,15 @@ class Characterization:
         ``"scan_2d"``.
         """
         cfg = self.scan_config
-        scope_kw = cfg.scope_kwargs()
+        scope_kw = self._burst_scope_kwargs()
+        n_avg = int(cfg.scope.n_averages)
         ext = cfg.lateral_1d.extent_mm
         pts = cfg.lateral_1d.points
 
         logger.info("Running 1-D lateral (x) scan (\u00b1%.1f mm, %d pts)...", ext, pts)
         lat = self.ver.scan_1d(
             dim="x", scan_range=(-ext, ext), num=pts,
-            absolute=False, **scope_kw,
+            absolute=False, n_averages=n_avg, **scope_kw,
         )
         self._check_abort()
 
@@ -582,7 +606,7 @@ class Characterization:
                     ext_e, pts_e)
         elev = self.ver.scan_1d(
             dim="y", scan_range=(-ext_e, ext_e), num=pts_e,
-            absolute=False, **scope_kw,
+            absolute=False, n_averages=n_avg, **scope_kw,
         )
         self._check_abort()
 
@@ -592,7 +616,7 @@ class Characterization:
                     ext_a, pts_a)
         axial = self.ver.scan_1d(
             dim="z", scan_range=(-ext_a, ext_a), num=pts_a,
-            absolute=False, **scope_kw,
+            absolute=False, n_averages=n_avg, **scope_kw,
         )
         self._check_abort()
 
@@ -602,7 +626,7 @@ class Characterization:
         two_d = self.ver.scan_2d(
             x_range=(-ext2, ext2), num_x=pts2,
             y_range=(-ext2, ext2), num_y=pts2,
-            absolute=False, **scope_kw,
+            absolute=False, n_averages=n_avg, **scope_kw,
         )
 
         self.report.scans["lateral_1d"] = lat
@@ -622,9 +646,7 @@ class Characterization:
              "1-D Elevation Peak Offset"),
         ):
             try:
-                coord_arr = np.asarray(next(iter(scan.coords.values())),
-                                       dtype=float)
-                idx = int(np.argmax(scan.vpp))
+                coord_arr, _pnp, idx = _1d_scan_pnp_peak(scan)
                 offset_mm = float(coord_arr[idx])
             except Exception as e:  # noqa: BLE001
                 logger.warning("Could not extract 1-D peak for %s: %s",
@@ -658,7 +680,8 @@ class Characterization:
         self._apply_baseline_range()
         meas = self.ver.measure_pressure(
             float(pos[0]), float(pos[1]), float(pos[2]),
-            **self.scan_config.scope_kwargs(),
+            n_averages=int(self.scan_config.scope.n_averages),
+            **self._burst_scope_kwargs(),
         )
         if meas is None:
             raise RuntimeError("Scope timeout while measuring waveform at peak.")
@@ -786,15 +809,14 @@ class Characterization:
         freqs = self.frequency_kHz + np.asarray(cfg.frequency_sweep.offsets_kHz,
                                                 dtype=float)
         if duration_usec is None:
-            # cycles / freq_kHz => ms; ×1000 => µs.
-            duration_usec = (float(cfg.frequency_sweep.cycles_per_burst)
-                             / self.frequency_kHz) * 1000.0
+            duration_usec = self._pulse_duration_us()
         self._apply_baseline_range()
         logger.info("Frequency sweep across %s kHz...", freqs.tolist())
         result = self.ver.scan_frequency(
             frequencies_kHz=freqs,
             duration_usec=duration_usec,
-            **cfg.scope_kwargs(),
+            n_averages=int(cfg.scope.n_averages),
+            **self._burst_scope_kwargs(duration_usec),
         )
         # Per-freq PNP.
         traces = np.atleast_2d(result.traces)
@@ -911,7 +933,8 @@ class Characterization:
 
         result = self.ver.scan_voltage(
             voltages_V=volts,
-            **cfg.scope_kwargs(),
+            n_averages=int(cfg.scope.n_averages),
+            **self._burst_scope_kwargs(),
         )
         # Reset to baseline for anything downstream.
         self._apply_baseline_range()
@@ -948,6 +971,30 @@ class Characterization:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    #: Extra time (us) kept after the end of the burst's arrival.
+    BURST_WINDOW_MARGIN_US = 10.0
+
+    def _pulse_duration_us(self) -> float:
+        """Acceptance pulse duration (us) at the nominal frequency,
+        from ``VerificationTank.DEFAULT_DURATION_US_BY_FREQ_KHZ``."""
+        return VerificationTank.default_duration_us_for(self.frequency_kHz)
+
+    def _burst_scope_kwargs(self, duration_usec: Optional[float] = None) -> dict:
+        """Scope kwargs with ``time_stop`` extended to cover the full burst.
+
+        The window must reach ``arrival + burst duration + margin``,
+        where arrival is at the deepest axial-scan point. The burst
+        defaults to :meth:`_pulse_duration_us`. The configured
+        ``time_stop_us`` is kept when it is already long enough.
+        """
+        cfg = self.scan_config
+        if duration_usec is None:
+            duration_usec = self._pulse_duration_us()
+        z_mm = float(self.ver.hydrophone_position[2]) + float(cfg.axial_1d.extent_mm)
+        arrival_us = z_mm / (float(cfg.sos_water_m_per_s) / 1000.0)
+        min_stop_us = arrival_us + float(duration_usec) + self.BURST_WINDOW_MARGIN_US
+        return cfg.scope_kwargs(min_time_stop_us=min_stop_us)
+
     def _apply_baseline_range(self) -> None:
         """Reset the scope's hydrophone channel to the configured baseline."""
         rng = int(self.scan_config.scope.hydrophone_range_mv)
@@ -980,6 +1027,7 @@ class Characterization:
                 self.ver.apply_pulse(
                     frequency_kHz=self.frequency_kHz,
                     voltage=self.voltage_V,
+                    duration_usec=self._pulse_duration_us(),
                 )
             except Exception as e:
                 logger.warning(
@@ -1058,7 +1106,7 @@ class Characterization:
         pos = self.ver.hydrophone_position
         cfg = self.scan_config
         baseline_range = int(cfg.scope.hydrophone_range_mv)
-        scope_kw = cfg.scope_kwargs()
+        scope_kw = self._burst_scope_kwargs()
         hyd = getattr(self.ver, "hydrophone", None)
         pa_per_v: Optional[float] = None
         if hyd is not None:
@@ -1155,15 +1203,6 @@ class Characterization:
             return None
         pnp = wf.get("pnp_MPa", float("nan"))
         thr = self.criteria.pnp_min_for(self.frequency_kHz)
-        if thr is None:
-            self.report.grade_row(
-                ROW["pnp_at_peak_MPa"], passed=True,
-                note=f"no threshold for {self.frequency_kHz} kHz",
-            )
-            logger.info("[grade] PNP at peak \u2192 SKIP "
-                        "(no threshold for %g kHz; measured=%.3f MPa)",
-                        self.frequency_kHz, float(pnp))
-            return None
         passed = float(pnp) >= thr
         self.report.grade_row(ROW["pnp_at_peak_MPa"], passed=passed,
                               threshold=thr,
@@ -1456,17 +1495,12 @@ class Characterization:
         against. The 1-D scan is stored with coordinates relative
         to the 2-D peak (``absolute=False``), so the reference is
         zero and the offset is simply the argmax coordinate of the
-        1-D sweep."""
+        1-D sweep's PNP (the same quantity plotted in the report)."""
         scan = self.report.scans.get(scan_key)
         if scan is None:
             return None
         try:
-            coord_name, coord_arr = next(iter(scan.coords.items()))
-            coord_arr = np.asarray(coord_arr, dtype=float)
-            vpp = scan.vpp  # peak-to-peak per point, shape matches coord
-            if vpp.size == 0 or coord_arr.size == 0:
-                return None
-            idx = int(np.argmax(vpp))
+            coord_arr, _pnp, idx = _1d_scan_pnp_peak(scan)
             peak_coord = float(coord_arr[idx])
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not extract 1-D peak from %s: %s",
@@ -1476,7 +1510,7 @@ class Characterization:
         # is the 2-D peak. The offset is therefore the peak coord
         # itself.
         offset_mm = float(peak_coord)
-        max_mm = float(self.criteria.peak_offset.max_1d_axis_mm)
+        max_mm = self.criteria.peak_offset.max_1d_axis_mm_for(self.frequency_kHz)
         passed = abs(offset_mm) <= max_mm
         threshold = f"|{axis}| \u2264 {max_mm} mm"
         note = f"1-D peak {axis} = {offset_mm:+.3f} mm from 2-D peak"

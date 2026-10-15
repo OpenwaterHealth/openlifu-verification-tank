@@ -23,8 +23,8 @@ def test_verificationtank_class_defaults_exist():
     build time — renaming any of them silently breaks every CLI."""
     from openlifu_verification import VerificationTank as VT
     for name in (
-        "DEFAULT_FREQUENCY_KHZ", "DEFAULT_VOLTAGE_V",
-        "DEFAULT_CYCLES_PER_BURST", "DEFAULT_INTERVAL_MSEC",
+        "DEFAULT_FREQUENCY_KHZ", "DEFAULT_VOLTAGE_BY_FREQ_KHZ",
+        "DEFAULT_DURATION_US_BY_FREQ_KHZ", "DEFAULT_INTERVAL_MSEC",
         "DEFAULT_PULSE_COUNT", "DEFAULT_TRIGGER_MODE",
     ):
         assert hasattr(VT, name), f"VerificationTank missing {name}"

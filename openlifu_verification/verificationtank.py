@@ -123,8 +123,15 @@ class VerificationTank:
     # ``None`` and pass them through so operator can rely on these
     # values without hunting for hard-coded numbers in every script.
     DEFAULT_FREQUENCY_KHZ: float = 400.0
-    DEFAULT_VOLTAGE_V: float = 20.0
-    DEFAULT_CYCLES_PER_BURST: float = 20.0
+    # Per-frequency drive defaults; one entry per supported frequency
+    # (acceptance.SUPPORTED_FREQUENCIES_KHZ). Other frequencies need
+    # explicit voltage / duration (or cycles_per_burst).
+    # HV rail (V). 155 kHz runs hotter so its longer, lower-frequency
+    # pulses still give a healthy hydrophone signal.
+    DEFAULT_VOLTAGE_BY_FREQ_KHZ: dict[float, float] = {155.0: 40.0, 400.0: 20.0}
+    # Pulse duration (us): 70 us (~11 cycles) at 155 kHz, 50 us
+    # (20 cycles) at 400 kHz.
+    DEFAULT_DURATION_US_BY_FREQ_KHZ: dict[float, float] = {155.0: 70.0, 400.0: 50.0}
     DEFAULT_INTERVAL_MSEC: float = 20.0
     DEFAULT_PULSE_COUNT: int = 1
     DEFAULT_TRIGGER_MODE: str = "single"
@@ -500,6 +507,40 @@ class VerificationTank:
             trigger_mode=trigger_mode, apodization=apodization,
         )
 
+    @classmethod
+    def default_voltage_for(cls, frequency_kHz: float) -> float:
+        """Default HV rail (V) for ``frequency_kHz``.
+
+        Raises ``ValueError`` for frequencies not in
+        ``DEFAULT_VOLTAGE_BY_FREQ_KHZ``; pass ``voltage`` explicitly.
+        """
+        freq = float(frequency_kHz)
+        if freq not in cls.DEFAULT_VOLTAGE_BY_FREQ_KHZ:
+            raise ValueError(
+                f"No default HV rail for {freq:g} kHz (have "
+                f"{sorted(cls.DEFAULT_VOLTAGE_BY_FREQ_KHZ)}); pass voltage explicitly")
+        return float(cls.DEFAULT_VOLTAGE_BY_FREQ_KHZ[freq])
+
+    @classmethod
+    def default_duration_us_for(cls, frequency_kHz: float,
+                                cycles_per_burst: float | None = None) -> float:
+        """Default pulse duration (us) for ``frequency_kHz``.
+
+        An explicit ``cycles_per_burst`` always wins. Otherwise uses
+        ``DEFAULT_DURATION_US_BY_FREQ_KHZ``; raises ``ValueError`` for
+        frequencies not listed there.
+        """
+        freq = float(frequency_kHz)
+        if cycles_per_burst is None:
+            if freq not in cls.DEFAULT_DURATION_US_BY_FREQ_KHZ:
+                raise ValueError(
+                    f"No default pulse duration for {freq:g} kHz (have "
+                    f"{sorted(cls.DEFAULT_DURATION_US_BY_FREQ_KHZ)}); pass "
+                    f"duration_usec or cycles_per_burst explicitly")
+            return float(cls.DEFAULT_DURATION_US_BY_FREQ_KHZ[freq])
+        # cycles / freq_kHz => milliseconds; x1000 => microseconds.
+        return float(cycles_per_burst) / freq * 1000.0
+
     def apply_pulse(self, *,
                     frequency_kHz: float | None = None,
                     voltage: float | None = None,
@@ -515,13 +556,15 @@ class VerificationTank:
 
         Thin wrapper around :meth:`configure_lifu` that lets scripts
         pass their argparse args through unchanged (``default=None``)
-        and rely on class-level defaults
-        (``DEFAULT_FREQUENCY_KHZ``, ``DEFAULT_VOLTAGE_V``, ...) for
-        anything the operator didn't explicitly override.
+        and rely on defaults for anything the operator didn't
+        explicitly override. ``frequency_kHz`` defaults to the
+        ``frequency`` the tank was constructed with; ``voltage``
+        defaults to :meth:`default_voltage_for` that frequency.
+        Other kwargs use the class-level ``DEFAULT_*`` constants.
 
-        ``duration_usec`` is derived from ``cycles_per_burst /
-        frequency_kHz * 1000`` when not passed explicitly, so callers
-        can just specify "20 cycles" instead of computing the µs.
+        ``duration_usec`` defaults to :meth:`default_duration_us_for`
+        (``cycles_per_burst / frequency_kHz * 1000`` when cycles are
+        given, else the per-frequency table).
 
         ``apodization`` accepts any representation supported by
         :func:`openlifu_verification.apodization.normalize_to_int`
@@ -532,13 +575,11 @@ class VerificationTank:
         :meth:`configure_lifu` (useful for logging / metadata).
         """
         freq = float(frequency_kHz if frequency_kHz is not None
-                     else self.DEFAULT_FREQUENCY_KHZ)
-        volt = float(voltage if voltage is not None else self.DEFAULT_VOLTAGE_V)
+                     else self.frequency)
+        volt = float(voltage if voltage is not None
+                     else self.default_voltage_for(freq))
         if duration_usec is None:
-            cyc = float(cycles_per_burst if cycles_per_burst is not None
-                        else self.DEFAULT_CYCLES_PER_BURST)
-            # cycles / freq_kHz => milliseconds; ×1000 => microseconds.
-            duration = cyc / freq * 1000.0
+            duration = self.default_duration_us_for(freq, cycles_per_burst)
         else:
             duration = float(duration_usec)
         interval = float(interval_msec if interval_msec is not None

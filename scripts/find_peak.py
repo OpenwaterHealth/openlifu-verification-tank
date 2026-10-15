@@ -37,7 +37,7 @@ def main():
                         help="TX voltage during peak search (V). Peak search "
                              "typically wants a lower voltage than the full "
                              "sweep, so this defaults to 12 V rather than "
-                             "VerificationTank.DEFAULT_VOLTAGE_V.")
+                             "VerificationTank.DEFAULT_VOLTAGE_BY_FREQ_KHZ.")
     parser.add_argument("--duration-usec", type=float, default=None,
                         help="Pulse duration (µs). Defaults to 20 cycles.")
     parser.add_argument("--interval-msec", type=float, default=None)

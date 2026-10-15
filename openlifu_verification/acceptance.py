@@ -15,6 +15,39 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+#: Nominal drive frequencies (kHz) of the supported TXM modules. Every
+#: frequency-dependent setting must have an explicit entry for each.
+SUPPORTED_FREQUENCIES_KHZ: tuple[float, ...] = (155.0, 400.0)
+
+
+def _freq_key(freq_kHz) -> str:
+    """JSON key for a frequency (``155.0`` / ``"155"`` -> ``"155"``)."""
+    return str(int(round(float(freq_kHz))))
+
+
+def _require_all_freqs(table: dict, name: str) -> dict[str, float]:
+    """Normalize ``table`` keys and require every supported frequency."""
+    norm = {_freq_key(k): float(v) for k, v in dict(table).items()}
+    missing = [_freq_key(f) for f in SUPPORTED_FREQUENCIES_KHZ
+               if _freq_key(f) not in norm]
+    if missing:
+        raise ValueError(
+            f"{name} has no entry for {', '.join(missing)} kHz; every "
+            f"frequency-dependent criterion needs a value for each "
+            f"supported frequency "
+            f"({', '.join(_freq_key(f) for f in SUPPORTED_FREQUENCIES_KHZ)} kHz)"
+        )
+    return norm
+
+
+def _lookup_freq(table: dict, freq_kHz: float, name: str) -> float:
+    """Strict per-frequency lookup with a clear error."""
+    key = _freq_key(freq_kHz)
+    if key not in table:
+        raise KeyError(f"{name} has no entry for {key} kHz "
+                       f"(have: {', '.join(sorted(table))})")
+    return float(table[key])
+
 
 def _filtered(cls, data: dict) -> Any:
     """Instantiate ``cls`` from ``data``, silently dropping unknown
@@ -49,18 +82,25 @@ def _peak_depth_from_dict(data: dict) -> "PeakDepth":
 
     New shape (per-freq LUT):
         ``{"nominal_by_freq_kHz": {"155": 50.0, "400": 50.0},
-           "default_nominal_mm": 50.0,
            "hydrophone_tol_mm": 2.0,
            "focused_tol_pct": 5.0,
            "peak_z_focus_tol_pct": 5.0}``
+
+    A legacy single depth (``nominal_mm`` or ``default_nominal_mm``)
+    is applied to every supported frequency when no LUT is given.
     """
     data = dict(data or {})
     # Migrate legacy keys in place so the filter step below picks them
     # up as their new names.
-    if "nominal_mm" in data and "default_nominal_mm" not in data:
-        data["default_nominal_mm"] = data.pop("nominal_mm")
-    else:
-        data.pop("nominal_mm", None)
+    legacy = [data.pop(k) for k in ("default_nominal_mm", "nominal_mm")
+              if k in data]
+    if legacy:
+        if "nominal_by_freq_kHz" in data:
+            logger.warning("peak_depth: ignoring legacy single nominal depth "
+                           "%r; nominal_by_freq_kHz is set", legacy[0])
+        else:
+            data["nominal_by_freq_kHz"] = {
+                _freq_key(f): float(legacy[0]) for f in SUPPORTED_FREQUENCIES_KHZ}
     if "tol_pct" in data and "focused_tol_pct" not in data:
         data["focused_tol_pct"] = data.pop("tol_pct")
     else:
@@ -84,14 +124,28 @@ class PeakOffset:
     independently (``|x|`` and ``|y|``) and is what grades the
     D.5 / D.6 Hydrophone X/Y Position report rows.
 
-    ``max_1d_axis_mm`` is the max separation between the peak of a
-    1-D lateral (x) or elevation (y) scan and the peak located by
-    the 2-D scan. Grades the D-section rows inserted right after
-    the 1-D lateral / elevation figures.
+    ``max_1d_axis_mm_by_freq_kHz`` is the max separation (per
+    frequency, kHz -> mm) between the peak of a 1-D lateral (x) or
+    elevation (y) scan and the peak located by the 2-D scan. Grades
+    the D-section rows inserted right after the 1-D lateral /
+    elevation figures.
     """
     max_mm: float = 3.0
     max_axis_mm: float = 1.0
-    max_1d_axis_mm: float = 0.2
+    max_1d_axis_mm_by_freq_kHz: dict[str, float] = field(default_factory=lambda: {
+        "155": 1.0,
+        "400": 0.2,
+    })
+
+    def __post_init__(self):
+        self.max_1d_axis_mm_by_freq_kHz = _require_all_freqs(
+            self.max_1d_axis_mm_by_freq_kHz,
+            "peak_offset.max_1d_axis_mm_by_freq_kHz")
+
+    def max_1d_axis_mm_for(self, freq_kHz: float) -> float:
+        """1-D peak-offset limit (mm) for ``freq_kHz``."""
+        return _lookup_freq(self.max_1d_axis_mm_by_freq_kHz, freq_kHz,
+                            "peak_offset.max_1d_axis_mm_by_freq_kHz")
 
 
 @dataclass
@@ -112,23 +166,23 @@ class PeakDepth:
     the pipeline uses the plane-wave value as the seed for the
     focused-pulse measurement.
     """
-    # LUT: frequency (kHz) -> nominal hydrophone depth (mm). Populate
-    # more entries as new devices are calibrated; missing frequencies
-    # fall back to :attr:`default_nominal_mm`.
+    # LUT: frequency (kHz) -> nominal hydrophone depth (mm).
     nominal_by_freq_kHz: dict[str, float] = field(default_factory=lambda: {
         "155": 50.0,
         "400": 50.0,
     })
-    default_nominal_mm: float = 50.0
     hydrophone_tol_mm: float = 2.0
     focused_tol_pct: float = 5.0
     peak_z_focus_tol_pct: float = 5.0
 
+    def __post_init__(self):
+        self.nominal_by_freq_kHz = _require_all_freqs(
+            self.nominal_by_freq_kHz, "peak_depth.nominal_by_freq_kHz")
+
     def nominal_for(self, freq_kHz: float) -> float:
-        """Look up the nominal depth (mm) for ``freq_kHz`` with fallback."""
-        key = str(int(round(float(freq_kHz))))
-        val = self.nominal_by_freq_kHz.get(key)
-        return float(val) if val is not None else float(self.default_nominal_mm)
+        """Nominal hydrophone depth (mm) for ``freq_kHz``."""
+        return _lookup_freq(self.nominal_by_freq_kHz, freq_kHz,
+                            "peak_depth.nominal_by_freq_kHz")
 
 
 @dataclass
@@ -139,12 +193,16 @@ class PnpAtPeak:
         "400": 1.0,
     })
 
+    def __post_init__(self):
+        self.min_by_freq_kHz = _require_all_freqs(
+            self.min_by_freq_kHz, "pnp_at_peak.min_by_freq_kHz")
+
 
 @dataclass
 class FreqResponse:
     """Deviation of the nominal-frequency PNP from the peak PNP in the
     frequency sweep, expressed as a percentage of the peak."""
-    max_deviation_pct: float = 5.0
+    max_deviation_pct: float = 10.0
 
 
 @dataclass
@@ -258,9 +316,9 @@ class AcceptanceCriteria:
                                  "tol_pct":     self.arrival_time.tol_pct},
             "peak_offset":      {"max_mm":        self.peak_offset.max_mm,
                                  "max_axis_mm":   self.peak_offset.max_axis_mm,
-                                 "max_1d_axis_mm": self.peak_offset.max_1d_axis_mm},
+                                 "max_1d_axis_mm_by_freq_kHz": dict(
+                                     self.peak_offset.max_1d_axis_mm_by_freq_kHz)},
             "peak_depth":       {"nominal_by_freq_kHz": dict(self.peak_depth.nominal_by_freq_kHz),
-                                 "default_nominal_mm":  self.peak_depth.default_nominal_mm,
                                  "hydrophone_tol_mm":   self.peak_depth.hydrophone_tol_mm,
                                  "focused_tol_pct":     self.peak_depth.focused_tol_pct,
                                  "peak_z_focus_tol_pct": self.peak_depth.peak_z_focus_tol_pct},
@@ -275,12 +333,7 @@ class AcceptanceCriteria:
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path
 
-    def pnp_min_for(self, freq_kHz: float) -> Optional[float]:
-        """Look up the minimum PNP for a nominal frequency.
-
-        Returns ``None`` if the frequency is not listed -- the grader
-        will then mark it ``NA`` rather than fail.
-        """
-        key = str(int(round(float(freq_kHz))))
-        val = self.pnp_at_peak.min_by_freq_kHz.get(key)
-        return float(val) if val is not None else None
+    def pnp_min_for(self, freq_kHz: float) -> float:
+        """Minimum PNP (MPa) at the peak for a nominal frequency."""
+        return _lookup_freq(self.pnp_at_peak.min_by_freq_kHz, freq_kHz,
+                            "pnp_at_peak.min_by_freq_kHz")

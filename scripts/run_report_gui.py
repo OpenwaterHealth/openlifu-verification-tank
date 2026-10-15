@@ -64,6 +64,7 @@ from PyQt6.QtWidgets import (
 )
 
 from openlifu_verification import HardwareNotConnectedError, Hydrophone, OperatorPrefs
+from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
 
 
 logger = logging.getLogger(__name__)
@@ -588,7 +589,7 @@ class _WorkerThread(QThread):
 # Restrict the frequency dropdown to the two nominal drive
 # frequencies supported by the acceptance criteria. Both are the same
 # values the CLI's --frequency-khz flag accepts.
-_ALLOWED_FREQUENCIES_KHZ: tuple[float, ...] = (155.0, 400.0)
+_ALLOWED_FREQUENCIES_KHZ: tuple[float, ...] = SUPPORTED_FREQUENCIES_KHZ
 
 
 class LauncherDialog(QDialog):

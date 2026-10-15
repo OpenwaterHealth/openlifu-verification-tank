@@ -47,6 +47,7 @@ from openlifu_verification import (
     report_io,
     set_log_level,
 )
+from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
 
 logger = logging.getLogger(__name__)
 
@@ -154,11 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
     # --- Device / measurement ---
     p.add_argument("--frequency-khz", type=float,
                    default=VerificationTank.DEFAULT_FREQUENCY_KHZ,
-                   choices=[155.0, 400.0],
+                   choices=list(SUPPORTED_FREQUENCIES_KHZ),
                    help="Nominal center frequency of the TXM.")
-    p.add_argument("--voltage", type=float,
-                   default=VerificationTank.DEFAULT_VOLTAGE_V,
-                   help="HV rail (V) for peak scans + freq sweep.")
+    p.add_argument("--voltage", type=float, default=None,
+                   help="HV rail (V) for peak scans + freq sweep. Default: "
+                        "per-frequency (VerificationTank.DEFAULT_VOLTAGE_BY_FREQ_KHZ).")
     p.add_argument("--num-modules", type=int, default=1)
     p.add_argument("--ext-power", action="store_true",
                    help="Use the QPX600DP external HV supply (default: internal HV).")
@@ -305,6 +306,10 @@ def run(args: argparse.Namespace, *,
     scan_config = ScanConfig.load_or_create(args.scan_config)
     criteria = scan_config.acceptance
 
+    voltage_V = (args.voltage if args.voltage is not None
+                 else VerificationTank.default_voltage_for(args.frequency_khz))
+    logger.info("HV rail: %g V at %g kHz", voltage_V, args.frequency_khz)
+
     # --- Tank ---
     if args.dry_run:
         logger.info("=== DRY RUN (no hardware) ===")
@@ -331,7 +336,7 @@ def run(args: argparse.Namespace, *,
         if not args.dry_run:
             ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
-                voltage=args.voltage,
+                voltage=voltage_V,
             )
             ver.enable_hv_output(wait=True)
         else:
@@ -359,7 +364,7 @@ def run(args: argparse.Namespace, *,
             criteria=criteria,
             scan_config=scan_config,
             frequency_kHz=args.frequency_khz,
-            voltage_V=args.voltage,
+            voltage_V=voltage_V,
             plot=args.plot_peak,
         )
         t_start = time.perf_counter()

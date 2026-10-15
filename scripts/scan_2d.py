@@ -31,7 +31,7 @@ def main():
     # --- Pulse / drive (None => VerificationTank class defaults) ---
     parser.add_argument("--frequency-khz", type=float, default=None)
     parser.add_argument("--voltage", type=float, default=None,
-                        help="HV rail in V (default: VerificationTank.DEFAULT_VOLTAGE_V).")
+                        help="HV rail in V (default: VerificationTank.DEFAULT_VOLTAGE_BY_FREQ_KHZ).")
     parser.add_argument("--duration-usec", type=float, default=None,
                         help="Pulse duration in µs (default: cycles / frequency).")
     parser.add_argument("--interval-msec", type=float, default=None)

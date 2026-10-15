@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from openlifu_verification import VerificationTank
+from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
 
 
 class _StubTank:
@@ -18,8 +21,11 @@ class _StubTank:
 
     # Mirror the class-level constants exactly.
     DEFAULT_FREQUENCY_KHZ = VerificationTank.DEFAULT_FREQUENCY_KHZ
-    DEFAULT_VOLTAGE_V = VerificationTank.DEFAULT_VOLTAGE_V
-    DEFAULT_CYCLES_PER_BURST = VerificationTank.DEFAULT_CYCLES_PER_BURST
+    DEFAULT_VOLTAGE_BY_FREQ_KHZ = VerificationTank.DEFAULT_VOLTAGE_BY_FREQ_KHZ
+    default_voltage_for = VerificationTank.default_voltage_for
+    DEFAULT_DURATION_US_BY_FREQ_KHZ = VerificationTank.DEFAULT_DURATION_US_BY_FREQ_KHZ
+    default_duration_us_for = VerificationTank.default_duration_us_for
+    frequency = VerificationTank.DEFAULT_FREQUENCY_KHZ
     DEFAULT_INTERVAL_MSEC = VerificationTank.DEFAULT_INTERVAL_MSEC
     DEFAULT_PULSE_COUNT = VerificationTank.DEFAULT_PULSE_COUNT
     DEFAULT_TRIGGER_MODE = VerificationTank.DEFAULT_TRIGGER_MODE
@@ -40,18 +46,40 @@ def _call_apply_pulse(**kwargs) -> dict:
 
 
 def test_defaults_when_nothing_passed():
-    """No kwargs => every DEFAULT_* comes through, and duration
-    is derived from cycles / frequency."""
+    """No kwargs => every DEFAULT_* comes through, with voltage and
+    duration from the per-frequency tables."""
     r = _call_apply_pulse()
-    assert r["frequency_kHz"] == VerificationTank.DEFAULT_FREQUENCY_KHZ
-    assert r["voltage"] == VerificationTank.DEFAULT_VOLTAGE_V
-    # cycles / freq_kHz => ms; \u00d71000 => us.
-    expected_duration = (VerificationTank.DEFAULT_CYCLES_PER_BURST
-                         / VerificationTank.DEFAULT_FREQUENCY_KHZ) * 1000.0
-    assert r["duration_usec"] == expected_duration
+    f = VerificationTank.DEFAULT_FREQUENCY_KHZ
+    assert r["frequency_kHz"] == f
+    assert r["voltage"] == VerificationTank.DEFAULT_VOLTAGE_BY_FREQ_KHZ[f]
+    assert r["duration_usec"] == VerificationTank.DEFAULT_DURATION_US_BY_FREQ_KHZ[f]
     assert r["interval_msec"] == VerificationTank.DEFAULT_INTERVAL_MSEC
     assert r["pulse_count"] == VerificationTank.DEFAULT_PULSE_COUNT
     assert r["trigger_mode"] == VerificationTank.DEFAULT_TRIGGER_MODE
+
+
+def test_voltage_default_is_frequency_dependent():
+    assert _call_apply_pulse(frequency_kHz=155.0)["voltage"] == 40.0
+    assert _call_apply_pulse(frequency_kHz=400.0)["voltage"] == 20.0
+    # Unlisted frequency has no default; caller must pass voltage.
+    with pytest.raises(ValueError):
+        _call_apply_pulse(frequency_kHz=250.0)
+    assert _call_apply_pulse(frequency_kHz=250.0, voltage=10.0,
+                             cycles_per_burst=20.0)["voltage"] == 10.0
+
+
+def test_drive_tables_cover_all_supported_frequencies():
+    supported = set(SUPPORTED_FREQUENCIES_KHZ)
+    assert set(VerificationTank.DEFAULT_VOLTAGE_BY_FREQ_KHZ) == supported
+    assert set(VerificationTank.DEFAULT_DURATION_US_BY_FREQ_KHZ) == supported
+
+
+def test_duration_default_is_frequency_dependent():
+    assert _call_apply_pulse(frequency_kHz=155.0)["duration_usec"] == 70.0
+    assert _call_apply_pulse(frequency_kHz=400.0)["duration_usec"] == 50.0
+    # Explicit cycles still win over the per-frequency table.
+    r = _call_apply_pulse(frequency_kHz=155.0, cycles_per_burst=20.0)
+    assert r["duration_usec"] == 20.0 / 155.0 * 1000.0
 
 
 def test_explicit_kwargs_override_defaults():
@@ -71,7 +99,8 @@ def test_explicit_kwargs_override_defaults():
 def test_duration_derived_from_cycles_when_omitted():
     """When ``duration_usec`` is not passed but ``cycles_per_burst`` is,
     duration should track cycles / freq * 1000."""
-    r = _call_apply_pulse(frequency_kHz=200.0, cycles_per_burst=40.0)
+    r = _call_apply_pulse(frequency_kHz=200.0, voltage=10.0,
+                          cycles_per_burst=40.0)
     assert r["duration_usec"] == (40.0 / 200.0) * 1000.0
 
 
@@ -79,7 +108,7 @@ def test_explicit_duration_wins_over_cycles():
     """Explicit ``duration_usec`` must not be overwritten by the
     cycles/frequency derivation."""
     r = _call_apply_pulse(
-        frequency_kHz=200.0, cycles_per_burst=40.0,
+        frequency_kHz=200.0, voltage=10.0, cycles_per_burst=40.0,
         duration_usec=123.0,
     )
     assert r["duration_usec"] == 123.0

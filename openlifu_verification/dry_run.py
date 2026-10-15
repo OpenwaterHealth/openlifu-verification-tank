@@ -172,7 +172,7 @@ class DryRunTank:
     # --- measurement APIs ---------------------------------------------
     def measure_pressure(self, x, y, z, *,
                          time_start_s=-14e-6, time_stop_s=86e-6,
-                         sampling_interval_ns=100, timeout_s=2.0):
+                         sampling_interval_ns=100, timeout_s=2.0, **_):
         t_us = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
         amp = self._amplitude_Pa(x, y)
         trace = self._synth_trace(amp, z, t_us)
@@ -374,7 +374,7 @@ class DryRunTank:
                 y_range=(-4.0, 4.0), num_y=9, z=None, absolute=False,
                 time_start_s=-14e-6, time_stop_s=86e-6,
                 sampling_interval_ns=100, chunk_size=0, timeout_s=None,
-                progress="bar") -> ScanResult:
+                progress="bar", **_) -> ScanResult:
         return self.scan_lateral(
             x_range=x_range, num_x=num_x,
             y_range=y_range, num_y=num_y,
@@ -387,7 +387,7 @@ class DryRunTank:
     def scan_frequency(self, *, frequencies_kHz, duration_usec,
                        time_start_s=-14e-6, time_stop_s=86e-6,
                        sampling_interval_ns=100, chunk_size=0,
-                       timeout_s=None, progress="bar") -> ScanResult:
+                       timeout_s=None, progress="bar", **_) -> ScanResult:
         freqs = np.asarray(list(frequencies_kHz), dtype=float)
         t_us = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
         traces = np.empty((freqs.size, t_us.size), dtype=float)
@@ -418,7 +418,7 @@ class DryRunTank:
     def scan_voltage(self, *, voltages_V,
                      time_start_s=-14e-6, time_stop_s=86e-6,
                      sampling_interval_ns=100, chunk_size=0,
-                     timeout_s=None, progress="bar") -> ScanResult:
+                     timeout_s=None, progress="bar", **_) -> ScanResult:
         voltages = np.asarray(list(voltages_V), dtype=float)
         t_us = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
         traces = np.empty((voltages.size, t_us.size), dtype=float)
