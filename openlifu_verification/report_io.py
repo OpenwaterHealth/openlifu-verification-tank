@@ -751,7 +751,8 @@ def write_device_config(report: TestReport, path: Path,
 # Orchestrator
 # ----------------------------------------------------------------------
 def write_report(report: TestReport, output_dir: Optional[Path] = None,
-                 *, run_dir_name: Optional[str] = None,
+                 *, reports_root: Optional[Path] = None,
+                 run_dir_name: Optional[str] = None,
                  write_device_config_json: bool = True) -> Path:
     """Serialize a :class:`TestReport` into a timestamped subdirectory.
 
@@ -765,9 +766,11 @@ def write_report(report: TestReport, output_dir: Optional[Path] = None,
     Args:
         report: The completed report.
         output_dir: Parent directory. Defaults to
-            ``test_reports/<TXM-SN>/`` in the current working
-            directory so per-device runs live side-by-side. Created
-            if missing.
+            ``<reports_root>/<TXM-SN>/`` so per-device runs live
+            side-by-side. Created if missing.
+        reports_root: Root folder used when ``output_dir`` is
+            omitted. Defaults to ``test_reports/`` in the current
+            working directory.
         run_dir_name: Override the auto-generated subdirectory name
             (defaults to a ``YYYYMMDD_HHMMSS`` timestamp).
         write_device_config_json: Set ``False`` to skip the config
@@ -784,7 +787,8 @@ def write_report(report: TestReport, output_dir: Optional[Path] = None,
     file_stem = report_file_stem(report)
 
     if output_dir is None:
-        output_dir = Path.cwd() / "test_reports" / sn
+        root = Path(reports_root) if reports_root else Path.cwd() / "test_reports"
+        output_dir = root / sn
     else:
         output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

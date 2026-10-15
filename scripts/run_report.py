@@ -176,8 +176,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "contains acceptance criteria + scan geometry + scope settings).")
     p.add_argument("--prefs", type=Path, default=None,
                    help="Path to operator prefs JSON (defaults to ~/.openlifu_verification/operator_prefs.json).")
+    p.add_argument("--reports-root", type=Path, default=None,
+                   help="Root reports folder; each run is written to "
+                        "<root>/<TXM-SN>/<timestamp>/. Default: ./test_reports.")
     p.add_argument("--output-dir", type=Path, default=None,
-                   help="Parent output directory. Default: ./test_reports/<TXM-SN>/.")
+                   help="Parent output directory (overrides --reports-root). "
+                        "Default: <reports-root>/<TXM-SN>/.")
     p.add_argument("--no-prompt", action="store_true",
                    help="Skip the interactive prefs prompt; use cached values as-is.")
     p.add_argument("--no-start-prompt", action="store_true",
@@ -398,11 +402,12 @@ def run(args: argparse.Namespace, *,
                     elapsed, "PASS" if report.overall_pass else "FAIL")
 
         # --- Persist artifacts ---
-        # write_report defaults to test_reports/<TXM-SN>/<ts>/ when
+        # write_report defaults to <reports_root>/<TXM-SN>/<ts>/ when
         # output_dir is None.
         run_dir = report_io.write_report(
             report,
             args.output_dir,
+            reports_root=args.reports_root,
             write_device_config_json=not args.skip_frequency,
         )
         # Match the on-disk stem (SN + test start timestamp) so the

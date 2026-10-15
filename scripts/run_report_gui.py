@@ -27,11 +27,13 @@ Example::
 from __future__ import annotations
 
 import argparse
+import html
 import logging
 import queue
 import re
 import sys
 import threading
+import time
 import traceback
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
@@ -42,13 +44,14 @@ from typing import Optional
 # invocation on a machine without PyQt6 still works.
 import run_report
 
-from PyQt6.QtCore import Qt, QObject, QThread, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QSettings, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QFont, QFontMetrics, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -674,6 +677,27 @@ class LauncherDialog(QDialog):
         run_form.setVerticalSpacing(8)
         run_form.addRow("Frequency:", self.freq_combo)
 
+        # Reports folder: clickable path (opens Explorer) + a "…"
+        # button to change it. Runs are written to
+        # <folder>/<TXM S/N>/<date_time>/.
+        self.reports_link = QLabel()
+        self.reports_link.setTextFormat(Qt.TextFormat.RichText)
+        self.reports_link.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        self.reports_link.linkActivated.connect(self._open_reports_root)
+        change_button = QPushButton("\u2026")
+        change_button.setToolTip("Change Reports Directory")
+        change_button.setAutoDefault(False)
+        change_button.setStyleSheet("min-width: 0px; padding: 2px 10px;")
+        change_button.clicked.connect(self._browse_reports_root)
+        reports_row = QHBoxLayout()
+        reports_row.setSpacing(8)
+        reports_row.addWidget(self.reports_link, 1)
+        reports_row.addWidget(change_button)
+        run_form.addRow("Reports saved to:", reports_row)
+        self._set_reports_root(Path(args.reports_root))
+
         # --- Buttons ---
         self.start_button = QPushButton("Start")
         self.start_button.setDefault(True)
@@ -722,6 +746,38 @@ class LauncherDialog(QDialog):
         self.start_button.setEnabled(ok)
 
     # ------------------------------------------------------------------
+    # Reports folder
+    # ------------------------------------------------------------------
+    def _set_reports_root(self, root: Path) -> None:
+        """Show ``root`` as a link, middle-elided to fit the form."""
+        self._reports_root = root
+        shown = QFontMetrics(self.reports_link.font()).elidedText(
+            str(root), Qt.TextElideMode.ElideMiddle, 300
+        )
+        self.reports_link.setText(
+            f'<a href="open" style="color:{current_palette().accent};'
+            f' text-decoration:none;">{html.escape(shown)}</a>'
+        )
+        self.reports_link.setToolTip(f"{root}\nClick to open in Explorer")
+
+    def _browse_reports_root(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self, "Change Reports Directory", str(self._reports_root)
+        )
+        if path:
+            self._set_reports_root(Path(path))
+
+    def _open_reports_root(self) -> None:
+        root = self._reports_root
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, "Reports folder",
+                                f"Could not create {root}:\n{e}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(root)))
+
+    # ------------------------------------------------------------------
     # Accessors used after ``exec()`` returns Accepted.
     # ------------------------------------------------------------------
     @property
@@ -743,6 +799,11 @@ class LauncherDialog(QDialog):
         return float(data) if data is not None else float(
             self._args.frequency_khz
         )
+
+    @property
+    def selected_reports_root(self) -> Path:
+        """Return the reports folder shown in the form."""
+        return self._reports_root
 
 
 # ----------------------------------------------------------------------
@@ -1101,6 +1162,18 @@ class RunningDialog(QDialog):
         self.progress.setTextVisible(True)
         self.progress.setMinimumHeight(24)
 
+        # Elapsed / remaining time shown in the bar text. Remaining is
+        # extrapolated from the rate between the first phase marker
+        # (skips variable connect time) and the latest one, so it is
+        # only as good as the _PHASES percentages.
+        self._t_start = time.monotonic()
+        self._first_mark: Optional[tuple[float, int]] = None
+        self._eta: Optional[float] = None
+        self._clock = QTimer(self)
+        self._clock.timeout.connect(self._refresh_time_text)
+        self._clock.start(1000)
+        self._refresh_time_text()
+
         # --- Acceptance-gate group ---
         gates_group = QGroupBox("Acceptance gates")
         gates_layout = QVBoxLayout(gates_group)
@@ -1195,8 +1268,37 @@ class RunningDialog(QDialog):
             # after the run has moved on.
             if pct > self.progress.value():
                 self.progress.setValue(pct)
+                self._mark_progress(pct)
             if not self._aborting:
                 self.section_label.setText(f"Current phase: {label}")
+
+    def _mark_progress(self, pct: int) -> None:
+        """Re-estimate the finish time after the bar advances."""
+        now = time.monotonic()
+        if self._first_mark is None:
+            self._first_mark = (now, pct)
+        else:
+            t0, p0 = self._first_mark
+            self._eta = now + (now - t0) / (pct - p0) * (100 - pct)
+        self._refresh_time_text()
+
+    def _refresh_time_text(self) -> None:
+        now = time.monotonic()
+        text = f"%p%   \u00b7   elapsed {_fmt_duration(now - self._t_start)}"
+        if self.progress.value() < 100:
+            if self._eta is None:
+                text += "   \u00b7   estimating remaining\u2026"
+            else:
+                remaining = _fmt_duration(max(self._eta - now, 0.0))
+                text += f"   \u00b7   ~{remaining} remaining"
+        self.progress.setFormat(text)
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format seconds as ``m:ss`` (or ``h:mm:ss`` past an hour)."""
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 # ----------------------------------------------------------------------
@@ -1469,6 +1571,14 @@ def main(argv=None) -> int:
     args.write_config = False
     args.confirm_write_config = False
 
+    # Reports folder: --reports-root, else the last folder picked in
+    # the launcher, else ./test_reports.
+    settings = QSettings("OpenLIFU", "VerificationGUI")
+    if args.reports_root is None:
+        saved = settings.value("reports_root", "", type=str)
+        args.reports_root = Path(saved) if saved else run_report.DEFAULT_OUTPUT_DIR
+    args.reports_root = Path(args.reports_root).resolve()
+
     exit_code = 130
     while True:
         launcher = LauncherDialog(args, prefs)
@@ -1481,6 +1591,8 @@ def main(argv=None) -> int:
         prefs = launcher.collected_prefs
         prefs.save(args.prefs)
         args.frequency_khz = launcher.selected_frequency_kHz
+        args.reports_root = launcher.selected_reports_root
+        settings.setValue("reports_root", str(args.reports_root))
 
         choice, exit_code = _run_once(args)
         if choice == "exit":
