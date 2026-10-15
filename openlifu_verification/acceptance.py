@@ -109,13 +109,6 @@ def _peak_depth_from_dict(data: dict) -> "PeakDepth":
 
 
 @dataclass
-class ArrivalTime:
-    """Round-trip arrival time (us) for the setup pulse."""
-    nominal_us: float = 33.3          # ~50 mm / 1500 m/s
-    tol_pct: float = 10.0
-
-
-@dataclass
 class PeakOffset:
     """Max allowed distance from the nominal focal center (mm).
 
@@ -248,7 +241,6 @@ class AcceptanceCriteria:
     Load with :meth:`from_file`; missing / partial JSON entries fall
     back to the defaults defined on each subsection.
     """
-    arrival_time: ArrivalTime = field(default_factory=ArrivalTime)
     peak_offset: PeakOffset = field(default_factory=PeakOffset)
     peak_depth: PeakDepth = field(default_factory=PeakDepth)
     pnp_at_peak: PnpAtPeak = field(default_factory=PnpAtPeak)
@@ -267,7 +259,6 @@ class AcceptanceCriteria:
         """
         data = data or {}
         return cls(
-            arrival_time=_filtered(ArrivalTime, data.get("arrival_time", {})),
             peak_offset=_filtered(PeakOffset, data.get("peak_offset", {})),
             peak_depth=_peak_depth_from_dict(data.get("peak_depth", {})),
             pnp_at_peak=_filtered(PnpAtPeak, data.get("pnp_at_peak", {})),
@@ -312,8 +303,6 @@ class AcceptanceCriteria:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "arrival_time":     {"nominal_us": self.arrival_time.nominal_us,
-                                 "tol_pct":     self.arrival_time.tol_pct},
             "peak_offset":      {"max_mm":        self.peak_offset.max_mm,
                                  "max_axis_mm":   self.peak_offset.max_axis_mm,
                                  "max_1d_axis_mm_by_freq_kHz": dict(

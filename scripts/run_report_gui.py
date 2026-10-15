@@ -431,7 +431,6 @@ def build_gui_parser() -> argparse.ArgumentParser:
 _PHASES: list[tuple[str, int, str]] = [
     # Substring, progress %, human label.
     ("LIFU Device fully connected",         5,   "Connecting to hardware"),
-    ("Arrival check:",                       10,  "Arrival check"),
     ("Plane-wave depth calibration:",        15,  "Plane-wave depth calibration"),
     ("Running fresh find_peak",              25,  "Peak search"),
     ("Running 1-D lateral",                  35,  "1-D lateral scan"),
@@ -510,6 +509,9 @@ class _RunSignals(QObject):
     failed = pyqtSignal(str)       # emits traceback string
     #: Emitted when the run stopped because the operator pressed Abort.
     aborted = pyqtSignal()
+    #: Emitted when the run stopped because depth calibration or the
+    #: peak search failed. Payload is the operator-facing reason.
+    halted = pyqtSignal(str)
     #: Emitted after a device write requested from the result dialog.
     write_done = pyqtSignal(bool)
     #: Emitted when the run aborted because a required piece of
@@ -572,6 +574,8 @@ class _WorkerThread(QThread):
             )
             if result.aborted:
                 self._signals.aborted.emit()
+            elif result.halted_reason:
+                self._signals.halted.emit(result.halted_reason)
             elif not self._completed:
                 self._signals.finished.emit(result, False)
         except HardwareNotConnectedError as e:
@@ -1507,7 +1511,7 @@ def _run_once(args: argparse.Namespace) -> tuple[str, int]:
 
     signals = _RunSignals()
     outcome: dict = {"kind": None, "result": None, "can_write": False,
-                     "tb": None, "hw": None}
+                     "tb": None, "hw": None, "reason": None}
     done = QDialog.DialogCode.Accepted
 
     def _on_finished(res, can_write):
@@ -1516,6 +1520,10 @@ def _run_once(args: argparse.Namespace) -> tuple[str, int]:
 
     def _on_aborted():
         outcome["kind"] = "aborted"
+        running.done(done)
+
+    def _on_halted(reason):
+        outcome.update(kind="halted", reason=reason)
         running.done(done)
 
     def _on_failed(tb):
@@ -1529,6 +1537,7 @@ def _run_once(args: argparse.Namespace) -> tuple[str, int]:
     queued = Qt.ConnectionType.QueuedConnection
     signals.finished.connect(_on_finished, queued)
     signals.aborted.connect(_on_aborted, queued)
+    signals.halted.connect(_on_halted, queued)
     signals.failed.connect(_on_failed, queued)
     signals.hardware_disconnected.connect(_on_hardware_disconnected, queued)
 
@@ -1559,6 +1568,17 @@ def _run_once(args: argparse.Namespace) -> tuple[str, int]:
                 "Returning to the start screen.",
             )
             return "another", 130
+
+        if outcome["kind"] == "halted":
+            QMessageBox.critical(
+                None,
+                "Scan halted",
+                outcome["reason"] + "\n\n"
+                "The remaining measurements depend on this step, so the "
+                "scan was stopped and no report was generated. Check the "
+                "hydrophone placement and the hardware, then try again.",
+            )
+            return "another", 1
 
         if outcome["kind"] == "hw":
             hardware, message = outcome["hw"]

@@ -491,14 +491,6 @@ def write_xlsx(report: TestReport, path: Path, figures: Optional[dict] = None) -
     sws.append(["Finished at", report.finished_at])
     sws.append(["Peak XY (mm)", f"({report.peak_xy_mm[0]:.4f}, "
                                 f"{report.peak_xy_mm[1]:.4f})"])
-    arr = report.arrival_check
-    if arr:
-        exp = arr.get("expected_us")
-        got = arr.get("arrival_us")
-        sws.append(["Arrival check",
-                    f"got {got:.2f}us vs expected {exp:.2f}us "
-                    f"({'PASS' if arr.get('passed') else 'FAIL'})"
-                    if got is not None else "no signal"])
     if report.voltage_response:
         sws.append(["Voltage linearity R**2",
                     f"{report.voltage_response.get('r2', float('nan')):.4f}"])

@@ -40,6 +40,7 @@ from openlifu_verification import (
     Hydrophone,
     OperatorPrefs,
     RunAborted,
+    RunHalted,
     ScanConfig,
     VerificationTank,
     characterization,
@@ -224,6 +225,8 @@ class RunResult:
     Paths. ``exit_code`` is what ``main`` returns to the OS: 0 on
     pass, 1 on fail, 130 on user abort, 2 on unexpected error.
     ``aborted`` is set when the run was stopped via ``abort_event``.
+    ``halted_reason`` is set (exit code 1, no report) when the depth
+    calibration or peak search failed and the run was stopped.
     """
     passed: bool = False
     run_dir: Optional[Path] = None
@@ -231,6 +234,7 @@ class RunResult:
     exit_code: int = 1
     device_write_ok: Optional[bool] = None
     aborted: bool = False
+    halted_reason: Optional[str] = None
 
 
 #: Signature of the ``on_complete`` hook accepted by :func:`run`. The
@@ -379,6 +383,11 @@ def run(args: argparse.Namespace, *,
             logger.warning("Run aborted by operator; no report written.")
             result.exit_code = 130
             result.aborted = True
+            return result
+        except RunHalted as e:
+            logger.error("Run halted: %s No report written.", e)
+            result.exit_code = 1
+            result.halted_reason = str(e)
             return result
         except KeyboardInterrupt:
             print("\nInterrupted during characterization.", file=sys.stderr)

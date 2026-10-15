@@ -7,8 +7,6 @@ a fixed sequence of measurement phases matching the sections of
     A. Test information       (:meth:`Characterization.collect_test_info`)
     B. Transmit Module        (:meth:`Characterization.collect_txm_info`)
     C. Console                (:meth:`Characterization.collect_console_info`)
-    -- Arrival-time sanity check --
-                              (:meth:`Characterization.warmup_and_arrival_check`)
     -- Plane-wave depth cal --
                               (:meth:`Characterization.calibrate_depth_plane_wave`)
     -- Peak search --         (:meth:`Characterization.find_peak_xy`)
@@ -49,6 +47,13 @@ class RunAborted(Exception):
     """Raised by :meth:`Characterization.run` when the caller's abort
     event is set. Checked between phases, so the phase in progress
     always completes before the run stops."""
+
+
+class RunHalted(Exception):
+    """Raised by :meth:`Characterization.run` when the hydrophone depth
+    calibration or the peak search fails or lands out of tolerance.
+    Every later measurement depends on those, so the run stops. The
+    message is operator-facing."""
 
 
 # ----------------------------------------------------------------------
@@ -162,7 +167,6 @@ class TestReport:
     scans: dict[str, ScanResult] = field(default_factory=dict)
     waveform_at_peak: dict = field(default_factory=dict)
     peak_xy_mm: tuple = (0.0, 0.0)
-    arrival_check: dict = field(default_factory=dict)
     freq_response: dict = field(default_factory=dict)
     voltage_response: dict = field(default_factory=dict)
     device_info: Optional[DeviceInfo] = None
@@ -425,51 +429,6 @@ class Characterization:
         self._grade_firmware()
         self._grade_calibration_dates()
         return info
-
-    def warmup_and_arrival_check(self) -> dict:
-        """Fire a single pulse at the nominal focus and verify arrival."""
-        pos = self.ver.hydrophone_position
-        # Ensure the scope range is at the config's baseline for the
-        # "warm-up" and every subsequent low-voltage phase.
-        self._apply_baseline_range()
-        meas = self.ver.measure_pressure(
-            float(pos[0]), float(pos[1]), float(pos[2]),
-            **self._burst_scope_kwargs(),
-        )
-        if meas is None:
-            result = {"passed": False, "reason": "scope timeout"}
-            self.report.arrival_check = result
-            logger.error("Arrival check: scope timed out")
-            return result
-
-        # In the emission-referenced time frame the pulse arrives at
-        # ``t = z / SOS`` (>= 0 for any real target), so no skip is
-        # required to reject the electrical crosstalk (which now sits
-        # at t = -system_transmit_delay_us and is outside the window).
-        skip_us = 0.0
-        arrival_us = _find_arrival_us(meas["t"], meas["trace"], skip_us=skip_us)
-        # sos in mm/µs = m/s / 1000.
-        sos_mm_per_us = float(self.scan_config.sos_water_m_per_s) / 1000.0
-        expected_us = float(pos[2]) / sos_mm_per_us
-        tol_us = expected_us * self.criteria.arrival_time.tol_pct / 100.0
-
-        passed = (arrival_us is not None
-                  and abs(arrival_us - expected_us) <= tol_us)
-
-        result = {
-            "passed": bool(passed),
-            "arrival_us": arrival_us,
-            "expected_us": expected_us,
-            "tol_us": tol_us,
-            "meas": meas,
-        }
-        self.report.arrival_check = result
-        logger.info(
-            "Arrival check: measured=%s expected=%.2fus tol=\u00b1%.2fus \u2192 %s",
-            f"{arrival_us:.2f}us" if arrival_us is not None else "n/a",
-            expected_us, tol_us, "PASS" if passed else "FAIL",
-        )
-        return result
 
     def calibrate_depth_plane_wave(self, *,
                                     voltage_V: Optional[float] = None,
@@ -1164,38 +1123,6 @@ class Characterization:
     # verdicts are already recorded (plus a couple of section-less
     # checks like peak offset).
 
-    def _grade_arrival(self) -> Optional[bool]:
-        """Log the plane-wave arrival-check verdict.
-
-        The arrival check is retained as a sanity log message but
-        is no longer stamped on any graded report row: the raw
-        focused arrival time (D.11) is informational only, and any
-        acceptance threshold on it would have to include the
-        transducer's per-element ``max_delay_us`` shift. The
-        plane-wave hydrophone depth (D.3) and the focused-arrival
-        depth (D.12) already provide graded, geometry-corrected
-        checks on the arrival timing.
-
-        Returns the boolean verdict (or ``None`` if the arrival
-        check has not been run yet) so callers can still consult it
-        without it feeding the overall pass/fail.
-        """
-        arr = self.report.arrival_check
-        if not arr:
-            return None
-        passed = bool(arr.get("passed", False))
-        expected_us = arr.get("expected_us")
-        tol_us = arr.get("tol_us")
-        if expected_us is not None and tol_us is not None:
-            note = (f"measured={arr.get('arrival_us', float('nan')):.2f} us, "
-                    f"expected={expected_us:.2f} \u00b1 {tol_us:.2f} us "
-                    f"(tol \u00b1{self.criteria.arrival_time.tol_pct:g}%)")
-        else:
-            note = arr.get("reason", "")
-        logger.info("[grade] Arrival time \u2192 %s (%s, informational)",
-                    "PASS" if passed else "FAIL", note)
-        return passed
-
     def _grade_pnp_at_peak(self) -> Optional[bool]:
         """Stamp the D.7 row with PASS/FAIL and log the verdict."""
         wf = self.report.waveform_at_peak
@@ -1539,18 +1466,13 @@ class Characterization:
         """Aggregate the per-section verdicts into an overall PASS/FAIL.
 
         Each section is graded eagerly by its own ``_grade_*`` helper
-        as soon as the underlying data is available (arrival, PNP,
+        as soon as the underlying data is available (PNP,
         frequency deviation, voltage linearity), so this method is a
         thin aggregator. It also runs the couple of checks that
         don't have a natural attachment point in a measurement
         method (currently: peak offset).
         """
         summary: dict[str, Optional[bool]] = {}
-        # Arrival-time sanity check is intentionally logged but NOT
-        # aggregated into the overall verdict: the raw arrival time
-        # is informational (the geometry-corrected plane-wave and
-        # focused-arrival depths are the graded quantities).
-        self._grade_arrival()
         summary["firmware"] = self._grade_firmware()
         summary["calibration_dates"] = self._grade_calibration_dates()
         summary["hydrophone_depth"] = self._grade_hydrophone_depth()
@@ -1581,6 +1503,18 @@ class Characterization:
             logger.warning("Abort requested; stopping characterization.")
             raise RunAborted("Characterization aborted by operator.")
 
+    def _require_pass(self, row_ids: list[str], problem: str) -> None:
+        """Raise :class:`RunHalted` unless every row in ``row_ids`` passed."""
+        failed = [self.report.rows.get(r) for r in row_ids
+                  if getattr(self.report.rows.get(r), "status", None) != "PASS"]
+        if not failed:
+            return
+        details = "; ".join(
+            f"{row.note} (allowed {row.threshold})" if row is not None
+            else "not measured" for row in failed)
+        logger.error("%s: %s. Stopping the run.", problem, details)
+        raise RunHalted(f"{problem}: {details}.")
+
     def run(self, *,
             skip_2d: bool = False,
             skip_frequency: bool = False,
@@ -1591,11 +1525,14 @@ class Characterization:
         If ``abort_event`` is given, it is checked between phases (and
         between the individual beam scans); once set, the current
         phase finishes and :class:`RunAborted` is raised.
+
+        Raises :class:`RunHalted` if the plane-wave depth calibration
+        or the peak search fails or is out of tolerance, since every
+        later measurement depends on them.
         """
         self._abort_event = abort_event
         self._check_abort()
         self.collect_test_info()
-        self.warmup_and_arrival_check()
         self._check_abort()
         # Refine hydrophone depth via plane-wave arrival BEFORE the
         # peak search so find_peak fires focused pulses at the true
@@ -1603,12 +1540,11 @@ class Characterization:
         # rough initial estimate.
         try:
             self.calibrate_depth_plane_wave()
-        except Exception as e:  # noqa: BLE001 - dry-run safety
-            logger.warning(
-                "Plane-wave depth calibration failed (%s); "
-                "continuing with the seeded hydrophone_position[2]=%.2f mm.",
-                e, float(self.ver.hydrophone_position[2]),
-            )
+        except Exception as e:  # noqa: BLE001 - surfaced to operator
+            logger.exception("Plane-wave depth calibration failed")
+            raise RunHalted(f"Plane-wave depth calibration failed: {e}") from e
+        self._require_pass([ROW["plane_wave_depth_mm"]],
+                           "Hydrophone depth is out of range")
         self._check_abort()
         # Wipe any XY drift from a prior calibration / leftover run
         # so the peak search is guaranteed to start from a known,
@@ -1618,7 +1554,13 @@ class Characterization:
         self.ver.hydrophone_position[1] = 0.0
         logger.info("Running fresh find_peak from (x=0, y=0, z=%.2f mm).",
                     float(self.ver.hydrophone_position[2]))
-        self.find_peak_xy(x0=0.0, y0=0.0)
+        try:
+            self.find_peak_xy(x0=0.0, y0=0.0)
+        except Exception as e:  # noqa: BLE001 - surfaced to operator
+            logger.exception("Peak search failed")
+            raise RunHalted(f"Peak search (find_peak) failed: {e}") from e
+        self._require_pass([ROW["peak_x_mm"], ROW["peak_y_mm"]],
+                           "Hydrophone is not centered on the focus")
         self._check_abort()
         if not skip_2d:
             self.run_beam_scans()

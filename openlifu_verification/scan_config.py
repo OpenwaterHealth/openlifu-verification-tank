@@ -54,7 +54,7 @@ class ScopeCapture:
     time_stop_us: float = 86.0
     sampling_interval_ns: float = 100.0
     #: Default vertical range on the hydrophone channel (mV, +/-). Used
-    #: for the arrival check + peak search + 1D/2D scans + freq sweep.
+    #: for the peak search + 1D/2D scans + freq sweep.
     hydrophone_range_mv: int = 100
     #: Headroom above the predicted peak amplitude when auto-picking a
     #: scope range for the voltage sweep. 30 % is a reasonable default.
