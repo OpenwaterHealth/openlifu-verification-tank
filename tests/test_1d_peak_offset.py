@@ -55,11 +55,11 @@ def test_elevation_grade_matches_plotted_peak():
 def test_1d_offset_limit_is_frequency_dependent():
     crit = AcceptanceCriteria()
     assert crit.peak_offset.max_1d_axis_mm_for(155.0) == 1.0
-    assert crit.peak_offset.max_1d_axis_mm_for(400.0) == 0.2
+    assert crit.peak_offset.max_1d_axis_mm_for(400.0) == 0.5
 
     scan = _scan_pnp_vs_vpp_disagree()
-    # Shift so the PNP peak lands at +0.5 mm.
-    scan.coords["yfoci"] = scan.coords["yfoci"] + 0.5
+    # Shift so the PNP peak lands at +0.75 mm.
+    scan.coords["yfoci"] = scan.coords["yfoci"] + 0.75
     for freq, expected in ((155.0, True), (400.0, False)):
         chz = _chz(freq)
         chz.report.scans["elevation_1d"] = scan

@@ -622,7 +622,14 @@ class Characterization:
                 "axial_1d": axial, "scan_2d": two_d}
 
     def measure_waveform_at_peak(self) -> dict:
-        """Fire one pulse at the peak; compute PNP + focused arrival depth.
+        """Fire at the peak; compute PNP + focused arrival depth.
+
+        The waveform and PNP (D.14) are captured at
+        ``criteria.pnp_at_peak.reference_voltage_V`` (50 V / 100 Vpp by
+        default) rather than the scan voltage, so the reported PNP is
+        directly comparable to the specified threshold. A single
+        probe pulse at the scan voltage sizes the scope range; the
+        capture steps to a wider range if it still clips.
 
         Also fills the five "image" rows D.4-D.8 with
         ``"see Figure N"`` cross-references. The reported focused
@@ -636,14 +643,44 @@ class Characterization:
         informational.
         """
         pos = self.ver.hydrophone_position
+        xyz = (float(pos[0]), float(pos[1]), float(pos[2]))
+        scope_kw = self._burst_scope_kwargs()
         self._apply_baseline_range()
-        meas = self.ver.measure_pressure(
-            float(pos[0]), float(pos[1]), float(pos[2]),
-            n_averages=int(self.scan_config.scope.n_averages),
-            **self._burst_scope_kwargs(),
-        )
-        if meas is None:
+        probe = self.ver.measure_pressure(*xyz, **scope_kw)
+        if probe is None:
             raise RuntimeError("Scope timeout while measuring waveform at peak.")
+        pnp_voltage_V = float(self.criteria.pnp_at_peak.reference_voltage_V)
+        probe_mV = self._trace_peak_mV(probe)
+        start_range = (
+            choose_range_mv(probe_mV * pnp_voltage_V / self.voltage_V,
+                            headroom_pct=self.scan_config.scope.voltage_scan_headroom_pct)
+            if probe_mV is not None
+            else int(self.scan_config.scope.hydrophone_range_mv)
+        )
+        can_range = hasattr(self.ver, "set_hydrophone_range")
+        meas = None
+        self.ver.set_voltage(pnp_voltage_V, wait=True)
+        try:
+            for rng in (r for r in PICOSCOPE_RANGES_MV if r >= start_range):
+                if can_range:
+                    self.ver.set_hydrophone_range(int(rng))
+                meas = self.ver.measure_pressure(
+                    *xyz, n_averages=int(self.scan_config.scope.pnp_n_averages),
+                    **scope_kw,
+                )
+                if meas is None:
+                    raise RuntimeError(
+                        "Scope timeout while measuring waveform at peak.")
+                peak_mV = self._trace_peak_mV(meas)
+                if not can_range or peak_mV is None or peak_mV < 0.95 * rng:
+                    break
+                logger.warning(
+                    "Waveform at peak clipped on \u00b1%d mV (%.1f mV); "
+                    "retrying on a wider range", rng, peak_mV,
+                )
+        finally:
+            self.ver.set_voltage(self.voltage_V, wait=True)
+            self._apply_baseline_range()
         pnp_MPa = _pnp_MPa(meas["trace"]) if meas["units"] == "Pa" else float("nan")
 
         # Focused arrival + depth via the plane-wave-style calibrator
@@ -696,6 +733,7 @@ class Characterization:
         result = {
             **meas,
             "pnp_MPa": pnp_MPa,
+            "pnp_voltage_V": pnp_voltage_V,
             "peak_z_focus_mm": z_focus_mm,
             "focused_depth_mm": axial_depth_mm,
             "focused_arrival_us": arrival_us,
@@ -731,7 +769,9 @@ class Characterization:
         # which IS graded against ``criteria.peak_depth``.
         self.report.set_row(ROW["peak_z_focus_mm"], "Peak Z Focus",
                             z_focus_mm, unit="mm")
-        self.report.set_row(ROW["pnp_at_peak_MPa"], "Focused Pulse PNP",
+        self.report.set_row(ROW["pnp_at_peak_MPa"],
+                            f"Focused Pulse PNP ({pnp_voltage_V:g}V/"
+                            f"{2 * pnp_voltage_V:g}Vpp)",
                             pnp_MPa, unit="MPa")
         self.report.set_row(ROW["focused_arrival_us"],
                             "Focused Pulse Arrival Time",
@@ -741,9 +781,9 @@ class Characterization:
                             "Focused Pulse Hydrophone Depth",
                             axial_depth_mm, unit="mm")
         logger.info(
-            "Waveform at peak: PNP=%.3f MPa, arrival=%s, depth=%.2f mm "
+            "Waveform at peak: PNP=%.3f MPa at %g V, arrival=%s, depth=%.2f mm "
             "(sos=%.0f m/s)",
-            pnp_MPa,
+            pnp_MPa, pnp_voltage_V,
             f"{arrival_us:.2f}us" if arrival_us is not None else "n/a",
             axial_depth_mm, sos_m_per_s,
         )
@@ -774,7 +814,7 @@ class Characterization:
         result = self.ver.scan_frequency(
             frequencies_kHz=freqs,
             duration_usec=duration_usec,
-            n_averages=int(cfg.scope.n_averages),
+            n_averages=int(cfg.scope.pnp_n_averages),
             **self._burst_scope_kwargs(duration_usec),
         )
         # Per-freq PNP.
@@ -1006,23 +1046,11 @@ class Characterization:
                     float(pos[0]), float(pos[1]), float(pos[2]), e,
                 )
 
-    def _predict_peak_mV_at_ref(self) -> Optional[float]:
-        """Estimate the single-sided peak hydrophone signal in mV at ``self.voltage_V``.
-
-        Uses :attr:`report.waveform_at_peak` (which was captured at
-        ``self.voltage_V``): peak Pa \u2192 peak V via hydrophone
-        sensitivity \u2192 peak mV. Returns ``None`` if we can't derive
-        one (no waveform captured yet, no hydrophone attached, etc.).
-        """
-        wf = self.report.waveform_at_peak
-        if not wf:
-            return None
-        trace = np.asarray(wf.get("trace"), dtype=float)
-        if trace.size == 0:
-            return None
-        peak = float(np.max(np.abs(trace)))
-        if wf.get("units") != "Pa":
-            # Already in mV.
+    def _trace_peak_mV(self, meas: dict) -> Optional[float]:
+        """Single-sided peak of a capture in scope mV, or ``None`` if a
+        Pa trace can't be converted back (no hydrophone calibration)."""
+        peak = float(np.max(np.abs(np.asarray(meas["trace"], dtype=float))))
+        if meas.get("units") != "Pa":
             return peak
         hyd = getattr(self.ver, "hydrophone", None)
         if hyd is None:
@@ -1033,8 +1061,23 @@ class Characterization:
             return None
         if pa_per_v <= 0:
             return None
-        peak_v = peak / pa_per_v
-        return peak_v * 1000.0  # mV
+        return peak / pa_per_v * 1000.0
+
+    def _predict_peak_mV_at_ref(self) -> Optional[float]:
+        """Estimate the single-sided peak hydrophone signal in mV at ``self.voltage_V``.
+
+        Scales the :attr:`report.waveform_at_peak` capture (taken at
+        ``pnp_voltage_V``) linearly to ``self.voltage_V``. Returns
+        ``None`` if we can't derive one (no waveform captured yet, no
+        hydrophone attached, etc.).
+        """
+        wf = self.report.waveform_at_peak
+        if not wf or np.asarray(wf.get("trace")).size == 0:
+            return None
+        peak_mV = self._trace_peak_mV(wf)
+        if peak_mV is None:
+            return None
+        return peak_mV * self.voltage_V / float(wf["pnp_voltage_V"])
 
     def _probe_unclipped_peak_mV(self, *,
                                  max_range_mv: int = 5000,
@@ -1128,15 +1171,19 @@ class Characterization:
         wf = self.report.waveform_at_peak
         if not wf:
             return None
-        pnp = wf.get("pnp_MPa", float("nan"))
-        thr = self.criteria.pnp_min_for(self.frequency_kHz)
-        passed = float(pnp) >= thr
+        pnp_MPa = float(wf.get("pnp_MPa", float("nan")))
+        ref_V = float(self.criteria.pnp_at_peak.reference_voltage_V)
+        meas_V = float(wf["pnp_voltage_V"])
+        thr_ref_MPa = self.criteria.pnp_min_MPa_for(self.frequency_kHz)
+        thr_MPa = thr_ref_MPa * meas_V / ref_V
+        passed = pnp_MPa >= thr_MPa
+        note = f"threshold >= {thr_ref_MPa:g} MPa at {ref_V:g} V"
+        if meas_V != ref_V:
+            note += f" (scaled to {thr_MPa:.3f} MPa at {meas_V:g} V)"
         self.report.grade_row(ROW["pnp_at_peak_MPa"], passed=passed,
-                              threshold=thr,
-                              note=f"threshold >= {thr} MPa")
-        logger.info("[grade] PNP at peak \u2192 %s "
-                    "(measured=%.3f MPa, threshold \u2265 %.3f MPa)",
-                    "PASS" if passed else "FAIL", float(pnp), float(thr))
+                              threshold=thr_MPa, note=note)
+        logger.info("[grade] PNP at peak \u2192 %s (measured=%.3f MPa at %g V, %s)",
+                    "PASS" if passed else "FAIL", pnp_MPa, meas_V, note)
         return passed
 
     def _grade_freq_response(self) -> Optional[bool]:

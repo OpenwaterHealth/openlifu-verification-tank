@@ -323,7 +323,8 @@ def build_figures(report: TestReport) -> dict:
         ax.set_ylabel(ylabel)
         pnp_kPa = float(wf.get("pnp_MPa", float("nan"))) * 1000.0
         ax.set_title(
-            f"Figure 5: Waveform at peak "
+            f"Figure 5: Waveform at peak, "
+            f"{float(wf.get('pnp_voltage_V', report.voltage_V)):g} V "
             f"(PNP = {pnp_kPa:.1f} kPa)"
         )
         ax.grid(True, alpha=0.3)

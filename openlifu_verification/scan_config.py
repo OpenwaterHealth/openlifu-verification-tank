@@ -59,9 +59,12 @@ class ScopeCapture:
     #: Headroom above the predicted peak amplitude when auto-picking a
     #: scope range for the voltage sweep. 30 % is a reasonable default.
     voltage_scan_headroom_pct: float = 30.0
-    #: Pulses coherently averaged per point in the beam scans, the
-    #: waveform-at-peak capture, and the frequency / voltage sweeps.
-    n_averages: int = 5
+    #: Pulses coherently averaged per point in the beam scans and the
+    #: voltage sweep.
+    n_averages: int = 3
+    #: Pulses coherently averaged for the graded PNP measurements: the
+    #: waveform-at-peak capture and the frequency sweep.
+    pnp_n_averages: int = 5
 
 
 @dataclass

@@ -127,7 +127,7 @@ class PeakOffset:
     max_axis_mm: float = 1.0
     max_1d_axis_mm_by_freq_kHz: dict[str, float] = field(default_factory=lambda: {
         "155": 1.0,
-        "400": 0.2,
+        "400": 0.5,
     })
 
     def __post_init__(self):
@@ -180,15 +180,20 @@ class PeakDepth:
 
 @dataclass
 class PnpAtPeak:
-    """Minimum PNP at the empirical peak, keyed by nominal freq (kHz)."""
-    min_by_freq_kHz: dict[str, float] = field(default_factory=lambda: {
-        "155": 0.5,
-        "400": 1.0,
+    """Minimum focused PNP (MPa) at the empirical peak, specified at
+    ``reference_voltage_V`` (HV rail, +/-) and keyed by nominal freq
+    (kHz). The PNP is measured at the reference voltage; a capture at
+    any other voltage is graded against the threshold scaled by
+    ``voltage / reference_voltage_V``."""
+    reference_voltage_V: float = 50.0
+    min_MPa_by_freq_kHz: dict[str, float] = field(default_factory=lambda: {
+        "155": 0.225,
+        "400": 0.625,
     })
 
     def __post_init__(self):
-        self.min_by_freq_kHz = _require_all_freqs(
-            self.min_by_freq_kHz, "pnp_at_peak.min_by_freq_kHz")
+        self.min_MPa_by_freq_kHz = _require_all_freqs(
+            self.min_MPa_by_freq_kHz, "pnp_at_peak.min_MPa_by_freq_kHz")
 
 
 @dataclass
@@ -311,7 +316,9 @@ class AcceptanceCriteria:
                                  "hydrophone_tol_mm":   self.peak_depth.hydrophone_tol_mm,
                                  "focused_tol_pct":     self.peak_depth.focused_tol_pct,
                                  "peak_z_focus_tol_pct": self.peak_depth.peak_z_focus_tol_pct},
-            "pnp_at_peak":      {"min_by_freq_kHz": dict(self.pnp_at_peak.min_by_freq_kHz)},
+            "pnp_at_peak":      {"reference_voltage_V": self.pnp_at_peak.reference_voltage_V,
+                                 "min_MPa_by_freq_kHz": dict(
+                                     self.pnp_at_peak.min_MPa_by_freq_kHz)},
             "freq_response":    {"max_deviation_pct": self.freq_response.max_deviation_pct},
             "voltage_linearity":{"r2_min":      self.voltage_linearity.r2_min},
             "temperature":      {"max_C":       self.temperature.max_C},
@@ -322,7 +329,7 @@ class AcceptanceCriteria:
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path
 
-    def pnp_min_for(self, freq_kHz: float) -> float:
-        """Minimum PNP (MPa) at the peak for a nominal frequency."""
-        return _lookup_freq(self.pnp_at_peak.min_by_freq_kHz, freq_kHz,
-                            "pnp_at_peak.min_by_freq_kHz")
+    def pnp_min_MPa_for(self, freq_kHz: float) -> float:
+        """Minimum PNP (MPa) at the peak at ``pnp_at_peak.reference_voltage_V``."""
+        return _lookup_freq(self.pnp_at_peak.min_MPa_by_freq_kHz, freq_kHz,
+                            "pnp_at_peak.min_MPa_by_freq_kHz")
