@@ -2,9 +2,13 @@
 
 Prompts (with cached defaults) for tester name + serial numbers,
 connects to the hardware, runs every characterization phase, grades
-the results against the criteria in ``scan_config.json``, and writes
+the results against the built-in acceptance criteria, and writes
 the report bundle to
 ``test_reports/<TXM-SN>/<YYYYMMDD>_<HHMMSS>/``.
+
+Scan settings are the built-in standard configuration. ``--scan-config``
+(and ``--voltage`` / ``--skip-*``) are for diagnostics only: such runs
+are marked NON-STANDARD in the report and never write to the device.
 
 Examples::
 
@@ -54,7 +58,6 @@ from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_SCAN_CONFIG_PATH = paths.SCAN_CONFIG_PATH
 DEFAULT_CALIBRATION_PATH = paths.HYDROPHONE_STATE_PATH
 DEFAULT_OUTPUT_DIR = Path("test_reports")
 
@@ -172,9 +175,11 @@ def build_parser() -> argparse.ArgumentParser:
                    default=DEFAULT_CALIBRATION_PATH,
                    help="Auto-load / save destination for hydrophone_position.")
     # --- Report inputs / outputs ---
-    p.add_argument("--scan-config", type=Path, default=DEFAULT_SCAN_CONFIG_PATH,
-                   help="Path to scan_config.json (seeded from defaults if missing; "
-                        "contains acceptance criteria + scan geometry + scope settings).")
+    p.add_argument("--scan-config", type=Path, default=None,
+                   help="Diagnostics only: partial JSON of scan/scope settings "
+                        "applied on top of the built-in standard configuration. "
+                        "Marks the report NON-STANDARD and disables writing to "
+                        "the device. Acceptance criteria cannot be overridden.")
     p.add_argument("--prefs", type=Path, default=None,
                    help="Path to operator prefs JSON (defaults to ~/.openlifu_verification/operator_prefs.json).")
     p.add_argument("--reports-root", type=Path, default=None,
@@ -232,6 +237,8 @@ class RunResult:
     ``aborted`` is set when the run was stopped via ``abort_event``.
     ``halted_reason`` is set (exit code 1, no report) when the depth
     calibration or peak search failed and the run was stopped.
+    ``nonstandard_reasons`` is non-empty when the run deviated from
+    the standard configuration (see :func:`nonstandard_reasons`).
     """
     passed: bool = False
     run_dir: Optional[Path] = None
@@ -240,12 +247,32 @@ class RunResult:
     device_write_ok: Optional[bool] = None
     aborted: bool = False
     halted_reason: Optional[str] = None
+    nonstandard_reasons: list[str] = field(default_factory=list)
+
+
+def nonstandard_reasons(args: argparse.Namespace,
+                        scan_config: ScanConfig) -> list[str]:
+    """Every way ``args`` / ``scan_config`` deviate from a standard run.
+
+    Any override option counts, even if its value happens to match
+    the standard one. An empty list means a standard run.
+    """
+    reasons: list[str] = []
+    if args.scan_config is not None:
+        reasons.append(f"--scan-config {args.scan_config}")
+        reasons.extend(scan_config.differences_from_standard())
+    if args.voltage is not None:
+        reasons.append(f"--voltage {args.voltage:g}")
+    for flag in ("skip_2d", "skip_frequency", "skip_voltage"):
+        if getattr(args, flag):
+            reasons.append("--" + flag.replace("_", "-"))
+    return reasons
 
 
 #: Signature of the ``on_complete`` hook accepted by :func:`run`. The
 #: second argument writes the run's device config to the TXM and
 #: returns success; it is ``None`` when there is nothing writable
-#: (report FAILED, or the frequency sweep was skipped).
+#: (report FAILED, frequency sweep skipped, or non-standard run).
 OnComplete = Callable[["RunResult", Optional[Callable[[], bool]]], None]
 
 
@@ -301,6 +328,17 @@ def _run(args: argparse.Namespace,
 
     result = RunResult()
 
+    # --- Scan configuration: built-in standard unless overridden ---
+    scan_config = (ScanConfig.with_overrides(args.scan_config)
+                   if args.scan_config is not None else ScanConfig())
+    criteria = scan_config.acceptance
+    result.nonstandard_reasons = nonstandard_reasons(args, scan_config)
+    if result.nonstandard_reasons:
+        logger.warning("NON-STANDARD CONFIGURATION - report not valid for "
+                       "release; device write disabled:")
+        for reason in result.nonstandard_reasons:
+            logger.warning("  %s", reason)
+
     # --- Prefs ---
     prefs = OperatorPrefs.load(args.prefs)
     # Auto-populate test_app_version (never prompted) and pre-fill
@@ -333,11 +371,6 @@ def _run(args: argparse.Namespace,
     logger.info("Operator prefs: tester=%r txm_sn=%r hydrophone_sn=%r app_ver=%r",
                 prefs.tester_name, prefs.txm_sn, prefs.hydrophone_sn,
                 prefs.test_app_version)
-
-    # --- Scan configuration (seed if missing) ---
-    # Bundles acceptance criteria + scan geometry + scope capture.
-    scan_config = ScanConfig.load_or_create(args.scan_config)
-    criteria = scan_config.acceptance
 
     voltage_V = (args.voltage if args.voltage is not None
                  else VerificationTank.default_voltage_for(args.frequency_khz))
@@ -400,6 +433,7 @@ def _run(args: argparse.Namespace,
             voltage_V=voltage_V,
             plot=args.plot_peak,
         )
+        chz.report.nonstandard_reasons = list(result.nonstandard_reasons)
         t_start = time.perf_counter()
         try:
             report = chz.run(
@@ -457,6 +491,8 @@ def _run(args: argparse.Namespace,
             print(f"  JSON : {config_path}")
         print(f"  LOG  : {log_path}")
         print(f"  Verdict: {'PASS' if report.overall_pass else 'FAIL'}")
+        if result.nonstandard_reasons:
+            print("  Config : NON-STANDARD (not valid for release)")
 
         result.passed = bool(report.overall_pass)
         result.run_dir = run_dir
@@ -485,6 +521,11 @@ def _run(args: argparse.Namespace,
         if args.write_config and not args.dry_run:
             if args.skip_frequency:
                 logger.warning("--skip-frequency set; no device_config.json to write.")
+            elif result.nonstandard_reasons:
+                logger.warning(
+                    "Non-standard configuration; skipping --write-config."
+                )
+                print("  Write to device: SKIPPED (non-standard configuration)")
             elif not result.passed:
                 logger.warning(
                     "Report FAILED; skipping --write-config (device "
@@ -505,7 +546,8 @@ def _run(args: argparse.Namespace,
 
         if on_complete is not None:
             write_fn: Optional[Callable[[], bool]] = None
-            if result.passed and not args.skip_frequency:
+            if (result.passed and not args.skip_frequency
+                    and not result.nonstandard_reasons):
                 if args.dry_run:
                     def write_fn() -> bool:
                         logger.info("DRY RUN: would write %s to device.",

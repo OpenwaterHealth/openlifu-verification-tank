@@ -130,20 +130,6 @@ ROW["voltage_r2"] = "F.8"
 # because its index depends on the number of sweep frequencies.
 ROW["freq_deviation_pct"] = "E.2"  # placeholder, overwritten at runtime
 
-# Scan geometry defaults kept as module constants for backward compat;
-# the live values are pulled from :class:`ScanConfig` at run time.
-LATERAL_1D_EXTENT_MM = 5.0
-LATERAL_1D_POINTS = 21
-SCAN_2D_EXTENT_MM = 3.0
-SCAN_2D_POINTS = 13
-
-# Freq sweep default: 8 points, -25 kHz .. +10 kHz around nominal @ 5 kHz
-# spacing (overridable via ``scan_config.json``). Populates E.3..E.N.
-FREQ_SWEEP_OFFSETS_KHZ = np.array([-25, -20, -15, -10, -5, 0, +5, +10], dtype=float)
-
-# Voltage sweep: 6 points, 5..30 V (mirrors template F.2 - F.7).
-VOLTAGE_SWEEP_V = np.array([5.0, 10.0, 15.0, 20.0, 25.0, 30.0])
-
 
 # ----------------------------------------------------------------------
 # Dataclasses
@@ -172,6 +158,10 @@ class TestReport:
     device_info: Optional[DeviceInfo] = None
     prefs: Optional[OperatorPrefs] = None
     criteria: Optional[AcceptanceCriteria] = None
+    scan_config: Optional[ScanConfig] = None
+    #: Why this run deviates from the standard configuration (empty
+    #: for a standard run). Non-empty marks the report non-standard.
+    nonstandard_reasons: list[str] = field(default_factory=list)
     frequency_kHz: float = 400.0
     voltage_V: float = 20.0
     started_at: str = ""
@@ -383,6 +373,7 @@ class Characterization:
         self.report = TestReport(
             prefs=prefs,
             criteria=self.criteria,
+            scan_config=self.scan_config,
             frequency_kHz=self.frequency_kHz,
             voltage_V=self.voltage_V,
             started_at=datetime.datetime.now().isoformat(timespec="seconds"),
@@ -547,10 +538,11 @@ class Characterization:
         ``"scan_2d"``.
         """
         cfg = self.scan_config
+        plan = cfg.plan_for(self.frequency_kHz)
         scope_kw = self._burst_scope_kwargs()
         n_avg = int(cfg.scope.n_averages)
-        ext = cfg.lateral_1d.extent_mm
-        pts = cfg.lateral_1d.points
+        ext = plan.lateral_1d.extent_mm
+        pts = plan.lateral_1d.points
 
         logger.info("Running 1-D lateral (x) scan (\u00b1%.1f mm, %d pts)...", ext, pts)
         lat = self.ver.scan_1d(
@@ -559,8 +551,8 @@ class Characterization:
         )
         self._check_abort()
 
-        ext_e = cfg.elevation_1d.extent_mm
-        pts_e = cfg.elevation_1d.points
+        ext_e = plan.elevation_1d.extent_mm
+        pts_e = plan.elevation_1d.points
         logger.info("Running 1-D elevation (y) scan (\u00b1%.1f mm, %d pts)...",
                     ext_e, pts_e)
         elev = self.ver.scan_1d(
@@ -569,8 +561,8 @@ class Characterization:
         )
         self._check_abort()
 
-        ext_a = cfg.axial_1d.extent_mm
-        pts_a = cfg.axial_1d.points
+        ext_a = plan.axial_1d.extent_mm
+        pts_a = plan.axial_1d.points
         logger.info("Running 1-D axial (z) scan (\u00b1%.1f mm, %d pts)...",
                     ext_a, pts_a)
         axial = self.ver.scan_1d(
@@ -579,8 +571,8 @@ class Characterization:
         )
         self._check_abort()
 
-        ext2 = cfg.scan_2d.extent_mm
-        pts2 = cfg.scan_2d.points
+        ext2 = plan.scan_2d.extent_mm
+        pts2 = plan.scan_2d.points
         logger.info("Running 2-D scan (\u00b1%.1f mm, %d\u00d7%d pts)...", ext2, pts2, pts2)
         two_d = self.ver.scan_2d(
             x_range=(-ext2, ext2), num_x=pts2,
@@ -642,6 +634,7 @@ class Characterization:
         ``nominal_mm``); the focused arrival time itself is
         informational.
         """
+        logger.info("Measuring waveform at peak...")
         pos = self.ver.hydrophone_position
         xyz = (float(pos[0]), float(pos[1]), float(pos[2]))
         scope_kw = self._burst_scope_kwargs()
@@ -805,8 +798,8 @@ class Characterization:
         E.2.. per-frequency rows are informational only.
         """
         cfg = self.scan_config
-        freqs = self.frequency_kHz + np.asarray(cfg.frequency_sweep.offsets_kHz,
-                                                dtype=float)
+        offsets = cfg.plan_for(self.frequency_kHz).frequency_sweep.offsets_kHz
+        freqs = self.frequency_kHz + np.asarray(offsets, dtype=float)
         if duration_usec is None:
             duration_usec = self._pulse_duration_us()
         self._apply_baseline_range()
@@ -856,8 +849,9 @@ class Characterization:
             voltages_V: Override the voltages in :attr:`scan_config`.
         """
         cfg = self.scan_config
+        vsweep = cfg.plan_for(self.frequency_kHz).voltage_sweep
         volts = np.asarray(
-            cfg.voltage_sweep.voltages_V if voltages_V is None else voltages_V,
+            vsweep.voltages_V if voltages_V is None else voltages_V,
             dtype=float,
         )
         volts = np.sort(volts)
@@ -913,7 +907,7 @@ class Characterization:
         # valid PicoScope range). Guarantees the sweep uses at least
         # this range even when the auto prediction is missing or too
         # small (e.g. clipped baseline waveform, no hydrophone).
-        sweep_floor_mV = int(cfg.voltage_sweep.range_mv)
+        sweep_floor_mV = int(vsweep.range_mv)
         sweep_floor = next((r for r in PICOSCOPE_RANGES_MV
                             if r >= sweep_floor_mV),
                            PICOSCOPE_RANGES_MV[-1])
@@ -989,7 +983,8 @@ class Characterization:
         cfg = self.scan_config
         if duration_usec is None:
             duration_usec = self._pulse_duration_us()
-        z_mm = float(self.ver.hydrophone_position[2]) + float(cfg.axial_1d.extent_mm)
+        axial_ext = cfg.plan_for(self.frequency_kHz).axial_1d.extent_mm
+        z_mm = float(self.ver.hydrophone_position[2]) + float(axial_ext)
         arrival_us = z_mm / (float(cfg.sos_water_m_per_s) / 1000.0)
         min_stop_us = arrival_us + float(duration_usec) + self.BURST_WINDOW_MARGIN_US
         return cfg.scope_kwargs(min_time_stop_us=min_stop_us)

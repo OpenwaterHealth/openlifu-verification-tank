@@ -1,0 +1,20 @@
+{
+  "by_freq_kHz": {
+    "155": {
+      "lateral_1d": {"points": 19},
+      "elevation_1d": {"points": 19},
+      "axial_1d": {"points": 11},
+      "scan_2d": {"points": 5},
+      "frequency_sweep": {"offsets_kHz": [-20, -10, 0, 10, 20]},
+      "voltage_sweep": {"voltages_V": [10, 20, 30]}
+    },
+    "400": {
+      "lateral_1d": {"points": 19},
+      "elevation_1d": {"points": 19},
+      "axial_1d": {"points": 11},
+      "scan_2d": {"points": 5},
+      "frequency_sweep": {"offsets_kHz": [-20, -10, 0, 10, 20]},
+      "voltage_sweep": {"voltages_V": [10, 20, 30]}
+    }
+  }
+}

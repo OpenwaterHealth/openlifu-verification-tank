@@ -66,8 +66,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from openlifu_verification import HardwareNotConnectedError, Hydrophone, OperatorPrefs
+from openlifu_verification import (
+    HardwareNotConnectedError,
+    Hydrophone,
+    OperatorPrefs,
+    ScanConfig,
+    VerificationTank,
+)
 from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
+from openlifu_verification.report_io import NONSTANDARD_BANNER
 
 
 logger = logging.getLogger(__name__)
@@ -179,6 +186,10 @@ def _build_qss(p: Palette) -> str:
         color: {p.subtle_text};
         font-weight: bold;
         padding-top: 2px;
+    }}
+    QLabel[role="alert"] {{
+        color: {p.danger};
+        font-weight: bold;
     }}
 
     /* --- Group boxes --- */
@@ -422,40 +433,97 @@ def build_gui_parser() -> argparse.ArgumentParser:
 
 
 # ----------------------------------------------------------------------
-# Progress phase table
+# Progress phase model
 # ----------------------------------------------------------------------
-# Each entry maps a substring seen in a log record to a ``(pct, label)``
-# tuple. When the RunningDialog sees the substring in an INFO record,
-# it jumps the progress bar to ``pct`` (never rewinding) and updates
-# the "current phase" label. Values were calibrated against the
-# characterization pipeline in
-# :meth:`openlifu_verification.characterization.Characterization.run`
-# so the bar advances at roughly wall-clock rate on a real run.
-_PHASES: list[tuple[str, int, str]] = [
-    # Substring, progress %, human label.
-    ("LIFU Device fully connected",         5,   "Connecting to hardware"),
-    ("Plane-wave depth calibration:",        15,  "Plane-wave depth calibration"),
-    ("Running fresh find_peak",              25,  "Peak search"),
-    ("Running 1-D lateral",                  35,  "1-D lateral scan"),
-    ("Running 1-D elevation",                45,  "1-D elevation scan"),
-    ("Running 1-D axial",                    55,  "1-D axial scan"),
-    ("Running 2-D scan",                     65,  "2-D scan"),
-    ("Waveform at peak:",                    75,  "Waveform at peak"),
-    ("Frequency sweep across",               80,  "Frequency sweep"),
-    ("Voltage sweep across",                 90,  "Voltage sweep"),
-    ("Overall verdict:",                     97,  "Writing report"),
-    ("Run directory:",                       100, "Complete"),
-]
+# Each phase starts when its marker substring appears in an INFO log
+# record and has an expected duration in seconds. The RunningDialog
+# advances the bar through each phase's share of the total and
+# estimates remaining time as the rest of the current phase plus every
+# later phase.
+#
+# Coefficients fitted to three 155 kHz runs (standard, half points,
+# single average) on 2026-10-15; the model reproduced each total within
+# ~2%. HV settle (set_voltage + wait) is linear in the target voltage,
+# not the step size. Since configure_lifu stopped re-sending the HV
+# setpoint on every reconfigure, only real voltage changes pay it; a
+# reconfigure alone is register writes (measured 2.3 s).
+_HV_SETTLE_S = 2.35
+_HV_SETTLE_S_PER_V = 0.0894
+_CONFIGURE_S = 2.3
+_SCAN_POINT_S = 0.22          # stage move per 1-D / 2-D point
+_CAPTURE_PER_AVG_S = 0.108    # one trigger + capture per average
+_FREQ_POINT_S = 0.384         # set_pulse + armed train per frequency
+_FREQ_PER_AVG_S = 0.021       # extra pulse in the same train
+_WAVEFORM_PER_AVG_S = 0.18
 
 
-def _phase_for_message(msg: str) -> Optional[tuple[int, str]]:
-    """Return the ``(progress_pct, label)`` for the first phase whose
-    marker substring appears in ``msg``, or ``None`` if no marker
-    matches."""
-    for marker, pct, label in _PHASES:
-        if marker in msg:
-            return pct, label
-    return None
+@dataclass(frozen=True)
+class _Phase:
+    marker: Optional[str]  # None: starts with the dialog
+    label: str
+    seconds: float
+
+
+def _hv_settle_s(voltage_V: float) -> float:
+    return _HV_SETTLE_S + _HV_SETTLE_S_PER_V * float(voltage_V)
+
+
+def _estimate_phases(scan_config: ScanConfig, frequency_kHz: float,
+                     voltage_V: float, *, skip_2d: bool = False,
+                     skip_frequency: bool = False,
+                     skip_voltage: bool = False) -> list[_Phase]:
+    """Expected phases of one run, in log order."""
+    plan = scan_config.plan_for(frequency_kHz)
+    n_avg = int(scan_config.scope.n_averages)
+    n_pnp = int(scan_config.scope.pnp_n_averages)
+    configure = _CONFIGURE_S
+    point = _SCAN_POINT_S + _CAPTURE_PER_AVG_S * n_avg
+
+    phases = [
+        _Phase(None, "Connecting to hardware", 1.0),
+        # First pulse setup + HV on from 0 V.
+        _Phase("LIFU Device fully connected", "Configuring transducer",
+               configure + _hv_settle_s(voltage_V) + 0.7),
+        _Phase("Plane-wave depth calibration:",
+               "Plane-wave depth calibration", 2 * configure + 6.8),
+        _Phase("Running fresh find_peak", "Peak search", 7.0),
+    ]
+    if not skip_2d:
+        phases += [
+            _Phase("Running 1-D lateral", "1-D lateral scan",
+                   0.3 + plan.lateral_1d.points * point),
+            _Phase("Running 1-D elevation", "1-D elevation scan",
+                   0.3 + plan.elevation_1d.points * point),
+            _Phase("Running 1-D axial", "1-D axial scan",
+                   0.3 + plan.axial_1d.points * point),
+            _Phase("Running 2-D scan", "2-D scan",
+                   0.3 + plan.scan_2d.points ** 2 * point),
+        ]
+    pnp_voltage_V = scan_config.acceptance.pnp_at_peak.reference_voltage_V
+    phases.append(_Phase(
+        "Measuring waveform at peak", "Waveform at peak",
+        7.55 + _WAVEFORM_PER_AVG_S * n_pnp + _hv_settle_s(pnp_voltage_V)
+        + _hv_settle_s(voltage_V) + 2 * configure,
+    ))
+    if not skip_frequency:
+        n_freq = len(plan.frequency_sweep.offsets_kHz)
+        phases.append(_Phase(
+            "Frequency sweep across", "Frequency sweep",
+            0.2 + 2 * configure
+            + n_freq * (_FREQ_POINT_S + _FREQ_PER_AVG_S * n_pnp),
+        ))
+    if not skip_voltage:
+        volts = plan.voltage_sweep.voltages_V
+        phases.append(_Phase(
+            "Voltage sweep across", "Voltage sweep",
+            0.4 + sum(_hv_settle_s(v) + _CAPTURE_PER_AVG_S * n_avg
+                      for v in volts),
+        ))
+    phases += [
+        _Phase("Overall verdict:", "Writing report", 2.2),
+        _Phase("Run directory:", "Complete", 0.0),
+    ]
+    return phases
 
 
 # ----------------------------------------------------------------------
@@ -612,11 +680,14 @@ class LauncherDialog(QDialog):
 
     def __init__(self, args: argparse.Namespace,
                  prefs: OperatorPrefs,
-                 parent: Optional[QWidget] = None):
+                 parent: Optional[QWidget] = None, *,
+                 nonstandard_reasons: tuple[str, ...] | list[str] = ()):
         super().__init__(parent)
         title = "OpenLIFU Calibration Tool"
         if getattr(args, "dry_run", False):
             title += "  [DRY RUN]"
+        if nonstandard_reasons:
+            title += "  [NON-STANDARD]"
         self.setWindowTitle(title)
         self.setModal(True)
         self._args = args
@@ -635,6 +706,16 @@ class LauncherDialog(QDialog):
         subtitle.setTextFormat(Qt.TextFormat.RichText)
         subtitle.setProperty("role", "subtle")
         subtitle.setWordWrap(True)
+
+        nonstandard_label = None
+        if nonstandard_reasons:
+            nonstandard_label = QLabel(
+                f"{NONSTANDARD_BANNER}. Calibration data cannot be "
+                "written to the device."
+            )
+            nonstandard_label.setProperty("role", "alert")
+            nonstandard_label.setWordWrap(True)
+            nonstandard_label.setToolTip("\n".join(nonstandard_reasons))
 
         # --- Operator group ---
         self.tester_edit = QLineEdit(prefs.tester_name)
@@ -720,6 +801,8 @@ class LauncherDialog(QDialog):
         outer.setSpacing(12)
         outer.addWidget(header)
         outer.addWidget(subtitle)
+        if nonstandard_label is not None:
+            outer.addWidget(nonstandard_label)
         outer.addWidget(sep)
         outer.addWidget(op_group)
         outer.addWidget(run_group)
@@ -1132,7 +1215,7 @@ class RunningDialog(QDialog):
     #: Emitted once when the operator presses Abort.
     abort_requested = pyqtSignal()
 
-    def __init__(self, *, dry_run: bool = False,
+    def __init__(self, *, phases: list[_Phase], dry_run: bool = False,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
         title = "OpenLIFU Verification -- Running"
@@ -1162,13 +1245,17 @@ class RunningDialog(QDialog):
         self.progress.setTextVisible(True)
         self.progress.setMinimumHeight(24)
 
-        # Elapsed / remaining time shown in the bar text. Remaining is
-        # extrapolated from the rate between the first phase marker
-        # (skips variable connect time) and the latest one, so it is
-        # only as good as the _PHASES percentages.
+        # Progress and remaining time follow the phase model: the bar
+        # moves through the current phase's expected share (capped at
+        # its end until the next marker arrives).
+        self._phases = phases
+        self._phase_starts = [0.0]
+        for p in phases[:-1]:
+            self._phase_starts.append(self._phase_starts[-1] + p.seconds)
+        self._total_s = self._phase_starts[-1] + phases[-1].seconds
+        self._phase_idx = 0
         self._t_start = time.monotonic()
-        self._first_mark: Optional[tuple[float, int]] = None
-        self._eta: Optional[float] = None
+        self._phase_t0 = self._t_start
         self._clock = QTimer(self)
         self._clock.timeout.connect(self._refresh_time_text)
         self._clock.start(1000)
@@ -1260,37 +1347,32 @@ class RunningDialog(QDialog):
         # Advance the acceptance-gate tracker.
         self.tracker.on_log(raw)
 
-        phase = _phase_for_message(raw)
-        if phase is not None:
-            pct, label = phase
-            # Never rewind, in case markers arrive out of order or a
-            # log message from earlier in the pipeline is emitted
-            # after the run has moved on.
-            if pct > self.progress.value():
-                self.progress.setValue(pct)
-                self._mark_progress(pct)
-            if not self._aborting:
-                self.section_label.setText(f"Current phase: {label}")
-
-    def _mark_progress(self, pct: int) -> None:
-        """Re-estimate the finish time after the bar advances."""
-        now = time.monotonic()
-        if self._first_mark is None:
-            self._first_mark = (now, pct)
-        else:
-            t0, p0 = self._first_mark
-            self._eta = now + (now - t0) / (pct - p0) * (100 - pct)
-        self._refresh_time_text()
+        # Only later phases can match, so the bar never rewinds;
+        # skipped phases are jumped over.
+        for idx in range(self._phase_idx + 1, len(self._phases)):
+            phase = self._phases[idx]
+            if phase.marker in raw:
+                self._phase_idx = idx
+                self._phase_t0 = time.monotonic()
+                self._refresh_time_text()
+                if not self._aborting:
+                    self.section_label.setText(
+                        f"Current phase: {phase.label}")
+                break
 
     def _refresh_time_text(self) -> None:
         now = time.monotonic()
+        phase = self._phases[self._phase_idx]
+        in_phase = now - self._phase_t0
+        done_s = (self._phase_starts[self._phase_idx]
+                  + min(in_phase, phase.seconds))
+        self.progress.setValue(int(100 * done_s / self._total_s))
         text = f"%p%   \u00b7   elapsed {_fmt_duration(now - self._t_start)}"
-        if self.progress.value() < 100:
-            if self._eta is None:
-                text += "   \u00b7   estimating remaining\u2026"
-            else:
-                remaining = _fmt_duration(max(self._eta - now, 0.0))
-                text += f"   \u00b7   ~{remaining} remaining"
+        if self._phase_idx < len(self._phases) - 1:
+            remaining = max(phase.seconds - in_phase, 0.0) + (
+                self._total_s - self._phase_starts[self._phase_idx]
+                - phase.seconds)
+            text += f"   \u00b7   ~{_fmt_duration(remaining)} remaining"
         self.progress.setFormat(text)
 
 
@@ -1320,6 +1402,8 @@ class ResultDialog(QDialog):
                         "successful report")
     _TIP_NO_DATA = ("No calibration data was generated for this run "
                     "(frequency sweep skipped)")
+    _TIP_NONSTANDARD = ("Calibration Data cannot be written from a "
+                        "non-standard configuration")
     _TIP_WRITTEN = "Calibration Data already Written"
 
     def __init__(self, result: run_report.RunResult, *,
@@ -1338,6 +1422,15 @@ class ResultDialog(QDialog):
         verdict_label.setObjectName("verdictBanner")
         verdict_label.setProperty("verdict", "pass" if result.passed else "fail")
         verdict_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        nonstandard_label = None
+        if result.nonstandard_reasons:
+            nonstandard_label = QLabel(
+                NONSTANDARD_BANNER + "\n" + "\n".join(
+                    f"  \u2022 {r}" for r in result.nonstandard_reasons)
+            )
+            nonstandard_label.setProperty("role", "alert")
+            nonstandard_label.setWordWrap(True)
 
         # Hyperlinks to the report directory and (when present) the
         # PDF file. QLabel with ``openExternalLinks=False`` and a
@@ -1370,6 +1463,9 @@ class ResultDialog(QDialog):
         if not result.passed:
             self.write_button.setEnabled(False)
             self.write_button.setToolTip(self._TIP_NOT_PASSING)
+        elif result.nonstandard_reasons:
+            self.write_button.setEnabled(False)
+            self.write_button.setToolTip(self._TIP_NONSTANDARD)
         elif not can_write:
             self.write_button.setEnabled(False)
             self.write_button.setToolTip(self._TIP_NO_DATA)
@@ -1410,6 +1506,8 @@ class ResultDialog(QDialog):
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(10)
         layout.addWidget(verdict_label)
+        if nonstandard_label is not None:
+            layout.addWidget(nonstandard_label)
         if link_labels:
             layout.addWidget(artifacts_label)
             for lbl in link_labels:
@@ -1558,6 +1656,17 @@ def main(argv=None) -> int:
         pass
     apply_theme(app, args.theme)
 
+    # Fail fast on a bad --scan-config before the operator fills in
+    # the form.
+    try:
+        scan_config = (ScanConfig.with_overrides(args.scan_config)
+                       if args.scan_config is not None else ScanConfig())
+    except (OSError, ValueError) as e:
+        QMessageBox.critical(None, "Scan configuration",
+                             f"Could not load --scan-config:\n{e}")
+        return 2
+    nonstandard = run_report.nonstandard_reasons(args, scan_config)
+
     # Prefs seeded from the on-disk cache and, optionally, the
     # hydrophone metadata (so the S/N field is pre-filled).
     prefs = OperatorPrefs.load(args.prefs)
@@ -1581,7 +1690,7 @@ def main(argv=None) -> int:
 
     exit_code = 130
     while True:
-        launcher = LauncherDialog(args, prefs)
+        launcher = LauncherDialog(args, prefs, nonstandard_reasons=nonstandard)
         if launcher.exec() != QDialog.DialogCode.Accepted:
             logger.info("Launcher closed.")
             return exit_code
@@ -1594,12 +1703,13 @@ def main(argv=None) -> int:
         args.reports_root = launcher.selected_reports_root
         settings.setValue("reports_root", str(args.reports_root))
 
-        choice, exit_code = _run_once(args)
+        choice, exit_code = _run_once(args, scan_config)
         if choice == "exit":
             return exit_code
 
 
-def _run_once(args: argparse.Namespace) -> tuple[str, int]:
+def _run_once(args: argparse.Namespace,
+              scan_config: ScanConfig) -> tuple[str, int]:
     """Run one characterization with the Running + Result dialogs.
 
     Returns ``(choice, exit_code)`` where ``choice`` is ``"another"``
@@ -1611,7 +1721,14 @@ def _run_once(args: argparse.Namespace) -> tuple[str, int]:
     # captures it.
     bridge = _LogBridge()
     handler = _attach_qt_log_handler(bridge)
-    running = RunningDialog(dry_run=bool(args.dry_run))
+    voltage_V = (args.voltage if args.voltage is not None
+                 else VerificationTank.default_voltage_for(args.frequency_khz))
+    phases = _estimate_phases(
+        scan_config, args.frequency_khz, voltage_V,
+        skip_2d=args.skip_2d, skip_frequency=args.skip_frequency,
+        skip_voltage=args.skip_voltage,
+    )
+    running = RunningDialog(phases=phases, dry_run=bool(args.dry_run))
     bridge.message.connect(
         running.on_log, Qt.ConnectionType.QueuedConnection,
     )

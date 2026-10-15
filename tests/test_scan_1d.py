@@ -94,10 +94,11 @@ def test_characterization_run_beam_scans_includes_axial(clean_cwd):
                           console_sn="dry")
     # Keep the scan geometry tiny so the test stays snappy.
     cfg = ScanConfig()
-    cfg.lateral_1d.points = 5
-    cfg.elevation_1d.points = 5
-    cfg.axial_1d.points = 5
-    cfg.scan_2d.points = 3
+    plan = cfg.plan_for(400)
+    plan.lateral_1d.points = 5
+    plan.elevation_1d.points = 5
+    plan.axial_1d.points = 5
+    plan.scan_2d.points = 3
     ch = Characterization(
         ver=tank, prefs=prefs,
         scan_config=cfg, criteria=AcceptanceCriteria(),

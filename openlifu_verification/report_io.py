@@ -31,7 +31,6 @@ from typing import Optional
 import numpy as np
 
 from .characterization import (
-    FREQ_SWEEP_OFFSETS_KHZ,
     ROW,
     TestReport,
     _1d_scan_pnp_peak,
@@ -40,6 +39,9 @@ from .characterization import (
 from .scan_results import ScanResult
 
 logger = logging.getLogger(__name__)
+
+#: Shown on reports (and in the GUI) for runs that used any override.
+NONSTANDARD_BANNER = "NON-STANDARD CONFIGURATION - not valid for release"
 
 
 # ----------------------------------------------------------------------
@@ -488,6 +490,14 @@ def write_xlsx(report: TestReport, path: Path, figures: Optional[dict] = None) -
     for c in sws[1]:
         c.font = Font(bold=True)
     sws.append(["Overall verdict", "PASS" if report.overall_pass else "FAIL"])
+    sws.append(["Configuration", NONSTANDARD_BANNER
+                if report.nonstandard_reasons else "Standard"])
+    if report.nonstandard_reasons:
+        cfg_cell = sws.cell(row=sws.max_row, column=2)
+        cfg_cell.fill = red
+        cfg_cell.font = Font(bold=True)
+        for reason in report.nonstandard_reasons:
+            sws.append(["Non-standard setting", reason])
     sws.append(["Started at", report.started_at])
     sws.append(["Finished at", report.finished_at])
     sws.append(["Peak XY (mm)", f"({report.peak_xy_mm[0]:.4f}, "
@@ -554,6 +564,10 @@ def write_pdf(report: TestReport, path: Path,
             f"Date: {report.started_at}   Finished: {report.finished_at}",
             "",
         ]
+        if report.nonstandard_reasons:
+            lines[2:2] = [f"*** {NONSTANDARD_BANNER} ***",
+                          *(f"    {r}" for r in report.nonstandard_reasons),
+                          ""]
         current_letter: Optional[str] = None
         for id_, row in _iter_rows_in_order(report):
             letter = id_.split(".", 1)[0]
@@ -761,6 +775,7 @@ def write_report(report: TestReport, output_dir: Optional[Path] = None,
         test_reports/<TXM-SN>/<YYYYMMDD>_<HHMMSS>/
             <TXM-SN>_Report.xlsx, <TXM-SN>_Report.pdf,
             <TXM-SN>_device_config.json, <TXM-SN>_summary.csv,
+            <TXM-SN>_scan_config.json,
             *.csv, figures/*.png, raw/*.npz, operator_prefs_snapshot.json
 
     Args:
@@ -824,6 +839,10 @@ def write_report(report: TestReport, output_dir: Optional[Path] = None,
             )
         except Exception as e:
             logger.warning("Could not snapshot operator prefs: %s", e)
+
+    # Effective scan configuration (standard or overridden).
+    if report.scan_config is not None:
+        report.scan_config.save(run_dir / f"{file_stem}_scan_config.json")
 
     # Close figures we opened so they don't linger.
     try:

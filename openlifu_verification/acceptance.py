@@ -257,11 +257,7 @@ class AcceptanceCriteria:
 
     @classmethod
     def from_dict(cls, data: dict) -> "AcceptanceCriteria":
-        """Construct criteria from a plain dict; unknown keys ignored.
-
-        Used both by :meth:`from_file` and by :class:`ScanConfig` when
-        acceptance is embedded inside ``scan_config.json``.
-        """
+        """Construct criteria from a plain dict; unknown keys ignored."""
         data = data or {}
         return cls(
             peak_offset=_filtered(PeakOffset, data.get("peak_offset", {})),

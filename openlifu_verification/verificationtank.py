@@ -493,11 +493,24 @@ class VerificationTank:
         except Exception as e:
             logger.warning("txdevice.async_mode(False) before set_solution raised: %s", e)
 
-        self.lifu.set_solution(
-            solution=solution,
+        # Load the solution through txdevice rather than
+        # LIFUInterface.set_solution: the latter always re-sends the HV
+        # setpoint (+ HV_ON), which blocks ~2.3 s + 0.09 s/V while the
+        # rail re-ramps even when the voltage is unchanged (measured
+        # 5.6 s of a 7.9 s reconfigure at 40 V). _set_hv_voltage above
+        # already handles real voltage changes.
+        self.lifu.check_solution(solution)
+        self.lifu.txdevice.set_module_invert(
+            solution["transducer"].get("module_invert", False))
+        self.lifu.txdevice.set_solution(
+            pulse=solution["pulse"],
+            delays=solution["delays"],
+            apodizations=solution["apodizations"],
+            sequence=solution["sequence"],
             profile_index=profile_index,
             profile_increment=profile_increment,
-            trigger_mode=trigger_mode)
+            trigger_mode=trigger_mode,
+        )
         self.lifu_config = dict(
             frequency_kHz=frequency_kHz, voltage=voltage,
             duration_usec=duration_usec, interval_msec=interval_msec,
