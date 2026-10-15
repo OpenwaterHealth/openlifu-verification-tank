@@ -74,6 +74,7 @@ from openlifu_verification import (
     VerificationTank,
 )
 from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
+from openlifu_verification.characterization import ReportRow
 from openlifu_verification.report_io import NONSTANDARD_BANNER
 
 
@@ -365,6 +366,15 @@ def _build_qss(p: Palette) -> str:
         background-color: {p.panel_alt_bg};
         color: {p.danger};
         border: 1px solid {p.danger};
+    }}
+    QLabel#gradeSquare {{
+        border-radius: 3px;
+    }}
+    QLabel#gradeSquare[status="PASS"] {{
+        background-color: {p.success};
+    }}
+    QLabel#gradeSquare[status="FAIL"] {{
+        background-color: {p.danger};
     }}
     """
 
@@ -920,10 +930,11 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mK]")
 # the wall-clock order the gates resolve during a real run so the
 # operator sees them light up top-to-bottom.
 #
-# NB: the ``start_marker`` values were chosen to fire well BEFORE
-# the corresponding grade line, so the animated CHECKING glyph has
-# time to actually spin. Using a marker whose log record is emitted
-# right next to the verdict yields a "jump-to-end" appearance.
+# NB: each ``start_marker`` is the log line that starts the
+# measurement the gate is graded from, so gates run one after another.
+# Gates that share a marker (firmware + cal dates, peak X/Y + offset,
+# the three focused-pulse gates) are graded from the same measurement
+# and resolve together.
 _GATE_VERDICT_RE_TEMPLATE = (
     r"\[grade\]\s+{name}\s+(?:->|\u2192)\s+(PASS|FAIL|SKIP)"
 )
@@ -963,9 +974,6 @@ _GATES: list[dict] = [
     {
         "key": "peak_xy",
         "label": "Peak X/Y position (D.5, D.6)",
-        # find_peak begins with "Running fresh find_peak from..."
-        # which fires well before ``_grade_peak_xy`` stamps its
-        # verdict, so the spinner has time to actually animate.
         "start_marker": "Running fresh find_peak",
         "verdict_res": (_grade_re("Peak X"), _grade_re("Peak Y")),
         "combine": "all",
@@ -996,23 +1004,21 @@ _GATES: list[dict] = [
     {
         "key": "peak_z_focus",
         "label": "Peak Z focus vs D.3 (D.12)",
-        # measure_waveform_at_peak runs after the 1-D axial + 2-D
-        # scans, so "Running 2-D scan" gives the spinner ample time.
-        "start_marker": "Running 2-D scan",
+        "start_marker": "Measuring waveform at peak",
         "verdict_res": (_grade_re("Peak Z focus"),),
         "combine": "first",
     },
     {
         "key": "pnp_at_peak",
         "label": "Focused pulse PNP (D.14)",
-        "start_marker": "Running 2-D scan",
+        "start_marker": "Measuring waveform at peak",
         "verdict_res": (_grade_re("PNP at peak"),),
         "combine": "first",
     },
     {
         "key": "peak_depth",
         "label": "Focused hydrophone depth (D.16)",
-        "start_marker": "Running 2-D scan",
+        "start_marker": "Measuring waveform at peak",
         "verdict_res": (_grade_re("Peak depth"),),
         "combine": "first",
     },
@@ -1423,6 +1429,27 @@ class ResultDialog(QDialog):
         verdict_label.setProperty("verdict", "pass" if result.passed else "fail")
         verdict_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        # One square per graded report row (hover for details), then
+        # "X/Y passed in m:ss".
+        squares_row = QHBoxLayout()
+        squares_row.setSpacing(4)
+        squares_row.addStretch(1)
+        for row in result.graded_rows:
+            square = QLabel()
+            square.setObjectName("gradeSquare")
+            square.setProperty("status", row.status)
+            square.setFixedSize(16, 16)
+            square.setToolTip(self._row_tooltip(row))
+            squares_row.addWidget(square)
+        squares_row.addStretch(1)
+        n_pass = sum(r.status == "PASS" for r in result.graded_rows)
+        summary = f"{n_pass}/{len(result.graded_rows)} tests passed"
+        if result.elapsed_s is not None:
+            summary += f" in {_fmt_duration(result.elapsed_s)}"
+        summary_label = QLabel(summary)
+        summary_label.setProperty("role", "subtle")
+        summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         nonstandard_label = None
         if result.nonstandard_reasons:
             nonstandard_label = QLabel(
@@ -1506,6 +1533,9 @@ class ResultDialog(QDialog):
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(10)
         layout.addWidget(verdict_label)
+        if result.graded_rows:
+            layout.addLayout(squares_row)
+            layout.addWidget(summary_label)
         if nonstandard_label is not None:
             layout.addWidget(nonstandard_label)
         if link_labels:
@@ -1556,11 +1586,12 @@ class ResultDialog(QDialog):
     # ------------------------------------------------------------------
     def _finish_with(self, choice: str) -> None:
         if self.write_button.isEnabled():
+            action = "Exit" if choice == "exit" else "Continue"
             answer = QMessageBox.warning(
                 self,
                 "Calibration data not written",
                 "The Calibration Data has not been written to the "
-                "Device. Are you sure you want to Continue?",
+                f"Device. Are you sure you want to {action}?",
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -1576,6 +1607,18 @@ class ResultDialog(QDialog):
         if not self.exit_button.isEnabled():
             return
         self._finish_with("exit")
+
+    @staticmethod
+    def _row_tooltip(row: ReportRow) -> str:
+        value = (f"{row.value:.4g}" if isinstance(row.value, float)
+                 else str(row.value))
+        lines = [f"{row.id} {row.label}: {row.status}",
+                 f"Value: {value} {row.unit}".rstrip()]
+        if row.threshold is not None:
+            lines.append(f"Limit: {row.threshold}")
+        if row.note:
+            lines.append(row.note)
+        return "\n".join(lines)
 
     @staticmethod
     def _link_label(text: str, target: Path, pal: Palette) -> QLabel:

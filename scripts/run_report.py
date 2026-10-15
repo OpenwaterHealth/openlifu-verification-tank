@@ -239,6 +239,9 @@ class RunResult:
     calibration or peak search failed and the run was stopped.
     ``nonstandard_reasons`` is non-empty when the run deviated from
     the standard configuration (see :func:`nonstandard_reasons`).
+    ``graded_rows`` are the report rows with a PASS/FAIL verdict, in
+    report order; ``elapsed_s`` is the wall time from the start of
+    the run until the report was written.
     """
     passed: bool = False
     run_dir: Optional[Path] = None
@@ -248,6 +251,8 @@ class RunResult:
     aborted: bool = False
     halted_reason: Optional[str] = None
     nonstandard_reasons: list[str] = field(default_factory=list)
+    graded_rows: list[characterization.ReportRow] = field(default_factory=list)
+    elapsed_s: Optional[float] = None
 
 
 def nonstandard_reasons(args: argparse.Namespace,
@@ -321,6 +326,7 @@ def _run(args: argparse.Namespace,
          on_complete: Optional[OnComplete],
          console_log: logging.handlers.MemoryHandler) -> RunResult:
     _configure_root_logger(args.log_file)
+    t_run_start = time.perf_counter()
     if getattr(args, "verbose", False):
         set_log_level("DEBUG", sdk_level="DEBUG")
     elif getattr(args, "quiet", False):
@@ -495,6 +501,9 @@ def _run(args: argparse.Namespace,
             print("  Config : NON-STANDARD (not valid for release)")
 
         result.passed = bool(report.overall_pass)
+        result.graded_rows = [r for r in report.rows.values()
+                              if r.status in ("PASS", "FAIL")]
+        result.elapsed_s = time.perf_counter() - t_run_start
         result.run_dir = run_dir
         result.files["xlsx"] = xlsx_path
         result.files["pdf"] = pdf_path

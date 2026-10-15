@@ -544,11 +544,17 @@ class Characterization:
         ext = plan.lateral_1d.extent_mm
         pts = plan.lateral_1d.points
 
+        # The lateral / elevation peak-offset rows depend only on their
+        # own sweep, so each is graded right after it completes.
         logger.info("Running 1-D lateral (x) scan (\u00b1%.1f mm, %d pts)...", ext, pts)
         lat = self.ver.scan_1d(
             dim="x", scan_range=(-ext, ext), num=pts,
             absolute=False, n_averages=n_avg, **scope_kw,
         )
+        self.report.scans["lateral_1d"] = lat
+        self._set_1d_peak_offset_row(lat, ROW["lateral_peak_offset_mm"],
+                                     "1-D Lateral Peak Offset")
+        self._grade_lateral_peak_offset()
         self._check_abort()
 
         ext_e = plan.elevation_1d.extent_mm
@@ -559,6 +565,10 @@ class Characterization:
             dim="y", scan_range=(-ext_e, ext_e), num=pts_e,
             absolute=False, n_averages=n_avg, **scope_kw,
         )
+        self.report.scans["elevation_1d"] = elev
+        self._set_1d_peak_offset_row(elev, ROW["elevation_peak_offset_mm"],
+                                     "1-D Elevation Peak Offset")
+        self._grade_elevation_peak_offset()
         self._check_abort()
 
         ext_a = plan.axial_1d.extent_mm
@@ -569,6 +579,7 @@ class Characterization:
             dim="z", scan_range=(-ext_a, ext_a), num=pts_a,
             absolute=False, n_averages=n_avg, **scope_kw,
         )
+        self.report.scans["axial_1d"] = axial
         self._check_abort()
 
         ext2 = plan.scan_2d.extent_mm
@@ -579,39 +590,23 @@ class Characterization:
             y_range=(-ext2, ext2), num_y=pts2,
             absolute=False, n_averages=n_avg, **scope_kw,
         )
-
-        self.report.scans["lateral_1d"] = lat
-        self.report.scans["elevation_1d"] = elev
-        self.report.scans["axial_1d"] = axial
         self.report.scans["scan_2d"] = two_d
-
-        # Populate the graded 1-D peak-offset rows now so
-        # ``_grade_lateral_peak_offset`` / ``_grade_elevation_peak_offset``
-        # have something to stamp PASS/FAIL on. Compute the raw
-        # peak-x / peak-y from the sweep so the report shows the
-        # measured number even for SKIPPED grades.
-        for scan, axis, row_key, label in (
-            (lat,  "x", ROW["lateral_peak_offset_mm"],
-             "1-D Lateral Peak Offset"),
-            (elev, "y", ROW["elevation_peak_offset_mm"],
-             "1-D Elevation Peak Offset"),
-        ):
-            try:
-                coord_arr, _pnp, idx = _1d_scan_pnp_peak(scan)
-                offset_mm = float(coord_arr[idx])
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Could not extract 1-D peak for %s: %s",
-                               row_key, e)
-                offset_mm = float("nan")
-            self.report.set_row(row_key, label, offset_mm, unit="mm")
-
-        # Grade the two 1-D peak-offset rows inline so the operator
-        # sees the verdict alongside the raw sweep, not retroactively
-        # at the end of the run.
-        self._grade_lateral_peak_offset()
-        self._grade_elevation_peak_offset()
         return {"lateral_1d": lat, "elevation_1d": elev,
                 "axial_1d": axial, "scan_2d": two_d}
+
+    def _set_1d_peak_offset_row(self, scan: ScanResult, row_key: str,
+                                label: str) -> None:
+        """Create a 1-D peak-offset row holding the sweep's argmax
+        coordinate (NaN if it can't be extracted), ready for
+        ``_grade_1d_peak_offset`` to stamp PASS/FAIL on."""
+        try:
+            coord_arr, _pnp, idx = _1d_scan_pnp_peak(scan)
+            offset_mm = float(coord_arr[idx])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not extract 1-D peak for %s: %s",
+                           row_key, e)
+            offset_mm = float("nan")
+        self.report.set_row(row_key, label, offset_mm, unit="mm")
 
     def measure_waveform_at_peak(self) -> dict:
         """Fire at the peak; compute PNP + focused arrival depth.
