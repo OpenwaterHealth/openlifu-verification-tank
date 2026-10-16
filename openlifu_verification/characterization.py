@@ -152,6 +152,10 @@ class TestReport:
     rows: dict[str, ReportRow] = field(default_factory=dict)
     scans: dict[str, ScanResult] = field(default_factory=dict)
     waveform_at_peak: dict = field(default_factory=dict)
+    #: Raw results of the plane-wave (D.2/D.3) and focused (D.15/D.16)
+    #: depth calibrations, kept for the report figures.
+    depth_cal_plane_wave: dict = field(default_factory=dict)
+    depth_cal_focused: dict = field(default_factory=dict)
     peak_xy_mm: tuple = (0.0, 0.0)
     freq_response: dict = field(default_factory=dict)
     voltage_response: dict = field(default_factory=dict)
@@ -296,7 +300,8 @@ def _parse_cal_date(raw: str) -> Optional["datetime.date"]:
 
     Handles the common shapes we see in device metadata: ISO
     ``"YYYY-MM-DD"``, ``"DD-Mon-YYYY"`` (Onda hydrophone files),
-    ``"DD/MM/YYYY"``, and ``"YYYYMMDD"`` (PicoScope driver strings).
+    ``"DD/MM/YYYY"``, ``"YYYYMMDD"`` and ``"DDMonYY"`` (PicoScope
+    driver strings, e.g. ``"28Feb24"``).
     Returns ``None`` for empty or unrecognized inputs so the caller
     can skip the check without raising."""
     if not raw:
@@ -310,6 +315,7 @@ def _parse_cal_date(raw: str) -> Optional["datetime.date"]:
         "%b-%d-%Y", "%B-%d-%Y",
         "%d/%m/%Y", "%m/%d/%Y",
         "%Y%m%d",
+        "%d%b%y",
     )
     for fmt in fmts:
         try:
@@ -345,6 +351,9 @@ class Characterization:
         voltage_V: HV rail voltage for the peak scans + freq sweep.
             Defaults to ``VerificationTank.default_voltage_for(frequency_kHz)``.
         plot: Passed through to :meth:`VerificationTank.find_peak`.
+        expected_console_hwid: Hardware ID recorded for the console
+            S/N in ``prefs``; :meth:`run` halts if the connected
+            console reports a different one. ``None`` skips the check.
 
     Attributes:
         report: The :class:`TestReport` being populated.
@@ -357,7 +366,8 @@ class Characterization:
                  output_dir: Optional[Path] = None,
                  frequency_kHz: float = 400.0,
                  voltage_V: Optional[float] = None,
-                 plot: bool = False):
+                 plot: bool = False,
+                 expected_console_hwid: Optional[str] = None):
         self.ver = ver
         self.prefs = prefs
         self.criteria = criteria or AcceptanceCriteria()
@@ -368,6 +378,7 @@ class Characterization:
             voltage_V = VerificationTank.default_voltage_for(self.frequency_kHz)
         self.voltage_V = float(voltage_V)
         self.plot = bool(plot)
+        self.expected_console_hwid = expected_console_hwid
         self._abort_event: Optional[threading.Event] = None
 
         self.report = TestReport(
@@ -475,6 +486,7 @@ class Characterization:
             store=True,
             save=False,
         )
+        self.report.depth_cal_plane_wave = result
         self.report.set_row(
             ROW["plane_wave_arrival_us"],
             "Plane-Wave Arrival Time",
@@ -695,6 +707,7 @@ class Characterization:
                 store=False,  # keep the plane-wave depth as the truth
                 save=False,
             )
+            self.report.depth_cal_focused = depth_result
             arrival_us = float(depth_result["arrival_us"])
             axial_depth_mm = float(depth_result["distance_mm"])
             max_delay_us = float(depth_result["max_delay_us"])
@@ -1563,13 +1576,22 @@ class Characterization:
         between the individual beam scans); once set, the current
         phase finishes and :class:`RunAborted` is raised.
 
-        Raises :class:`RunHalted` if the plane-wave depth calibration
-        or the peak search fails or is out of tolerance, since every
-        later measurement depends on them.
+        Raises :class:`RunHalted` if the connected console's hardware
+        ID doesn't match ``expected_console_hwid``, or if the
+        plane-wave depth calibration or the peak search fails or is
+        out of tolerance, since every later measurement depends on them.
         """
         self._abort_event = abort_event
         self._check_abort()
-        self.collect_test_info()
+        info = self.collect_test_info()
+        expected = self.expected_console_hwid
+        if expected and expected not in (info.console_hwid,
+                                         info.console_hwid_hex):
+            msg = (f"Connected console hardware ID "
+                   f"{info.console_hwid or '(unreadable)'} does not match "
+                   f"{expected}, recorded for console {self.prefs.console_sn}")
+            logger.error("%s. Stopping the run.", msg)
+            raise RunHalted(msg + ".")
         self._check_abort()
         # Refine hydrophone depth via plane-wave arrival BEFORE the
         # peak search so find_peak fires focused pulses at the true

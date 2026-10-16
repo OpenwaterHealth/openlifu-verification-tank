@@ -1,0 +1,11 @@
+{
+  "HYDRO2246": {
+    "Calibration": "HNR0500-2246_xxxxxx-xxxx-xx_xx_20221219.txt"
+  },
+  "HYDRO2581": {
+    "Calibration": "HNR0500-2581_xxxxxx-xxxx-xx_xx_20250924.txt"
+  },
+  "HYDRO2585": {
+    "Calibration": "HNR0500-2585_xxxxxx-xxxx-xx_xx_20251028.txt"
+  }
+}

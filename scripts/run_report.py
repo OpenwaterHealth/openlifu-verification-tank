@@ -168,6 +168,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-modules", type=int, default=1)
     p.add_argument("--ext-power", action="store_true",
                    help="Use the QPX600DP external HV supply (default: internal HV).")
+    p.add_argument("--console-hwid", type=str, default=None,
+                   help="Expected console hardware ID (base58 or hex); the run "
+                        "halts if the connected console differs. Not checked "
+                        "in --dry-run.")
     # --- Hydrophone ---
     p.add_argument("--hydrophone", type=str, default="",
                    help="Hydrophone calibration file or ID (e.g. '2246').")
@@ -283,7 +287,8 @@ OnComplete = Callable[["RunResult", Optional[Callable[[], bool]]], None]
 
 def run(args: argparse.Namespace, *,
         abort_event: Optional[threading.Event] = None,
-        on_complete: Optional[OnComplete] = None) -> RunResult:
+        on_complete: Optional[OnComplete] = None,
+        prefs: Optional[OperatorPrefs] = None) -> RunResult:
     """Execute the report pipeline with parsed ``args``.
 
     Split out of :func:`main` so a GUI launcher can call the same
@@ -300,6 +305,9 @@ def run(args: argparse.Namespace, *,
             :data:`OnComplete`). The connection is closed when the
             hook returns, so a GUI can block here until the operator
             has decided whether to write.
+        prefs: Operator / serial-number inputs collected by the
+            caller. When ``None``, they are loaded from ``--prefs``
+            and (unless ``--no-prompt``) confirmed interactively.
 
     Every log record emitted during the run is also saved to
     ``<run_dir>/<stem>_console.log`` (buffered in memory until the
@@ -312,7 +320,7 @@ def run(args: argparse.Namespace, *,
     root = logging.getLogger()
     root.addHandler(console_log)
     try:
-        return _run(args, abort_event, on_complete, console_log)
+        return _run(args, abort_event, on_complete, console_log, prefs)
     finally:
         root.removeHandler(console_log)
         target = console_log.target
@@ -324,7 +332,8 @@ def run(args: argparse.Namespace, *,
 def _run(args: argparse.Namespace,
          abort_event: Optional[threading.Event],
          on_complete: Optional[OnComplete],
-         console_log: logging.handlers.MemoryHandler) -> RunResult:
+         console_log: logging.handlers.MemoryHandler,
+         prefs: Optional[OperatorPrefs]) -> RunResult:
     _configure_root_logger(args.log_file)
     t_run_start = time.perf_counter()
     if getattr(args, "verbose", False):
@@ -346,34 +355,35 @@ def _run(args: argparse.Namespace,
             logger.warning("  %s", reason)
 
     # --- Prefs ---
-    prefs = OperatorPrefs.load(args.prefs)
-    # Auto-populate test_app_version (never prompted) and pre-fill
-    # hydrophone_sn from the loaded calibration so the operator can
-    # confirm or override it at the prompt.
-    try:
-        prefs.test_app_version = _pkg_version("openlifu-verification")
-    except PackageNotFoundError:
-        prefs.test_app_version = ""
-    hydro_sn_from_file = ""
-    if args.hydrophone:
+    if prefs is None:
+        prefs = OperatorPrefs.load(args.prefs)
+        # Auto-populate test_app_version (never prompted) and pre-fill
+        # hydrophone_sn from the loaded calibration so the operator can
+        # confirm or override it at the prompt.
         try:
-            hydro_sn_from_file = str(
-                Hydrophone(args.hydrophone).metadata.get("HYD_SN", "")
-            )
-        except Exception as e:
-            logger.warning("Could not read hydrophone S/N from %r: %s",
-                           args.hydrophone, e)
-    if hydro_sn_from_file:
-        prefs.hydrophone_sn = hydro_sn_from_file
+            prefs.test_app_version = _pkg_version("openlifu-verification")
+        except PackageNotFoundError:
+            prefs.test_app_version = ""
+        hydro_sn_from_file = ""
+        if args.hydrophone:
+            try:
+                hydro_sn_from_file = str(
+                    Hydrophone(args.hydrophone).metadata.get("HYD_SN", "")
+                )
+            except Exception as e:
+                logger.warning("Could not read hydrophone S/N from %r: %s",
+                               args.hydrophone, e)
+        if hydro_sn_from_file:
+            prefs.hydrophone_sn = hydro_sn_from_file
 
-    if not args.no_prompt:
-        try:
-            prefs.prompt_interactively(freq_kHz=args.frequency_khz)
-        except (KeyboardInterrupt, EOFError):
-            print("\nAborted at prompt.", file=sys.stderr)
-            result.exit_code = 130
-            return result
-        prefs.save(args.prefs)
+        if not args.no_prompt:
+            try:
+                prefs.prompt_interactively(freq_kHz=args.frequency_khz)
+            except (KeyboardInterrupt, EOFError):
+                print("\nAborted at prompt.", file=sys.stderr)
+                result.exit_code = 130
+                return result
+            prefs.save(args.prefs)
     logger.info("Operator prefs: tester=%r txm_sn=%r hydrophone_sn=%r app_ver=%r",
                 prefs.tester_name, prefs.txm_sn, prefs.hydrophone_sn,
                 prefs.test_app_version)
@@ -430,6 +440,8 @@ def _run(args: argparse.Namespace,
                 return result
 
         # --- Run the characterization ---
+        if args.dry_run and args.console_hwid:
+            logger.info("DRY RUN: console hardware ID not checked.")
         chz = Characterization(
             ver,
             prefs=prefs,
@@ -438,6 +450,7 @@ def _run(args: argparse.Namespace,
             frequency_kHz=args.frequency_khz,
             voltage_V=voltage_V,
             plot=args.plot_peak,
+            expected_console_hwid=None if args.dry_run else args.console_hwid,
         )
         chz.report.nonstandard_reasons = list(result.nonstandard_reasons)
         t_start = time.perf_counter()

@@ -172,13 +172,19 @@ class DryRunTank:
     # --- measurement APIs ---------------------------------------------
     def measure_pressure(self, x, y, z, *,
                          time_start_s=-14e-6, time_stop_s=86e-6,
-                         sampling_interval_ns=100, timeout_s=2.0, **_):
+                         sampling_interval_ns=100, timeout_s=2.0,
+                         n_averages=1, **_):
         t_us = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
         amp = self._amplitude_Pa(x, y)
         trace = self._synth_trace(amp, z, t_us)
+        # Noisy per-pulse copies from a local RNG so ``self._rng``'s
+        # sequence (and the graded values) is unchanged.
+        pulse_traces = trace + np.random.default_rng(0).normal(
+            0.0, 0.03 * abs(amp), size=(int(n_averages), t_us.size))
         return {
             "t": t_us,
             "trace": trace,
+            "pulse_traces": pulse_traces,
             "rms": float(np.sqrt(np.mean(trace ** 2))),
             "vpp": float(np.max(trace) - np.min(trace)),
             "units": "Pa",
@@ -240,10 +246,19 @@ class DryRunTank:
         t_us = np.linspace(0.0, float(time_stop_us),
                            int(round(float(time_stop_us) * 1e3
                                       / float(sampling_interval_ns))) + 1)
-        # Synthetic mean trace: a short raised-cosine burst centered
-        # at the picked first peak.
+        # Synthetic median trace: a sine burst starting at the arrival
+        # (so its first crest lands on ``first_peak_us``), plus noisy
+        # per-pulse copies. A local RNG keeps ``self._rng``'s sequence
+        # (and therefore the graded values) unchanged.
         first_peak_us = arrival_us + 0.25 * 1000.0 / float(self.frequency)
-        mean_trace = np.zeros_like(t_us)
+        dt_us = t_us - arrival_us
+        mean_trace = np.where(
+            (dt_us >= 0) & (dt_us <= float(duration_usec)),
+            np.sin(2 * np.pi * float(self.frequency) * 1e-3 * dt_us), 0.0)
+        pulse_traces = mean_trace + np.random.default_rng(0).normal(
+            0.0, 0.05, size=(int(n_pulses), t_us.size))
+        if skip_us is None:
+            skip_us = float(duration_usec) + max_delay_us + 6.0
         return {
             "distance_mm": float(distance_mm),
             "arrival_us": float(arrival_us),
@@ -255,8 +270,11 @@ class DryRunTank:
             "z_focus_mm": None if z_focus_mm is None else float(z_focus_mm),
             "sos_m_per_s": 1500.0,
             "mean_trace": mean_trace,
+            "pulse_traces": pulse_traces,
             "t_us": t_us,
             "n_pulses_used": int(n_pulses),
+            "skip_us": float(skip_us),
+            "baseline_window_us": 4.0,
         }
 
     # --- scan APIs -----------------------------------------------------

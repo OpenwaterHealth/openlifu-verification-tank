@@ -199,14 +199,50 @@ def build_figures(report: TestReport) -> dict:
     cross-references written into the D-section rows by
     :meth:`Characterization.measure_waveform_at_peak`. Figure
     titles carry the same "Figure N:" prefix so the PDF page order
-    reads the way the row grid says it should.
+    reads the way the row grid says it should. The plane-wave and
+    focused depth calibrations follow as Figures 8 and 9.
+
+    Where a figure backs a graded row, it draws the acceptance limit
+    from ``report.criteria`` and marks the graded point. The title's
+    second line shows the row's PASS/FAIL and the margin to the limit.
     """
     import matplotlib
     matplotlib.use("Agg", force=False)
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
 
     figs: dict = {}
     scans = report.scans
+    crit = report.criteria
+    freq_kHz = float(report.frequency_kHz)
+
+    def _status(*row_keys: str) -> str:
+        """Combined verdict of the given rows ("" if ungraded)."""
+        rows = [report.rows.get(ROW[k]) for k in row_keys]
+        statuses = [r.status for r in rows if r is not None]
+        if "FAIL" in statuses:
+            return "FAIL"
+        if statuses and all(s == "PASS" for s in statuses):
+            return "PASS"
+        return ""
+
+    def _title(ax, text: str, status: str = "", detail: str = "") -> None:
+        second = " \u2014 ".join(p for p in (status, detail) if p)
+        color = {"PASS": "darkgreen", "FAIL": "firebrick"}.get(status, "black")
+        ax.set_title(f"{text}\n{second}" if second else text,
+                     fontsize=9, color=color)
+
+    def _plot_pulses(ax, t_us, pulses, scale: float = 1.0) -> None:
+        """Grey overlay of the aligned per-pulse traces (if > 1)."""
+        if pulses is None:
+            return
+        pulses = np.asarray(pulses, dtype=float)
+        if pulses.ndim != 2 or pulses.shape[0] < 2:
+            return
+        for i, p in enumerate(pulses * scale):
+            ax.plot(t_us, p, color="0.6", lw=0.5, alpha=0.35,
+                    label=f"aligned pulses (n={pulses.shape[0]})"
+                    if i == 0 else None)
 
     # Helper: figure out the origin for a 1-D scan's Δ-axis label. In
     # relative mode (Characterization always runs relative) the origin
@@ -226,61 +262,75 @@ def build_figures(report: TestReport) -> dict:
         xs = s2d.coords.get("xfoci")
         ys = s2d.coords.get("yfoci")
         pnp_kPa = _pnp_MPa_grid(s2d.traces) * 1000.0
-        fig, ax = plt.subplots(figsize=(5, 4.2))
-        im = ax.imshow(pnp_kPa,
-                       extent=(float(xs[0]), float(xs[-1]),
-                               float(ys[0]), float(ys[-1])),
+        extent = (float(xs[0]), float(xs[-1]), float(ys[0]), float(ys[-1]))
+        fig, ax = plt.subplots(figsize=(5, 4.6))
+        im = ax.imshow(pnp_kPa, extent=extent,
                        origin="lower", aspect="equal", cmap="viridis")
-        ax.plot(0, 0, "r+", ms=14, mew=2, label="peak (relative)")
+        ax.plot(0, 0, "r+", ms=14, mew=2, label="located peak")
+        detail = ""
+        if crit is not None:
+            # The scan is relative to the located peak, so the nominal
+            # center (0, 0) sits at (-px, -py) in these coordinates.
+            px, py = (float(v) for v in report.peak_xy_mm)
+            lim = float(crit.peak_offset.max_axis_mm)
+            ax.add_patch(Rectangle((-px - lim, -py - lim), 2 * lim, 2 * lim,
+                                   fill=False, ec="w", ls="--", lw=1.2,
+                                   label=f"pass |x|, |y| \u2264 {lim:g} mm"))
+            ax.plot(-px, -py, "wx", ms=8, mew=1.5, label="nominal center")
+            ax.set_xlim(extent[0], extent[1])
+            ax.set_ylim(extent[2], extent[3])
+            detail = (f"peak ({px:+.2f}, {py:+.2f}) mm, "
+                      f"margin {lim - max(abs(px), abs(py)):+.2f} mm")
+        ax.legend(loc="upper right", fontsize=7)
         ax.set_xlabel("X offset (mm)")
         ax.set_ylabel("Y offset (mm)")
-        ax.set_title(f"Figure 1: 2-D XY PNP map @ {report.frequency_kHz:.0f} kHz, "
-                     f"{report.voltage_V:.0f} V")
+        _title(ax, f"Figure 1: 2-D XY PNP map @ {report.frequency_kHz:.0f} kHz, "
+                   f"{report.voltage_V:.0f} V",
+               _status("peak_x_mm", "peak_y_mm"), detail)
         fig.colorbar(im, ax=ax, label="PNP (kPa)")
         fig.tight_layout()
         figs["scan_2d"] = fig
 
-    # Figure 2: 1-D lateral (x sweep).
-    lat = scans.get("lateral_1d")
-    if lat is not None:
+    # Figures 2 / 3: 1-D lateral (x) / elevation (y) sweeps.
+    def _1d_offset_fig(scan, axis: str, axis_index: int, color: str,
+                       title: str, row_key: str):
         # Same reduction the grader uses, so the marked peak is the
         # point that was actually graded.
-        xs, pnp_MPa, ipk = _1d_scan_pnp_peak(lat)
+        cs, pnp_MPa, ipk = _1d_scan_pnp_peak(scan)
         pnp_kPa = pnp_MPa * 1000.0
-        x0 = _scan_origin(lat, 0)
-        fig, ax = plt.subplots(figsize=(6, 3.2))
-        ax.plot(xs, pnp_kPa, "o-", lw=1.5)
-        ax.plot(xs[ipk], pnp_kPa[ipk], "r*", ms=12,
-                label=f"peak \u0394x = {xs[ipk]:+.2f} mm")
+        c0 = _scan_origin(scan, axis_index)
+        fig, ax = plt.subplots(figsize=(6, 3.4))
+        detail = ""
+        if crit is not None:
+            lim = float(crit.peak_offset.max_1d_axis_mm_for(freq_kHz))
+            ax.axvspan(-lim, lim, color="tab:green", alpha=0.12,
+                       label=f"pass |\u0394{axis}| \u2264 {lim:g} mm")
+            detail = (f"offset {cs[ipk]:+.2f} mm, "
+                      f"margin {lim - abs(cs[ipk]):+.2f} mm")
+        ax.plot(cs, pnp_kPa, "o-", lw=1.5, color=color)
+        ax.plot(cs[ipk], pnp_kPa[ipk], "r*", ms=12,
+                label=f"peak \u0394{axis} = {cs[ipk]:+.2f} mm")
         ax.legend(loc="upper right", fontsize=8)
         ax.axvline(0.0, color="0.7", lw=0.7)
-        ax.set_xlabel(f"\u0394x (x\u2080 = {x0:.2f} mm)")
+        ax.set_xlabel(f"\u0394{axis} ({axis}\u2080 = {c0:.2f} mm, 2-D peak)")
         ax.set_ylabel("PNP (kPa)")
-        ax.set_title(f"Figure 2: 1-D Lateral scan @ {report.frequency_kHz:.0f} kHz, "
-                     f"{report.voltage_V:.0f} V")
+        _title(ax, f"{title} @ {report.frequency_kHz:.0f} kHz, "
+                   f"{report.voltage_V:.0f} V", _status(row_key), detail)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
-        figs["lateral_1d"] = fig
+        return fig
 
-    # Figure 3: 1-D elevation (y sweep).
+    lat = scans.get("lateral_1d")
+    if lat is not None:
+        figs["lateral_1d"] = _1d_offset_fig(
+            lat, "x", 0, "tab:blue", "Figure 2: 1-D Lateral scan",
+            "lateral_peak_offset_mm")
+
     elev = scans.get("elevation_1d")
     if elev is not None:
-        ys, pnp_MPa, ipk = _1d_scan_pnp_peak(elev)
-        pnp_kPa = pnp_MPa * 1000.0
-        y0 = _scan_origin(elev, 1)
-        fig, ax = plt.subplots(figsize=(6, 3.2))
-        ax.plot(ys, pnp_kPa, "o-", lw=1.5, color="tab:orange")
-        ax.plot(ys[ipk], pnp_kPa[ipk], "r*", ms=12,
-                label=f"peak \u0394y = {ys[ipk]:+.2f} mm")
-        ax.legend(loc="upper right", fontsize=8)
-        ax.axvline(0.0, color="0.7", lw=0.7)
-        ax.set_xlabel(f"\u0394y (y\u2080 = {y0:.2f} mm)")
-        ax.set_ylabel("PNP (kPa)")
-        ax.set_title(f"Figure 3: 1-D Elevation scan @ {report.frequency_kHz:.0f} kHz, "
-                     f"{report.voltage_V:.0f} V")
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        figs["elevation_1d"] = fig
+        figs["elevation_1d"] = _1d_offset_fig(
+            elev, "y", 1, "tab:orange", "Figure 3: 1-D Elevation scan",
+            "elevation_peak_offset_mm")
 
     # Figure 4: 1-D axial (z sweep).
     axi = scans.get("axial_1d")
@@ -291,14 +341,38 @@ def build_figures(report: TestReport) -> dict:
         if traces_2d.ndim == 3 and traces_2d.shape[1] == 1:
             traces_2d = traces_2d[:, 0, :]
         pnp_kPa = _pnp_MPa_grid(traces_2d) * 1000.0
+        zs = np.ravel(np.asarray(zs, dtype=float))
         z0 = _scan_origin(axi, 2)
-        fig, ax = plt.subplots(figsize=(6, 3.2))
+        fig, ax = plt.subplots(figsize=(6, 3.4))
+        detail = ""
+        depth_row = report.rows.get(ROW["plane_wave_depth_mm"])
+        focus_row = report.rows.get(ROW["peak_z_focus_mm"])
+        depth = None if depth_row is None else depth_row.value
+        focus = None if focus_row is None else focus_row.value
+        if depth is not None and np.isfinite(depth):
+            dz = float(depth) - z0
+            if crit is not None:
+                tol = float(depth) * float(crit.peak_depth.peak_z_focus_tol_pct) / 100.0
+                ax.axvspan(dz - tol, dz + tol, color="tab:green", alpha=0.12,
+                           label=f"focus pass \u00b1{tol:.2f} mm")
+                if focus is not None and np.isfinite(focus):
+                    detail = (f"focus {float(focus):.2f} mm vs depth {float(depth):.2f} mm, "
+                              f"margin {tol - abs(float(focus) - float(depth)):+.2f} mm")
+            ax.axvline(dz, color="tab:red", lw=0.9,
+                       label=f"plane-wave depth {float(depth):.2f} mm")
+        if focus is not None and np.isfinite(focus):
+            ax.axvline(float(focus) - z0, color="k", ls="--", lw=0.9,
+                       label=f"commanded focus {float(focus):.2f} mm")
         ax.plot(zs, pnp_kPa, "o-", lw=1.5, color="tab:green")
-        ax.axvline(0.0, color="0.7", lw=0.7)
+        if pnp_kPa.size == zs.size and pnp_kPa.size:
+            ipk = int(np.argmax(pnp_kPa))
+            ax.plot(zs[ipk], pnp_kPa[ipk], "r*", ms=12,
+                    label=f"axial peak \u0394z = {zs[ipk]:+.2f} mm")
+        ax.legend(loc="lower right", fontsize=7)
         ax.set_xlabel(f"\u0394z (z\u2080 = {z0:.2f} mm)")
         ax.set_ylabel("PNP (kPa)")
-        ax.set_title(f"Figure 4: 1-D Axial scan @ {report.frequency_kHz:.0f} kHz, "
-                     f"{report.voltage_V:.0f} V")
+        _title(ax, f"Figure 4: 1-D Axial scan @ {report.frequency_kHz:.0f} kHz, "
+                   f"{report.voltage_V:.0f} V", _status("peak_z_focus_mm"), detail)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         figs["axial_1d"] = fig
@@ -308,27 +382,40 @@ def build_figures(report: TestReport) -> dict:
     if wf:
         t_us = np.asarray(wf["t"], dtype=float)
         trace = np.asarray(wf["trace"], dtype=float)
-        if wf.get("units", "Pa") == "Pa":
-            y = trace / 1e3
+        in_pa = wf.get("units", "Pa") == "Pa"
+        if in_pa:
+            scale = 1e-3
             ylabel = "Pressure (kPa)"
         else:
-            y = trace
+            scale = 1.0
             ylabel = f"Amplitude ({wf.get('units', 'a.u.')})"
-        fig, ax = plt.subplots(figsize=(6, 3.2))
-        ax.plot(t_us, y, lw=0.9)
+        y = trace * scale
+        pnp_V = float(wf.get("pnp_voltage_V", report.voltage_V))
+        pnp_MPa = float(wf.get("pnp_MPa", float("nan")))
+        fig, ax = plt.subplots(figsize=(6.5, 3.6))
+        _plot_pulses(ax, t_us, wf.get("pulse_traces"), scale)
+        ax.plot(t_us, y, lw=0.9, color="tab:blue", label="median")
+        detail = ""
+        if in_pa and y.size:
+            i_min = int(np.argmin(y))
+            ax.plot(t_us[i_min], y[i_min], "rv", ms=7,
+                    label=f"PNP {pnp_MPa:.3f} MPa")
+            if crit is not None:
+                ref_V = float(crit.pnp_at_peak.reference_voltage_V)
+                thr_MPa = crit.pnp_min_MPa_for(freq_kHz) * pnp_V / ref_V
+                ax.axhline(-thr_MPa * 1e3, color="firebrick", ls="--", lw=0.9,
+                           label=f"pass: PNP \u2265 {thr_MPa:.3f} MPa")
+                detail = (f"PNP {pnp_MPa:.3f} vs \u2265 {thr_MPa:.3f} MPa, "
+                          f"margin {(pnp_MPa / thr_MPa - 1) * 100:+.1f}%")
         arrival_us = wf.get("arrival_us")
         if arrival_us is not None and np.isfinite(arrival_us):
             ax.axvline(float(arrival_us), color="tab:red", lw=0.8,
-                       label=f"arrival {float(arrival_us):.2f} us")
-            ax.legend(loc="upper right", fontsize=8)
+                       label=f"focused arrival {float(arrival_us):.2f} us")
+        ax.legend(loc="upper right", fontsize=7)
         ax.set_xlabel("Time (us)")
         ax.set_ylabel(ylabel)
-        pnp_kPa = float(wf.get("pnp_MPa", float("nan"))) * 1000.0
-        ax.set_title(
-            f"Figure 5: Waveform at peak, "
-            f"{float(wf.get('pnp_voltage_V', report.voltage_V)):g} V "
-            f"(PNP = {pnp_kPa:.1f} kPa)"
-        )
+        _title(ax, f"Figure 5: Waveform at peak, {pnp_V:g} V",
+               _status("pnp_at_peak_MPa"), detail)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         figs["waveform_at_peak"] = fig
@@ -338,15 +425,32 @@ def build_figures(report: TestReport) -> dict:
     if fr:
         freqs = np.asarray(fr["frequencies_kHz"], dtype=float)
         pnp_kPa = np.asarray(fr["pnp_MPa"], dtype=float) * 1000.0
-        fig, ax = plt.subplots(figsize=(6, 3.2))
+        fig, ax = plt.subplots(figsize=(6, 3.4))
         ax.plot(freqs, pnp_kPa, "o-", lw=1.5)
-        ax.axvline(report.frequency_kHz, color="0.6", lw=0.7,
-                   label=f"nominal {report.frequency_kHz:.0f} kHz")
+        detail = ""
+        if pnp_kPa.size and pnp_kPa.size == freqs.size:
+            # Same selection as ``_grade_freq_response``.
+            ipk = int(np.argmax(pnp_kPa))
+            inom = int(np.argmin(np.abs(freqs - freq_kHz)))
+            peak, nom = float(pnp_kPa[ipk]), float(pnp_kPa[inom])
+            ax.plot(freqs[ipk], peak, "r*", ms=12,
+                    label=f"peak {freqs[ipk]:.0f} kHz")
+            ax.plot(freqs[inom], nom, "s", mfc="none", mec="k", ms=10,
+                    label=f"nominal {freqs[inom]:.0f} kHz")
+            if crit is not None and peak > 0:
+                max_dev = float(crit.freq_response.max_deviation_pct)
+                ax.axhline(peak * (1 - max_dev / 100.0), color="firebrick",
+                           ls="--", lw=0.9,
+                           label=f"pass: nominal \u2265 {100 - max_dev:g}% of peak")
+                dev = (peak - nom) / peak * 100.0
+                detail = (f"deviation {dev:.1f}% vs \u2264 {max_dev:g}%, "
+                          f"margin {max_dev - dev:+.1f} pts")
         ax.set_xlabel("Frequency (kHz)")
         ax.set_ylabel("PNP (kPa)")
-        ax.set_title(f"Figure 6: Frequency response @ {report.voltage_V:.0f} V")
+        _title(ax, f"Figure 6: Frequency response @ {report.voltage_V:.0f} V",
+               _status("freq_deviation_pct"), detail)
         ax.grid(True, alpha=0.3)
-        ax.legend()
+        ax.legend(fontsize=7)
         fig.tight_layout()
         figs["freq_response"] = fig
 
@@ -358,18 +462,92 @@ def build_figures(report: TestReport) -> dict:
         # Report stores slope/intercept in MPa; scale to kPa for display.
         slope_kPa_per_V = float(vr.get("slope_MPa_per_V", 0.0)) * 1000.0
         intercept_kPa = float(vr.get("intercept_MPa", 0.0)) * 1000.0
-        r2 = vr.get("r2", float("nan"))
+        r2 = float(vr.get("r2", float("nan")))
         fit = slope_kPa_per_V * volts + intercept_kPa
-        fig, ax = plt.subplots(figsize=(6, 3.2))
+        fig, (ax, ax_res) = plt.subplots(
+            2, 1, figsize=(6, 4.2), sharex=True,
+            gridspec_kw={"height_ratios": (3, 1)})
         ax.plot(volts, pnp_kPa, "o", label="measured")
-        ax.plot(volts, fit, "-", lw=1, label=f"fit (R**2={r2:.4f})")
-        ax.set_xlabel("HV rail (V)")
+        ax.plot(volts, fit, "-", lw=1, label=f"fit (R\u00b2 = {r2:.4f})")
+        detail = ""
+        if crit is not None:
+            r2_min = float(crit.voltage_linearity.r2_min)
+            detail = (f"R\u00b2 {r2:.4f} vs \u2265 {r2_min:g}, "
+                      f"margin {r2 - r2_min:+.4f}")
         ax.set_ylabel("PNP (kPa)")
-        ax.set_title(f"Figure 7: Voltage linearity @ {report.frequency_kHz:.0f} kHz")
+        _title(ax, f"Figure 7: Voltage linearity @ {report.frequency_kHz:.0f} kHz",
+               _status("voltage_r2"), detail)
         ax.grid(True, alpha=0.3)
-        ax.legend()
+        ax.legend(fontsize=7)
+        ax_res.axhline(0.0, color="0.6", lw=0.7)
+        ax_res.plot(volts, pnp_kPa - fit, "o-", ms=4, lw=0.8)
+        ax_res.set_xlabel("HV rail (V)")
+        ax_res.set_ylabel("residual (kPa)")
+        ax_res.grid(True, alpha=0.3)
         fig.tight_layout()
         figs["voltage_linearity"] = fig
+
+    # Figures 8 / 9: plane-wave and focused depth calibrations.
+    def _depth_cal_fig(dc: dict, title: str, row_key: str, tol_mm):
+        t_us = np.asarray(dc["t_us"], dtype=float)
+        fig, ax = plt.subplots(figsize=(6.5, 3.8))
+        skip_us = dc.get("skip_us")
+        if skip_us is not None:
+            ax.axvspan(t_us[0], skip_us, color="0.85", alpha=0.6,
+                       label="skipped (TX pickup)")
+            bw = dc.get("baseline_window_us")
+            if bw:
+                ax.axvspan(skip_us, skip_us + bw, color="gold", alpha=0.2,
+                           label="baseline window")
+        detail = ""
+        if crit is not None and tol_mm is not None:
+            # Depth window mapped to arrival time:
+            # arrival = depth / SoS + max_delay.
+            nominal = float(crit.peak_depth.nominal_for(freq_kHz))
+            sos = float(dc["sos_m_per_s"])
+            max_delay = float(dc.get("max_delay_us", 0.0))
+            ax.axvspan((nominal - tol_mm) * 1e3 / sos + max_delay,
+                       (nominal + tol_mm) * 1e3 / sos + max_delay,
+                       color="tab:green", alpha=0.15,
+                       label=f"pass {nominal:g} \u00b1 {tol_mm:.2f} mm")
+            depth = float(dc["distance_mm"])
+            detail = (f"depth {depth:.2f} mm vs {nominal:g} \u00b1 {tol_mm:.2f} mm, "
+                      f"margin {tol_mm - abs(depth - nominal):+.2f} mm")
+        _plot_pulses(ax, t_us, dc.get("pulse_traces"))
+        ax.plot(t_us, np.asarray(dc["mean_trace"], dtype=float), lw=0.9,
+                color="tab:blue",
+                label=f"median ({dc.get('n_pulses_used', '?')} pulses)")
+        if dc.get("threshold") is not None:
+            ax.axhline(float(dc["threshold"]), color="tab:orange", ls=":",
+                       lw=0.9, label="pick threshold")
+        if dc.get("first_peak_us") is not None:
+            ax.plot(dc["first_peak_us"], dc.get("first_peak_value", 0.0),
+                    "ro", ms=5, label=f"first peak {dc['first_peak_us']:.2f} us")
+        ax.axvline(float(dc["arrival_us"]), color="tab:red", lw=0.9,
+                   label=f"arrival {float(dc['arrival_us']):.2f} us")
+        ax.legend(loc="upper right", fontsize=6.5, ncol=2)
+        ax.set_xlabel("Time from emission (us)")
+        ax.set_ylabel("Hydrophone (mV)")
+        _title(ax, f"{title} @ {report.frequency_kHz:.0f} kHz, "
+                   f"{report.voltage_V:.0f} V", _status(row_key), detail)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        return fig
+
+    depth_crit = crit.peak_depth if crit is not None else None
+    if report.depth_cal_plane_wave:
+        figs["depth_cal_plane_wave"] = _depth_cal_fig(
+            report.depth_cal_plane_wave,
+            "Figure 8: Plane-wave depth calibration", "plane_wave_depth_mm",
+            None if depth_crit is None else float(depth_crit.hydrophone_tol_mm))
+    if report.depth_cal_focused:
+        tol = None
+        if depth_crit is not None:
+            tol = (float(depth_crit.nominal_for(freq_kHz))
+                   * float(depth_crit.focused_tol_pct) / 100.0)
+        figs["depth_cal_focused"] = _depth_cal_fig(
+            report.depth_cal_focused,
+            "Figure 9: Focused depth calibration", "focused_depth_mm", tol)
 
     return figs
 

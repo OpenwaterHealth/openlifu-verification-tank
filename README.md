@@ -151,10 +151,23 @@ Transducer configurations are stored as JSON files in the `transducers/` directo
 ```
 
 ### Hydrophone Calibration
-Place hydrophone calibration files in `hydrophone_calibrations/` directory. Supports standard formats from:
+The repo's `setup_data/hydrophone_calibrations/` folder ships the known calibration files. Supports standard formats from:
 - Onda Corporation
 - Precision Acoustics  
 - Other manufacturers using similar text-based formats
+
+### Setup Data (GUI)
+`scripts/run_report_gui.py` only accepts testers, consoles and hydrophones registered in its setup data folder (default `~/.openlifu_verification/setup_data`, changeable in the launcher or with `--setup-data`). A new folder is seeded from the repo's `setup_data/` template:
+
+```
+testers/testers.json                       {"<tester ID>": {"Name": "<name>"}}
+consoles/consoles.json                     {"WL134Q#####": {"HWID": "<hardware ID>"}}
+hydrophone_calibrations/hydrophones.json   {"HYDRO####": {"Calibration": "<file in this folder>"}}
+hydrophone.json                            last hydrophone position
+last_setup.json                            last tester / console / hydrophone
+```
+
+The tester and console lists start empty; run with `--add-items` to add a missing, well-formed ID from the launcher (this flag also shows the "…" buttons for changing the setup data and reports folders). `--use-last-setup` pre-fills the tester, console and hydrophone from the previous run. The frequency is set from the TXM S/N (`WLM24Q#####` = 155 kHz, `WLM44Q#####` = 400 kHz). A run halts if the connected console's hardware ID doesn't match the one registered for the console S/N. `--no-validate` accepts any TXM S/N, tester and console (frequency picked by hand, no console HWID check); the hydrophone must still be registered.
 
 ## Safety and Best Practices
 

@@ -11,9 +11,10 @@ so scripts, notebooks, and the report generator agree on one spot::
 Scan settings are NOT read from here: the standard configuration is
 built into :class:`~openlifu_verification.ScanConfig`.
 
-The repo ships a fallback ``config/hydrophone_calibrations/`` folder
-so hydrophones ship with the source tree; the CWD copy always wins
-if present.
+The repo ships a ``setup_data/`` template (hydrophone calibrations and
+empty tester / console registries, see :mod:`.setup_data`). The GUI
+copies it into its setup data folder on first use; bare hydrophone IDs
+in scripts still resolve against the bundled calibrations.
 """
 from __future__ import annotations
 
@@ -37,6 +38,12 @@ CALIBRATIONS_DIR = CONFIG_DIR / "hydrophone_calibrations"
 # ----------------------------------------------------------------------
 # Repo-shipped fallbacks (absolute).
 # ----------------------------------------------------------------------
+#: Repo-shipped setup data template (see :mod:`.setup_data`).
+BUNDLED_SETUP_DATA_DIR = REPO_ROOT / "setup_data"
+
 #: Repo-bundled calibration files. Used as the last-resort search
 #: directory so the shipped hydrophones "just work" from any CWD.
-REPO_CALIBRATIONS_DIR = REPO_ROOT / "config" / "hydrophone_calibrations"
+REPO_CALIBRATIONS_DIR = BUNDLED_SETUP_DATA_DIR / "hydrophone_calibrations"
+
+#: Default setup data folder for the GUI (changeable in the launcher).
+DEFAULT_SETUP_DATA_DIR = Path.home() / ".openlifu_verification" / "setup_data"

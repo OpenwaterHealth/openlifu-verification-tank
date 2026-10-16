@@ -1,6 +1,6 @@
 """Tests for :class:`openlifu_verification.Hydrophone`.
 
-Uses the calibration file shipped in ``config/hydrophone_calibrations/``
+Uses the calibration file shipped in ``setup_data/hydrophone_calibrations/``
 so tests don't need network / hardware access.
 """
 from __future__ import annotations

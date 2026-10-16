@@ -172,8 +172,13 @@ def main():
     trace = np.asarray(result["mean_trace"])
 
     fig, ax = plt.subplots(figsize=(10, 5))
+    pulses = result.get("pulse_traces")
+    if pulses is not None:
+        for i, p in enumerate(np.asarray(pulses)):
+            ax.plot(t_us, p, lw=0.5, color="0.6", alpha=0.35,
+                    label="individual pulses" if i == 0 else None)
     ax.plot(t_us, trace, lw=0.9, color="tab:blue",
-            label=f"mean RF ({result['n_pulses_used']} pulses)")
+            label=f"median RF ({result['n_pulses_used']} pulses)")
     ax.axhline(result["threshold"], color="tab:orange", lw=0.8, ls=":",
                alpha=0.8,
                label=f"prominence threshold ({result['threshold']:.3g} mV)")
@@ -193,7 +198,7 @@ def main():
                    label=(f"corrected origin = max_delay "
                           f"({result['max_delay_us']:.2f} us)"))
     ax.set_xlabel("time (us, relative to emission)")
-    ax.set_ylabel("hydrophone (mV, averaged)")
+    ax.set_ylabel("hydrophone (mV, median)")
     focus_title = ("plane wave" if result["z_focus_mm"] is None
                    else f"focus @ z = {result['z_focus_mm']:.1f} mm")
     ax.set_title(

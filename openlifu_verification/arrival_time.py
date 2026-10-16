@@ -92,7 +92,7 @@ def find_first_arrival_us(t_us: np.ndarray,
         min_prominence_frac: Local maxima whose value is below
             ``min_prominence_frac`` * global-positive-peak are rejected
             as noise. Default 0.05 (5% of the burst peak) -- well
-            above typical noise floors for a 32-pulse coherent average,
+            above typical noise floors for a 32-pulse median,
             and comfortably below the leading crest of a boxcar-onset
             tone-burst.
 

@@ -1,12 +1,16 @@
 """Qt launcher for the TXM characterization report.
 
-Presents a small dialog that collects the operator's tester name,
-the three serial numbers (TX, console, hydrophone), and a frequency
-choice. Clicking Start runs the same pipeline as :mod:`run_report`
-on a background thread while a Running dialog shows a live progress
-bar, the current phase label, and a mini terminal that mirrors the
-INFO log stream. The Running dialog's Abort button stops the run
-after the step in progress and returns to the launcher.
+Presents a small dialog that collects the TXM S/N and frequency, the
+tester, console and hydrophone IDs (typed or scanned with a barcode
+reader; Enter validates a field and moves to the next), and the
+reports folder. Tester, console and hydrophone IDs must be registered
+in the setup data folder (see :mod:`openlifu_verification.setup_data`),
+which also holds the hydrophone calibrations. Clicking Start runs the
+same pipeline as :mod:`run_report` on a background thread while a
+Running dialog shows a live progress bar, the current phase label,
+and a mini terminal that mirrors the INFO log stream. The Running
+dialog's Abort button stops the run after the step in progress and
+returns to the launcher.
 
 When the run completes, the result dialog offers "Write Data to
 Device" (PASS only), "Scan Another" (back to the launcher), and
@@ -21,7 +25,7 @@ Example::
 
     python scripts/run_report_gui.py               # real hardware
     python scripts/run_report_gui.py --dry-run     # smoke test
-    python scripts/run_report_gui.py --hydrophone 2246 --frequency-khz 400
+    python scripts/run_report_gui.py --use-last-setup --add-items
     python scripts/run_report_gui.py --theme Dark  # dark mode
 """
 from __future__ import annotations
@@ -44,7 +48,9 @@ from typing import Optional
 # invocation on a machine without PyQt6 still works.
 import run_report
 
-from PyQt6.QtCore import Qt, QObject, QSettings, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import (
+    Qt, QEvent, QObject, QSettings, QThread, QTimer, QUrl, pyqtSignal,
+)
 from PyQt6.QtGui import QDesktopServices, QFont, QFontMetrics, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
@@ -68,14 +74,25 @@ from PyQt6.QtWidgets import (
 
 from openlifu_verification import (
     HardwareNotConnectedError,
-    Hydrophone,
     OperatorPrefs,
     ScanConfig,
     VerificationTank,
+    paths,
 )
 from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
 from openlifu_verification.characterization import ReportRow
+from openlifu_verification.device_info import read_console_hwid
 from openlifu_verification.report_io import NONSTANDARD_BANNER
+from openlifu_verification.setup_data import (
+    CONSOLES,
+    HYDROPHONES,
+    TESTERS,
+    TXM_SN,
+    IdFormat,
+    Registry,
+    SetupData,
+    txm_frequency_kHz,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -110,6 +127,8 @@ class Palette:
     success: str          # PASS glyph, verdict PASS
     danger: str           # FAIL glyph, verdict FAIL
     warning: str          # (reserved) yellow highlights
+    success_bg: str       # valid input fill
+    danger_bg: str        # invalid input fill
 
 
 _LIGHT = Palette(
@@ -126,6 +145,8 @@ _LIGHT = Palette(
     success="#1a7a1a",
     danger="#b32020",
     warning="#c68a00",
+    success_bg="#e3f4e3",
+    danger_bg="#fbe5e5",
 )
 
 _DARK = Palette(
@@ -142,6 +163,8 @@ _DARK = Palette(
     success="#4caf50",
     danger="#ff6b6b",
     warning="#e0b341",
+    success_bg="#1f3a22",
+    danger_bg="#3d2326",
 )
 
 _PALETTES: dict[str, Palette] = {p.name: p for p in (_LIGHT, _DARK)}
@@ -221,6 +244,20 @@ def _build_qss(p: Palette) -> str:
     }}
     QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {{
         border: 1px solid {p.accent};
+    }}
+    QLineEdit[valid="yes"] {{
+        border: 1px solid {p.success};
+        background-color: {p.success_bg};
+    }}
+    QLineEdit[valid="no"] {{
+        border: 1px solid {p.danger};
+        background-color: {p.danger_bg};
+    }}
+    QLabel#fieldDetail {{
+        color: {p.subtle_text};
+    }}
+    QLabel#fieldDetail[valid="no"] {{
+        color: {p.danger};
     }}
     QLineEdit:disabled, QComboBox:disabled {{
         color: {p.muted};
@@ -417,11 +454,12 @@ def build_gui_parser() -> argparse.ArgumentParser:
     """CLI parser for :mod:`run_report_gui`.
 
     Reuses every option from :mod:`run_report` so behavioral flags
-    like ``--dry-run``, ``--frequency-khz``, ``--skip-voltage``,
-    ``--hydrophone`` etc. keep working. The prefs prompt is always
-    suppressed (the dialog collects the values instead) so we force
-    ``--no-prompt`` and ``--no-start-prompt`` at run time regardless
-    of what the caller passed.
+    like ``--dry-run``, ``--skip-voltage`` etc. keep working. The
+    prefs prompt is always suppressed (the dialog collects the values
+    instead) so we force ``--no-prompt`` and ``--no-start-prompt`` at
+    run time regardless of what the caller passed. The hydrophone
+    calibration and expected console HWID come from the setup data
+    entries picked in the launcher.
     """
     parent = run_report.build_parser()
     parser = argparse.ArgumentParser(
@@ -438,6 +476,33 @@ def build_gui_parser() -> argparse.ArgumentParser:
             + ", ".join(THEME_NAMES)
             + " (default: Light)."
         ),
+    )
+    parser.add_argument(
+        "--setup-data", type=Path, default=None,
+        help=("Setup data folder (tester / console / hydrophone registries "
+              "and calibrations). Default: the last folder picked in the "
+              f"launcher, else {paths.DEFAULT_SETUP_DATA_DIR}."),
+    )
+    parser.add_argument(
+        "--use-last-setup", action="store_true",
+        help="Pre-fill tester, console and hydrophone from the last run.",
+    )
+    parser.add_argument(
+        "--add-items", action="store_true",
+        help=("Offer to add a well-formed tester / console / hydrophone ID "
+              "that is missing from the setup data, and allow changing the "
+              "setup data and reports folders."),
+    )
+    parser.add_argument(
+        "--no-validate", action="store_true",
+        help=("Accept any TXM S/N, tester and console and pick the "
+              "frequency by hand; the console hardware ID is not checked. "
+              "The hydrophone must still be in the setup data."),
+    )
+    parser.add_argument(
+        "--calibration-path", type=Path, default=None,
+        help=("Hydrophone position file. Default: hydrophone.json in the "
+              "setup data folder."),
     )
     return parser
 
@@ -611,10 +676,11 @@ class _WorkerThread(QThread):
     lets the run finish and disconnect.
     """
 
-    def __init__(self, args: argparse.Namespace,
+    def __init__(self, args: argparse.Namespace, prefs: OperatorPrefs,
                  signals: _RunSignals, parent: Optional[QObject] = None):
         super().__init__(parent)
         self._args = args
+        self._prefs = prefs
         self._signals = signals
         self._abort_event = threading.Event()
         self._commands: queue.Queue[str] = queue.Queue()
@@ -652,6 +718,7 @@ class _WorkerThread(QThread):
                 self._args,
                 abort_event=self._abort_event,
                 on_complete=self._on_complete,
+                prefs=self._prefs,
             )
             if result.aborted:
                 self._signals.aborted.emit()
@@ -676,21 +743,132 @@ class _WorkerThread(QThread):
 # values the CLI's --frequency-khz flag accepts.
 _ALLOWED_FREQUENCIES_KHZ: tuple[float, ...] = SUPPORTED_FREQUENCIES_KHZ
 
+_DETAIL_WIDTH = 230  # px, status text to the right of each ID field
+
+
+@dataclass(eq=False)
+class _IdField:
+    """A scanned / typed ID field and its latest validation result."""
+    edit: QLineEdit
+    detail: QLabel
+    id_format: IdFormat
+    registry: Optional[Registry] = None  # None: format check only
+    valid: bool = False
+    missing: bool = False                # well-formed but not registered
+    meta: Optional[dict] = None          # registry entry when valid
+
+
+def _form_layout(group: QGroupBox) -> QFormLayout:
+    form = QFormLayout(group)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+    form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    form.setHorizontalSpacing(12)
+    form.setVerticalSpacing(8)
+    return form
+
+
+class _AddItemDialog(QDialog):
+    """Asks for the metadata of an ID missing from the setup data
+    (``--add-items``): a tester name, a console hardware ID (typed or
+    read from the connected console) or a hydrophone calibration file
+    (copied into the setup data)."""
+
+    def __init__(self, registry: Registry, key: str,
+                 parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Add {registry.kind}")
+        self.value_edit = QLineEdit()
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self.value_edit, 1)
+        if registry is HYDROPHONES:
+            action = ("Select its calibration file; it will be copied into "
+                      "the setup data folder.")
+            self.value_edit.setPlaceholderText("Calibration file (.txt)")
+            button = QPushButton("Browse\u2026")
+            button.clicked.connect(self._browse_calibration)
+        elif registry is CONSOLES:
+            action = ("Enter its hardware ID, or connect the console and "
+                      "read it.")
+            self.value_edit.setPlaceholderText("Hardware ID")
+            button = QPushButton("Read from console")
+            button.clicked.connect(self._read_console_hwid)
+        else:
+            action = "Enter the tester's name to add it."
+            self.value_edit.setPlaceholderText("Name")
+            button = None
+        if button is not None:
+            button.setAutoDefault(False)
+            row.addWidget(button)
+
+        prompt = QLabel(
+            f"{html.escape(registry.kind.capitalize())} "
+            f"<b>{html.escape(key)}</b> is not in the setup data. {action}"
+        )
+        prompt.setTextFormat(Qt.TextFormat.RichText)
+        prompt.setWordWrap(True)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok.setEnabled(False)
+        self.value_edit.textChanged.connect(
+            lambda text: ok.setEnabled(bool(text.strip())))
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(prompt)
+        layout.addLayout(row)
+        layout.addWidget(buttons)
+        self.setMinimumWidth(460)
+
+    @property
+    def value(self) -> str:
+        return self.value_edit.text().strip()
+
+    def _browse_calibration(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Calibration File", "",
+            "Calibration files (*.txt);;All files (*)",
+        )
+        if path:
+            self.value_edit.setText(path)
+
+    def _read_console_hwid(self) -> None:
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            hwid = read_console_hwid()
+        except Exception as e:  # noqa: BLE001 - shown to the operator
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Read from console",
+                                f"Could not read the console hardware ID:\n{e}")
+            return
+        QApplication.restoreOverrideCursor()
+        self.value_edit.setText(hwid)
+
 
 class LauncherDialog(QDialog):
     """Modal form that collects operator inputs and kicks off a run.
 
-    The Start button is only enabled when every required text field
-    is non-empty. On accept, the dialog persists an ``OperatorPrefs``
-    snapshot (so ``run_report.run`` picks up the values through its
-    normal load path) and the caller reads
-    :attr:`selected_frequency_kHz` to fold into the arg namespace
-    before starting the worker.
+    Fields are filled in order (TXM S/N, frequency, tester, console,
+    hydrophone), typically with a barcode reader: Enter validates the
+    field and moves focus to the next unfilled one, ending on Start.
+    Each ID must match its format and, except the TXM S/N, be
+    registered in the setup data; valid fields turn green and show the
+    registered name / HWID / calibration file. The frequency is set
+    from the TXM S/N's model code. With ``--add-items``, Enter on a
+    well-formed unregistered ID offers to add it, and the folder "…"
+    buttons are shown. With ``--no-validate``, any non-empty TXM S/N,
+    tester and console are accepted and the frequency is picked by
+    hand; the hydrophone must still be registered. Start is enabled
+    only when every field is accepted and a frequency is set.
     """
 
     def __init__(self, args: argparse.Namespace,
-                 prefs: OperatorPrefs,
                  parent: Optional[QWidget] = None, *,
+                 app_version: str,
+                 setup_root: Path,
                  nonstandard_reasons: tuple[str, ...] | list[str] = ()):
         super().__init__(parent)
         title = "OpenLIFU Calibration Tool"
@@ -698,10 +876,15 @@ class LauncherDialog(QDialog):
             title += "  [DRY RUN]"
         if nonstandard_reasons:
             title += "  [NON-STANDARD]"
+        self._no_validate = bool(getattr(args, "no_validate", False))
+        if self._no_validate:
+            title += "  [NO VALIDATION]"
         self.setWindowTitle(title)
         self.setModal(True)
         self._args = args
-        self._prefs = prefs
+        self._app_version = app_version
+        self._add_items = bool(getattr(args, "add_items", False))
+        self._setup = SetupData(setup_root)
 
         # --- Header banner ---
         header = QLabel("OpenLIFU Calibration")
@@ -710,7 +893,7 @@ class LauncherDialog(QDialog):
         hfont.setBold(True)
         header.setFont(hfont)
         subtitle = QLabel(
-            "Configure the run below, then press "
+            "Scan or type each field and press <b>Enter</b>, then press "
             "<b>Start</b> to begin characterization."
         )
         subtitle.setTextFormat(Qt.TextFormat.RichText)
@@ -727,67 +910,71 @@ class LauncherDialog(QDialog):
             nonstandard_label.setWordWrap(True)
             nonstandard_label.setToolTip("\n".join(nonstandard_reasons))
 
-        # --- Operator group ---
-        self.tester_edit = QLineEdit(prefs.tester_name)
-        self.tester_edit.setPlaceholderText("e.g. Jane Doe")
-        self.txm_edit = QLineEdit(prefs.txm_sn)
-        self.txm_edit.setPlaceholderText("TXM serial number")
-        self.console_edit = QLineEdit(prefs.console_sn)
-        self.console_edit.setPlaceholderText("Console serial number")
-        self.hydrophone_edit = QLineEdit(prefs.hydrophone_sn)
-        self.hydrophone_edit.setPlaceholderText("Hydrophone serial number")
-
-        op_group = QGroupBox("Operator && device")
-        op_form = QFormLayout(op_group)
-        op_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        op_form.setFormAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-        )
-        op_form.setHorizontalSpacing(12)
-        op_form.setVerticalSpacing(8)
-        op_form.addRow("Tester:", self.tester_edit)
-        op_form.addRow("Assigned TXM S/N:", self.txm_edit)
-        op_form.addRow("Test Console S/N:", self.console_edit)
-        op_form.addRow("Hydrophone S/N:", self.hydrophone_edit)
-
-        # --- Run configuration group ---
-        # Frequency dropdown seeded from the CLI's --frequency-khz.
+        # --- Device under Calibration ---
+        self.txm_edit = QLineEdit()
+        self.txm_edit.setPlaceholderText(TXM_SN.hint)
         # Only nominal drive frequencies (155 / 400 kHz) are offered
         # because the acceptance thresholds are only defined there.
         self.freq_combo = QComboBox()
+        self.freq_combo.addItem("Select Frequency", userData=None)
         for f in _ALLOWED_FREQUENCIES_KHZ:
             self.freq_combo.addItem(f"{f:g} kHz", userData=float(f))
-        idx = self.freq_combo.findData(float(args.frequency_khz))
-        if idx >= 0:
-            self.freq_combo.setCurrentIndex(idx)
 
-        run_group = QGroupBox("Run configuration")
-        run_form = QFormLayout(run_group)
-        run_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        run_form.setHorizontalSpacing(12)
-        run_form.setVerticalSpacing(8)
-        run_form.addRow("Frequency:", self.freq_combo)
+        dut_group = QGroupBox("Device under Calibration")
+        dut_form = _form_layout(dut_group)
+        self._txm = self._add_id_row(dut_form, "TXM S/N:", self.txm_edit,
+                                     TXM_SN)
+        freq_row = QHBoxLayout()
+        freq_row.setSpacing(8)
+        freq_row.addWidget(self.freq_combo, 1)
+        freq_row.addSpacing(_DETAIL_WIDTH)
+        dut_form.addRow("Frequency:", freq_row)
 
-        # Reports folder: clickable path (opens Explorer) + a "…"
-        # button to change it. Runs are written to
-        # <folder>/<TXM S/N>/<date_time>/.
+        # --- Test Information ---
+        self.tester_edit = QLineEdit()
+        self.tester_edit.setPlaceholderText("Tester ID")
+        self.console_edit = QLineEdit()
+        self.console_edit.setPlaceholderText(CONSOLES.id_format.hint)
+        self.hydrophone_edit = QLineEdit()
+        self.hydrophone_edit.setPlaceholderText(HYDROPHONES.id_format.hint)
+
+        info_group = QGroupBox("Test Information")
+        info_form = _form_layout(info_group)
+        self._tester = self._add_id_row(
+            info_form, "Tester:", self.tester_edit, TESTERS.id_format, TESTERS)
+        self._console = self._add_id_row(
+            info_form, "Console S/N:", self.console_edit,
+            CONSOLES.id_format, CONSOLES)
+        self._hydrophone = self._add_id_row(
+            info_form, "Hydrophone:", self.hydrophone_edit,
+            HYDROPHONES.id_format, HYDROPHONES)
+        self.setup_link = QLabel()
+        info_form.addRow("Setup data:", self._link_row(
+            self.setup_link, "Change Setup Data Directory",
+            lambda: self._open_folder(self._setup.root),
+            self._browse_setup_root,
+        ))
+        self._set_link(self.setup_link, self._setup.root)
+
+        # --- Output ---
+        # Runs are written to <folder>/<TXM S/N>/<date_time>/.
         self.reports_link = QLabel()
-        self.reports_link.setTextFormat(Qt.TextFormat.RichText)
-        self.reports_link.setTextInteractionFlags(
-            Qt.TextInteractionFlag.LinksAccessibleByMouse
-        )
-        self.reports_link.linkActivated.connect(self._open_reports_root)
-        change_button = QPushButton("\u2026")
-        change_button.setToolTip("Change Reports Directory")
-        change_button.setAutoDefault(False)
-        change_button.setStyleSheet("min-width: 0px; padding: 2px 10px;")
-        change_button.clicked.connect(self._browse_reports_root)
-        reports_row = QHBoxLayout()
-        reports_row.setSpacing(8)
-        reports_row.addWidget(self.reports_link, 1)
-        reports_row.addWidget(change_button)
-        run_form.addRow("Reports saved to:", reports_row)
+        out_group = QGroupBox("Output")
+        out_form = _form_layout(out_group)
+        out_form.addRow("Reports saved to:", self._link_row(
+            self.reports_link, "Change Reports Directory",
+            lambda: self._open_folder(self._reports_root),
+            self._browse_reports_root,
+        ))
         self._set_reports_root(Path(args.reports_root))
+
+        # Line the three groups' fields up on one column.
+        labels = [form.itemAt(r, QFormLayout.ItemRole.LabelRole).widget()
+                  for form in (dut_form, info_form, out_form)
+                  for r in range(form.rowCount())]
+        label_width = max(label.sizeHint().width() for label in labels)
+        for label in labels:
+            label.setMinimumWidth(label_width)
 
         # --- Buttons ---
         self.start_button = QPushButton("Start")
@@ -814,44 +1001,245 @@ class LauncherDialog(QDialog):
         if nonstandard_label is not None:
             outer.addWidget(nonstandard_label)
         outer.addWidget(sep)
-        outer.addWidget(op_group)
-        outer.addWidget(run_group)
+        outer.addWidget(dut_group)
+        outer.addWidget(info_group)
+        outer.addWidget(out_group)
         outer.addStretch(1)
         outer.addWidget(button_box)
 
-        # Wire up validation last so the initial state is applied.
-        for edit in (self.tester_edit, self.txm_edit,
-                     self.console_edit, self.hydrophone_edit):
-            edit.textChanged.connect(self._refresh_start_enabled)
-        self._refresh_start_enabled()
+        # Enter validates and advances (barcode readers end each scan
+        # with Enter); the filter keeps it from clicking Start.
+        self._fields = {f.edit: f for f in (
+            self._txm, self._tester, self._console, self._hydrophone)}
+        self._chain: list[QWidget] = [
+            self.txm_edit, self.freq_combo, self.tester_edit,
+            self.console_edit, self.hydrophone_edit,
+        ]
+        for widget in self._chain:
+            widget.installEventFilter(self)
+        self.freq_combo.currentIndexChanged.connect(self._refresh_start_enabled)
+        self.freq_combo.activated.connect(self._on_frequency_picked)
+        if not self._no_validate:
+            # The frequency follows the TXM S/N's model code.
+            self.freq_combo.setEnabled(False)
+            self.txm_edit.textChanged.connect(
+                lambda _text: self.freq_combo.setCurrentIndex(0))
 
-        self.setMinimumWidth(460)
+        if getattr(args, "use_last_setup", False):
+            last = self._setup.load_last_setup()
+            for f in (self._tester, self._console, self._hydrophone):
+                f.edit.setText(last.get(f.registry.kind, ""))
+                if f.edit.text():
+                    self._validate(f)
+        self._refresh_start_enabled()
+        self.txm_edit.setFocus()
+
+        self.setMinimumWidth(680)
+
+    def _add_id_row(self, form: QFormLayout, label: str, edit: QLineEdit,
+                    id_format: IdFormat,
+                    registry: Optional[Registry] = None) -> _IdField:
+        detail = QLabel()
+        detail.setObjectName("fieldDetail")
+        detail.setFixedWidth(_DETAIL_WIDTH)
+        f = _IdField(edit, detail, id_format, registry)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(edit, 1)
+        row.addWidget(detail)
+        form.addRow(label, row)
+        edit.textChanged.connect(lambda _text: self._show(f, None))
+        edit.editingFinished.connect(lambda: self._validate(f))
+        return f
+
+    def _link_row(self, label: QLabel, tooltip: str, on_open,
+                  on_browse) -> QHBoxLayout:
+        """Clickable folder path (opens Explorer) plus a "…" button to
+        change it (shown only with ``--add-items``)."""
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        label.linkActivated.connect(lambda _href: on_open())
+        button = QPushButton("\u2026")
+        button.setToolTip(tooltip)
+        button.setAutoDefault(False)
+        button.setStyleSheet("min-width: 0px; padding: 2px 10px;")
+        button.clicked.connect(on_browse)
+        button.setVisible(self._add_items)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(label, 1)
+        row.addWidget(button)
+        return row
 
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
+    def _show(self, f: _IdField, valid: Optional[bool], text: str = "", *,
+              meta: Optional[dict] = None, missing: bool = False) -> None:
+        """Record ``f``'s validation state (``None``: not checked yet)
+        and color the field and its status text."""
+        f.valid, f.meta, f.missing = bool(valid), meta, missing
+        state = "" if valid is None else ("yes" if valid else "no")
+        for widget in (f.edit, f.detail):
+            widget.setProperty("valid", state)
+            _refresh_polish(widget)
+        f.detail.setText(QFontMetrics(f.detail.font()).elidedText(
+            text, Qt.TextElideMode.ElideRight, _DETAIL_WIDTH))
+        f.detail.setToolTip(text)
+        self._refresh_start_enabled()
+
+    def _validate(self, f: _IdField) -> bool:
+        """Check ``f``'s format and setup data entry; return validity.
+
+        With ``--no-validate`` only the hydrophone is checked; other
+        fields just need a value."""
+        value = f.edit.text().strip()
+        if not value:
+            self._show(f, None)
+            return False
+        if f is self._txm:
+            freq = txm_frequency_kHz(value)
+            if freq is not None:
+                self.freq_combo.setCurrentIndex(self.freq_combo.findData(freq))
+        reg = f.registry
+        if self._no_validate and reg is not HYDROPHONES:
+            meta = None
+            if reg is not None:
+                try:
+                    meta = self._setup.lookup(reg, value)[1]
+                except (OSError, ValueError):
+                    pass
+            detail = str(meta.get(reg.field) or "") if meta else ""
+            self._show(f, True, detail or "Not validated", meta=meta)
+            return True
+        if not f.id_format.matches(value):
+            self._show(f, False, f"Expected {f.id_format.hint}")
+            return False
+        if reg is None:
+            self._show(f, True)
+            return True
+        try:
+            found, meta = self._setup.lookup(reg, value)
+        except (OSError, ValueError) as e:
+            logger.warning("Could not read %s: %s",
+                           self._setup.registry_path(reg), e)
+            self._show(f, False, f"Could not read {reg.filename}")
+            return False
+        if not found:
+            hint = " (Enter to add)" if self._add_items else ""
+            self._show(f, False, f"Not in setup data{hint}", missing=True)
+            return False
+        detail = str(meta.get(reg.field) or "")
+        if not detail:
+            self._show(f, False, f"No {reg.field} recorded")
+            return False
+        if (reg is HYDROPHONES
+                and not (self._setup.calibrations_dir / detail).is_file()):
+            self._show(f, False, f"Calibration file missing: {detail}")
+            return False
+        self._show(f, True, detail, meta=meta)
+        return True
+
     def _refresh_start_enabled(self) -> None:
-        """Enable Start only when every text field is non-blank."""
-        ok = all(edit.text().strip() for edit in (
-            self.tester_edit, self.txm_edit,
-            self.console_edit, self.hydrophone_edit,
-        ))
+        """Enable Start only when every field is valid."""
+        ok = (self.freq_combo.currentData() is not None
+              and all(f.valid for f in self._fields.values()))
         self.start_button.setEnabled(ok)
 
+    def eventFilter(self, obj, event) -> bool:
+        if (event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and obj in self._chain):
+            self._on_enter(obj)
+            return True
+        return super().eventFilter(obj, event)
+
+    def _on_enter(self, widget: QWidget) -> None:
+        """Validate ``widget`` (offering to add a missing ID with
+        ``--add-items``) and, if valid, focus the next unfilled field
+        or Start."""
+        if widget is self.freq_combo:
+            ok = self.freq_combo.currentData() is not None
+            if not ok:
+                self.freq_combo.showPopup()
+        else:
+            f = self._fields[widget]
+            ok = self._validate(f)
+            if not ok and f.missing and self._add_items:
+                ok = self._add_item(f)
+            if not ok:
+                f.edit.selectAll()
+        if not ok:
+            return
+        i = self._chain.index(widget)
+        for nxt in self._chain[i + 1:] + self._chain[:i]:
+            done = (self.freq_combo.currentData() is not None
+                    if nxt is self.freq_combo else self._fields[nxt].valid)
+            if not done and nxt.isEnabled():
+                nxt.setFocus()
+                return
+        self.start_button.setFocus()
+
+    def _on_frequency_picked(self, _index: int) -> None:
+        if self.freq_combo.currentData() is not None:
+            self._on_enter(self.freq_combo)
+
+    def _add_item(self, f: _IdField) -> bool:
+        """Prompt for ``f``'s metadata and add it to the setup data."""
+        key = f.edit.text().strip()
+        dialog = _AddItemDialog(f.registry, key, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+        try:
+            if f.registry is HYDROPHONES:
+                self._setup.add_hydrophone(key, Path(dialog.value))
+            else:
+                self._setup.add(f.registry, key, dialog.value)
+        except Exception as e:  # noqa: BLE001 - shown to the operator
+            QMessageBox.warning(self, f"Add {f.registry.kind}",
+                                f"Could not add {key}:\n{e}")
+            return False
+        return self._validate(f)
+
+    def accept(self) -> None:
+        try:
+            self._setup.save_last_setup({
+                f.registry.kind: f.edit.text().strip()
+                for f in (self._tester, self._console, self._hydrophone)
+            })
+        except OSError as e:
+            logger.warning("Could not save the last setup: %s", e)
+        super().accept()
+
     # ------------------------------------------------------------------
-    # Reports folder
+    # Folders
     # ------------------------------------------------------------------
-    def _set_reports_root(self, root: Path) -> None:
-        """Show ``root`` as a link, middle-elided to fit the form."""
-        self._reports_root = root
-        shown = QFontMetrics(self.reports_link.font()).elidedText(
-            str(root), Qt.TextElideMode.ElideMiddle, 300
+    @staticmethod
+    def _set_link(label: QLabel, path: Path) -> None:
+        """Show ``path`` as a link, middle-elided to fit the form."""
+        shown = QFontMetrics(label.font()).elidedText(
+            str(path), Qt.TextElideMode.ElideMiddle, 300
         )
-        self.reports_link.setText(
+        label.setText(
             f'<a href="open" style="color:{current_palette().accent};'
             f' text-decoration:none;">{html.escape(shown)}</a>'
         )
-        self.reports_link.setToolTip(f"{root}\nClick to open in Explorer")
+        label.setToolTip(f"{path}\nClick to open in Explorer")
+
+    def _open_folder(self, path: Path) -> None:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, "Open folder",
+                                f"Could not create {path}:\n{e}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _set_reports_root(self, root: Path) -> None:
+        self._reports_root = root
+        self._set_link(self.reports_link, root)
 
     def _browse_reports_root(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -860,15 +1248,33 @@ class LauncherDialog(QDialog):
         if path:
             self._set_reports_root(Path(path))
 
-    def _open_reports_root(self) -> None:
-        root = self._reports_root
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            QMessageBox.warning(self, "Reports folder",
-                                f"Could not create {root}:\n{e}")
+    def _browse_setup_root(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self, "Change Setup Data Directory", str(self._setup.root)
+        )
+        if not path:
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(root)))
+        setup = SetupData(Path(path))
+        if not setup.is_initialized():
+            answer = QMessageBox.question(
+                self, "Setup data",
+                f"{path} does not contain setup data.\n\nCopy the default "
+                "setup data (bundled hydrophone calibrations, empty tester "
+                "and console lists) into it?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                setup.initialize()
+            except OSError as e:
+                QMessageBox.warning(self, "Setup data",
+                                    f"Could not initialize {path}:\n{e}")
+                return
+        self._setup = setup
+        self._set_link(self.setup_link, setup.root)
+        for f in (self._tester, self._console, self._hydrophone):
+            if f.edit.text().strip():
+                self._validate(f)
 
     # ------------------------------------------------------------------
     # Accessors used after ``exec()`` returns Accepted.
@@ -876,27 +1282,41 @@ class LauncherDialog(QDialog):
     @property
     def collected_prefs(self) -> OperatorPrefs:
         """Return an ``OperatorPrefs`` populated from the form."""
-        p = OperatorPrefs(
-            tester_name=self.tester_edit.text().strip(),
-            test_app_version=self._prefs.test_app_version,
+        tester_id = self.tester_edit.text().strip()
+        meta = self._tester.meta
+        return OperatorPrefs(
+            tester_name=(f"{meta[TESTERS.field]} ({tester_id})" if meta
+                         else tester_id),
+            test_app_version=self._app_version,
             hydrophone_sn=self.hydrophone_edit.text().strip(),
             txm_sn=self.txm_edit.text().strip(),
             console_sn=self.console_edit.text().strip(),
         )
-        return p
+
+    @property
+    def selected_hydrophone_calibration(self) -> Path:
+        return (self._setup.calibrations_dir
+                / self._hydrophone.meta[HYDROPHONES.field])
+
+    @property
+    def selected_console_hwid(self) -> Optional[str]:
+        """Registered HWID the run checks against (``None`` with
+        ``--no-validate``)."""
+        if self._no_validate:
+            return None
+        return self._console.meta[CONSOLES.field]
 
     @property
     def selected_frequency_kHz(self) -> float:
-        """Return the drive frequency selected in the combo box."""
-        data = self.freq_combo.currentData()
-        return float(data) if data is not None else float(
-            self._args.frequency_khz
-        )
+        return float(self.freq_combo.currentData())
 
     @property
     def selected_reports_root(self) -> Path:
-        """Return the reports folder shown in the form."""
         return self._reports_root
+
+    @property
+    def selected_setup_root(self) -> Path:
+        return self._setup.root
 
 
 # ----------------------------------------------------------------------
@@ -1644,20 +2064,6 @@ class ResultDialog(QDialog):
 # ----------------------------------------------------------------------
 # Application entry point
 # ----------------------------------------------------------------------
-def _prefill_hydrophone_sn(prefs: OperatorPrefs, hydrophone_arg: str) -> None:
-    """Populate ``prefs.hydrophone_sn`` from the calibration file
-    metadata (best-effort). Mirrors :func:`run_report.run`."""
-    if not hydrophone_arg:
-        return
-    try:
-        prefs.hydrophone_sn = str(
-            Hydrophone(hydrophone_arg).metadata.get("HYD_SN", "")
-        ) or prefs.hydrophone_sn
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Could not read hydrophone S/N from %r: %s",
-                       hydrophone_arg, e)
-
-
 def _attach_qt_log_handler(bridge: _LogBridge) -> _QtLogHandler:
     """Attach a :class:`_QtLogHandler` to the root logger and return it
     so the caller can detach it after the run finishes."""
@@ -1710,14 +2116,12 @@ def main(argv=None) -> int:
         return 2
     nonstandard = run_report.nonstandard_reasons(args, scan_config)
 
-    # Prefs seeded from the on-disk cache and, optionally, the
-    # hydrophone metadata (so the S/N field is pre-filled).
-    prefs = OperatorPrefs.load(args.prefs)
+    # Prefs come from the launcher form; only the app version is
+    # filled in here.
     try:
-        prefs.test_app_version = _pkg_version("openlifu-verification")
+        app_version = _pkg_version("openlifu-verification")
     except PackageNotFoundError:
-        prefs.test_app_version = ""
-    _prefill_hydrophone_sn(prefs, args.hydrophone)
+        app_version = ""
 
     # GUI writes from the result dialog, never inside run_report.run.
     args.write_config = False
@@ -1731,28 +2135,50 @@ def main(argv=None) -> int:
         args.reports_root = Path(saved) if saved else run_report.DEFAULT_OUTPUT_DIR
     args.reports_root = Path(args.reports_root).resolve()
 
+    # Setup data folder: --setup-data, else the last folder picked in
+    # the launcher, else the per-user default. Seeded from the bundled
+    # template on first use.
+    if args.setup_data is None:
+        saved = settings.value("setup_data_dir", "", type=str)
+        args.setup_data = Path(saved) if saved else paths.DEFAULT_SETUP_DATA_DIR
+    setup_root = Path(args.setup_data).resolve()
+    setup = SetupData(setup_root)
+    if not setup.is_initialized():
+        try:
+            setup.initialize()
+        except OSError as e:
+            QMessageBox.critical(None, "Setup data",
+                                 f"Could not initialize {setup_root}:\n{e}")
+            return 2
+    calibration_path_arg = args.calibration_path
+
     exit_code = 130
     while True:
-        launcher = LauncherDialog(args, prefs, nonstandard_reasons=nonstandard)
+        launcher = LauncherDialog(args, app_version=app_version,
+                                  setup_root=setup_root,
+                                  nonstandard_reasons=nonstandard)
         if launcher.exec() != QDialog.DialogCode.Accepted:
             logger.info("Launcher closed.")
             return exit_code
 
-        # Persist the collected prefs so :func:`run_report.run` (and
-        # the next launcher) pick them up through the normal load path.
         prefs = launcher.collected_prefs
-        prefs.save(args.prefs)
         args.frequency_khz = launcher.selected_frequency_kHz
         args.reports_root = launcher.selected_reports_root
         settings.setValue("reports_root", str(args.reports_root))
+        setup_root = launcher.selected_setup_root
+        settings.setValue("setup_data_dir", str(setup_root))
+        args.hydrophone = str(launcher.selected_hydrophone_calibration)
+        args.console_hwid = launcher.selected_console_hwid
+        args.calibration_path = (calibration_path_arg
+                                 or SetupData(setup_root).hydrophone_state_path)
 
-        choice, exit_code = _run_once(args, scan_config)
+        choice, exit_code = _run_once(args, scan_config, prefs)
         if choice == "exit":
             return exit_code
 
 
-def _run_once(args: argparse.Namespace,
-              scan_config: ScanConfig) -> tuple[str, int]:
+def _run_once(args: argparse.Namespace, scan_config: ScanConfig,
+              prefs: OperatorPrefs) -> tuple[str, int]:
     """Run one characterization with the Running + Result dialogs.
 
     Returns ``(choice, exit_code)`` where ``choice`` is ``"another"``
@@ -1813,7 +2239,7 @@ def _run_once(args: argparse.Namespace,
     signals.failed.connect(_on_failed, queued)
     signals.hardware_disconnected.connect(_on_hardware_disconnected, queued)
 
-    worker = _WorkerThread(args, signals)
+    worker = _WorkerThread(args, prefs, signals)
     running.abort_requested.connect(worker.request_abort)
     worker.start()
     running.exec()

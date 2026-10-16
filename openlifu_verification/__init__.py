@@ -12,7 +12,7 @@ from .scan_config import ScanConfig
 from .characterization import Characterization, RunAborted, RunHalted, TestReport, ReportRow
 from .dry_run import DryRunTank
 from .pulse_align import align_pulse_traces
-from . import apodization, characterization, paths, pulse_align, report_io
+from . import apodization, characterization, paths, pulse_align, report_io, setup_data
 
 # The upstream openlifu_sdk logs a lot at INFO/DEBUG during device
 # setup and per-command traffic. Quiet it to WARNING by default so

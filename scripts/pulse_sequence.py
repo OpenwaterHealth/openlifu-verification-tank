@@ -270,7 +270,7 @@ def main():
             else:
                 aligned = traces.astype(float)
                 lags_ns = np.zeros(n_pulses)
-            mean_trace = aligned.mean(axis=0)
+            mean_trace = np.median(aligned, axis=0)
             std_trace = aligned.std(axis=0, ddof=0)
             agg_vpp = float(np.ptp(mean_trace))
             agg_rms = float(np.sqrt(np.mean(mean_trace**2)))
@@ -330,7 +330,7 @@ def main():
             t_us, mean_trace - std_trace, mean_trace + std_trace,
             color="k", alpha=0.15, label="±1σ across pulses",
         )
-        ax_mean.plot(t_us, mean_trace, lw=1.8, color="k", label="mean (aligned)")
+        ax_mean.plot(t_us, mean_trace, lw=1.8, color="k", label="median (aligned)")
         ax_mean.set_xlabel("time (µs)")
         ax_mean.set_ylabel(f"aligned ({scan_result.units})")
         ax_mean.grid(True, alpha=0.3)

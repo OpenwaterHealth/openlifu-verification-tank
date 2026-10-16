@@ -24,7 +24,7 @@ def main():
     # 1. Load the hydrophone calibration. Passing a bare ID lets
     # Hydrophone locate the file under ``config/hydrophone_calibrations/``
     # in the current working directory (with a fallback to the copy
-    # shipped in the repo).
+    # shipped in the repo's ``setup_data/hydrophone_calibrations/``).
     hydrophone = Hydrophone("2246")
     
     print(f"Loaded hydrophone: {hydrophone}")

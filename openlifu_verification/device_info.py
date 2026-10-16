@@ -141,6 +141,21 @@ def _read_hwid(dev, module: int, label: str) -> tuple[str, str]:
     return hex_hwid, b58
 
 
+def read_console_hwid() -> str:
+    """Briefly connect to the console and return its base58 hardware ID
+    (the form shown in the report). Raises ``RuntimeError`` if the
+    console isn't connected or the ID can't be read."""
+    from openlifu_sdk.io import LIFUInterface
+
+    with LIFUInterface() as lifu:
+        if not lifu.is_device_connected()[1]:
+            raise RuntimeError("Console is not connected.")
+        _hex, b58 = _read_hwid(lifu.hvcontroller, 0, "console")
+    if not b58:
+        raise RuntimeError("Could not read the console hardware ID.")
+    return b58
+
+
 def _read_version(dev, module: int, label: str) -> str:
     try:
         return dev.get_version(module)

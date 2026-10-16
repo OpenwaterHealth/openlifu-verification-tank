@@ -65,3 +65,20 @@ def test_off_center_peak_halts():
 def test_good_setup_does_not_halt():
     chz = _chz(DryRunTank(rng_seed=0))
     chz.run(skip_2d=True, skip_frequency=True, skip_voltage=True)
+
+
+def test_console_hwid_mismatch_halts():
+    tank = DryRunTank(rng_seed=0)
+    tank.calibrate_hydrophone_depth = _fail_if_called
+    chz = _chz(tank)
+    chz.expected_console_hwid = "NotThisConsole"
+    with pytest.raises(RunHalted, match="does not match NotThisConsole"):
+        _run(chz)
+
+
+def test_console_hwid_match_runs():
+    chz = _chz(DryRunTank(rng_seed=0))
+    expected = chz.collect_test_info().console_hwid
+    assert expected
+    chz.expected_console_hwid = expected
+    chz.run(skip_2d=True, skip_frequency=True, skip_voltage=True)

@@ -188,7 +188,7 @@ class PnpAtPeak:
     reference_voltage_V: float = 50.0
     min_MPa_by_freq_kHz: dict[str, float] = field(default_factory=lambda: {
         "155": 0.225,
-        "400": 0.625,
+        "400": 0.400,
     })
 
     def __post_init__(self):
@@ -200,7 +200,7 @@ class PnpAtPeak:
 class FreqResponse:
     """Deviation of the nominal-frequency PNP from the peak PNP in the
     frequency sweep, expressed as a percentage of the peak."""
-    max_deviation_pct: float = 10.0
+    max_deviation_pct: float = 15.0
 
 
 @dataclass

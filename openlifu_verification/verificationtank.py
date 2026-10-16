@@ -1244,9 +1244,9 @@ class VerificationTank:
                 "time_start_s": captured[0].get("time_start_s"),
                 "time_stop_s": captured[0].get("time_stop_s"),
                 "overflow": int(np.max([g.get("overflow", 0) for g in captured])),
-                hydro: aligned_hydro.mean(axis=0),
+                hydro: np.median(aligned_hydro, axis=0),
             }
-            # Average any other enabled channels with the same lags so
+            # Aggregate any other enabled channels with the same lags so
             # they stay coherent with the hydrophone (e.g. sync channel).
             lag_samples = lags_s / dt_s if dt_s > 0 else np.zeros_like(lags_s)
             for ch in self.scope.enabled_channels:
@@ -1261,7 +1261,7 @@ class VerificationTank:
                     )
                 else:
                     aligned_ch = np.stack(ch_stack, axis=0)
-                per_point[ch] = aligned_ch.mean(axis=0)
+                per_point[ch] = np.median(aligned_ch, axis=0)
             outputs[i] = per_point
             averaging.append({
                 "n_averages": n_averages,
@@ -2118,7 +2118,8 @@ class VerificationTank:
                     else:
                         aligned, lags_s = stack, np.zeros(stack.shape[0])
                     noise_std = aligned.std(axis=0, ddof=0)
-                    outputs.append({"time": bulk["time"], hydro: aligned.mean(axis=0)})
+                    outputs.append({"time": bulk["time"],
+                                    hydro: np.median(aligned, axis=0)})
                     averaging.append({
                         "n_averages": n_averages,
                         "n_captured": stack.shape[0],
@@ -2318,7 +2319,10 @@ class VerificationTank:
 
             - ``t``: 1-D time axis (us), zero at emission.
             - ``trace``: 1-D signal, in ``units``. When
-              ``n_averages > 1``, the coherently averaged trace.
+              ``n_averages > 1``, the per-sample median of the
+              aligned repeats.
+            - ``pulse_traces``: ``(n, samples)`` aligned repeats in
+              ``units`` (one row when ``n_averages == 1``).
             - ``rms``: scalar RMS over the whole window.
             - ``vpp``: scalar peak-to-peak amplitude.
             - ``units``: ``"Pa"`` if a hydrophone is attached,
@@ -2359,22 +2363,28 @@ class VerificationTank:
                 dt_s=float(sampling_interval_ns) * 1e-9,
                 max_shift_samples=align_max_shift_samples,
             )
-            trace_mv = aligned.mean(axis=0)
         else:
-            trace_mv = stack.mean(axis=0)
+            aligned = stack
+        trace_mv = np.median(aligned, axis=0)
 
         if self.hydrophone is not None and self.use_calibration:
             trace = np.asarray(
                 self.hydrophone.mv_to_pa(trace_mv, self.frequency * 1e3),
                 dtype=float,
             )
+            pulse_traces = np.asarray(
+                self.hydrophone.mv_to_pa(aligned, self.frequency * 1e3),
+                dtype=float,
+            )
             units = "Pa"
         else:
             trace = trace_mv
+            pulse_traces = aligned
             units = "mV"
         return {
             "t": t_axis,
             "trace": trace,
+            "pulse_traces": pulse_traces,
             "rms": float(np.sqrt(np.mean(trace ** 2))),
             "vpp": float(np.max(trace) - np.min(trace)),
             "units": units,
@@ -2571,9 +2581,12 @@ class VerificationTank:
               - ``z_focus_mm``: The focus depth actually used
                 (``None`` for plane wave).
               - ``sos_m_per_s``: Speed of sound used.
-              - ``mean_trace``, ``t_us``: The aggregated waveform.
+              - ``mean_trace``, ``t_us``: The aggregated waveform
+                (per-sample median across pulses).
+              - ``pulse_traces``: The aligned, baseline-subtracted
+                per-pulse traces that were aggregated.
               - ``n_pulses_used``: How many pulses were actually
-                averaged.
+                aggregated.
         """
         from .arrival_time import find_first_arrival_us
         from .pulse_align import align_pulse_traces
@@ -2633,8 +2646,9 @@ class VerificationTank:
 
         t_us = np.asarray(bulk["time"], dtype=float)
         traces_mv = np.asarray(bulk[self.hydrophone_channel], dtype=float)
-        # Coherent average across pulses (in mV; calibration is
-        # amplitude-independent so we don't need Pa).
+        # Per-sample median across pulses (in mV; calibration is
+        # amplitude-independent so we don't need Pa). The median is
+        # robust to the occasional outlier pulse.
         dt_s = float(t_us[1] - t_us[0]) * 1e-6
         if align and traces_mv.shape[0] >= 2 and dt_s > 0:
             max_shift_samples = max(
@@ -2647,7 +2661,7 @@ class VerificationTank:
             )
         else:
             aligned = traces_mv
-        mean_trace = aligned.mean(axis=0)
+        mean_trace = np.median(aligned, axis=0)
 
         # Auto-compute the dead zone when the caller didn't force one.
         # The last element to fire finishes radiating at
@@ -2710,16 +2724,19 @@ class VerificationTank:
             skip_us, skip_us + baseline_window_us,
         )
 
-
+        # The baseline window is assumed quiet, so the arrival can't be
+        # inside it; search only after it.
+        search_start_us = (float(t_us[base_mask][-1]) if base_mask.any()
+                           else skip_us)
         arr = find_first_arrival_us(
             t_us, mean_trace,
             frequency_kHz=float(self.frequency),
-            skip_us=skip_us,
+            skip_us=search_start_us,
         )
         if arr is None:
             raise RuntimeError(
                 "Could not locate a first-arrival RF peak in "
-                f"[{skip_us:.1f}, {t_us[-1]:.1f}] us. "
+                f"[{search_start_us:.1f}, {t_us[-1]:.1f}] us. "
                 "Increase --voltage or check that the hydrophone is "
                 "wetted and in front of the array.",
             )
@@ -2753,6 +2770,11 @@ class VerificationTank:
             "z_focus_mm": None if z_focus_mm is None else float(z_focus_mm),
             "sos_m_per_s": float(SPEED_OF_SOUND),
             "mean_trace": mean_trace,
+            "pulse_traces": (
+                aligned - np.median(aligned[:, base_mask], axis=1,
+                                    keepdims=True)
+                if base_mask.any() else aligned
+            ),
             "t_us": t_us,
             "n_pulses_used": int(traces_mv.shape[0]),
             "baseline_mv": baseline_mv,
