@@ -949,11 +949,12 @@ class LauncherDialog(QDialog):
             info_form, "Hydrophone:", self.hydrophone_edit,
             HYDROPHONES.id_format, HYDROPHONES)
         self.setup_link = QLabel()
-        info_form.addRow("Setup data:", self._link_row(
-            self.setup_link, "Change Setup Data Directory",
-            lambda: self._open_folder(self._setup.root),
-            self._browse_setup_root,
-        ))
+        if self._add_items:
+            info_form.addRow("Setup data:", self._link_row(
+                self.setup_link, "Change Setup Data Directory",
+                lambda: self._open_folder(self._setup.root),
+                self._browse_setup_root,
+            ))
         self._set_link(self.setup_link, self._setup.root)
 
         # --- Output ---

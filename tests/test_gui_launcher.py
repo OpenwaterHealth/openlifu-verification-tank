@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import run_report_gui as gui  # noqa: E402
 from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QDialog, QPushButton  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QPushButton  # noqa: E402
 
 from openlifu_verification.setup_data import (  # noqa: E402
     CONSOLES,
@@ -154,8 +154,11 @@ def test_folder_buttons_only_with_add_items(setup, tmp_path, flags, visible):
     dlg = _launcher(setup, tmp_path, *flags)
     buttons = [b for b in dlg.findChildren(QPushButton)
                if b.text() == "\u2026"]
-    assert len(buttons) == 2
+    # Reports row always; setup-data row only with --add-items.
+    assert len(buttons) == (2 if visible else 1)
     assert all(b.isHidden() is not visible for b in buttons)
+    labels = [lbl.text() for lbl in dlg.findChildren(QLabel)]
+    assert ("Setup data:" in labels) is visible
 
 
 def test_add_items_registers_missing_tester(setup, tmp_path, monkeypatch):
