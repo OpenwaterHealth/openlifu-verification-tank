@@ -23,6 +23,12 @@ dependencies = [
 gui = [
     "PyQt6",
 ]
+# Building the Windows executable (OpenLIFU-VerificationTank.spec) and
+# running the test suite.
+dev = [
+    "pyinstaller>=6.0",
+    "pytest",
+]
 
 [tool.setuptools]
 packages = ["openlifu_verification"]

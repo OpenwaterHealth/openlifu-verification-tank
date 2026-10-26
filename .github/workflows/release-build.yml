@@ -1,0 +1,209 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Python ───────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      # ── version ──────────────────────────────────────────────────
+      # The app reads its version from package metadata, so stamp it into
+      # pyproject.toml before installing (after setup-python, so the pip
+      # cache key is not affected). Tags: 'v' prefix stripped,
+      # '-rc.N' kept (normalised to 'rcN' by PEP 440). Untagged commits:
+      # '<last tag>+<commits>.g<sha>', or '<pyproject version>+g<sha>'
+      # when no tag exists yet.
+      - name: Stamp version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            VER="${TAG#v}"
+          elif DESC=$(git describe --tags --long 2>/dev/null); then
+            # <tag>-<n>-g<sha>
+            BASE="${DESC%-*-g*}"
+            REST="${DESC#"$BASE"-}"
+            VER="${BASE#v}+${REST%%-*}.${REST#*-}"
+          else
+            BASE=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+            VER="${BASE}+g${GITHUB_SHA::7}"
+          fi
+          echo "Stamping version: $VER"
+          sed -i "s/^version = .*/version = \"${VER}\"/" pyproject.toml
+          grep '^version' pyproject.toml
+
+      # ── dependencies (PyPI) ──────────────────────────────────────
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          # Install project + GUI + build tooling. Runtime deps come from
+          # PyPI; openlifu-sdk is then replaced with the resolved GitHub
+          # release wheel below.
+          pip install ".[gui,dev]"
+          python -c "from importlib.metadata import version; print('openlifu-verification', version('openlifu-verification'))"
+
+      # ── openlifu-sdk from GitHub releases ────────────────────────
+      # SDK pre-releases are not published to PyPI, so resolve the tag
+      # from the SDK repo's GitHub releases: rc tags take the latest
+      # pre-release (when it is at least as new as the latest stable);
+      # everything else -- and rc builds with no usable pre-release --
+      # takes the latest stable release.
+      - name: Resolve openlifu-sdk release
+        id: sdk
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REL=$(gh release list --repo OpenwaterHealth/openlifu-sdk \
+                --json tagName,isPrerelease \
+                --jq 'map(select(.isPrerelease | not)) | .[0].tagName // empty')
+          PRE=$(gh release list --repo OpenwaterHealth/openlifu-sdk \
+                --json tagName,isPrerelease \
+                --jq 'map(select(.isPrerelease)) | .[0].tagName // empty')
+          TAG="$REL"
+          KIND="release"
+          if [[ "${GITHUB_REF_NAME}" =~ -rc\.[0-9]+$ ]]; then
+            # semver compare: '-rc.' -> '~rc.' makes sort -V rank a pre-release
+            # below its own stable release but above older ones.
+            if [ -n "$PRE" ] && { [ -z "$REL" ] || \
+                 [ "$(printf '%s\n' "${PRE/-rc./~rc.}" "$REL" | sort -V | tail -n1)" = "${PRE/-rc./~rc.}" ]; }; then
+              TAG="$PRE"
+              KIND="pre-release"
+            fi
+          fi
+          if [ -z "$TAG" ]; then
+            echo "::error::No openlifu-sdk release found to install." >&2
+            exit 1
+          fi
+          echo "SDK candidates: stable='${REL:-none}' pre-release='${PRE:-none}'"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "::notice ::openlifu-sdk resolved to $KIND @ $TAG (ref ${GITHUB_REF_NAME})"
+
+      - name: Install resolved openlifu-sdk
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release download "${{ steps.sdk.outputs.tag }}" \
+            --repo OpenwaterHealth/openlifu-sdk \
+            --dir sdk-dist --pattern '*.whl'
+          # Replace the PyPI SDK with the released wheel (the wheel
+          # carries the firmware images bundled at SDK release time).
+          pip uninstall -y openlifu-sdk
+          pip install sdk-dist/*.whl
+          python -c "from importlib.metadata import version; print('openlifu-sdk', version('openlifu-sdk'))"
+
+      # ── build ────────────────────────────────────────────────────
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          python -m PyInstaller -y OpenLIFU-VerificationTank.spec
+
+      # ── package ──────────────────────────────────────────────────
+      - name: Determine version tag
+        id: meta
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG=$(git describe --tags --always 2>/dev/null || echo "dev-${GITHUB_SHA::8}")
+          fi
+          echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ARTIFACT_NAME=OpenLIFU-VerificationTank-${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ARTIFACT_ZIP=OpenLIFU-VerificationTank-${TAG}.zip" >> "$GITHUB_OUTPUT"
+
+          # pre-release flag
+          if [[ "$TAG" == *-rc.* ]]; then
+            echo "PRERELEASE=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "PRERELEASE=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "::notice ::Version tag resolved to: ${TAG}"
+
+      - name: Zip build output
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\* -DestinationPath "${{ steps.meta.outputs.ARTIFACT_ZIP }}"
+
+      # ── always upload workflow artifact ──────────────────────────
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.ARTIFACT_NAME }}
+          path: ${{ steps.meta.outputs.ARTIFACT_ZIP }}
+
+      # ── build release notes ───────────────────────────────────────
+      - name: Build release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        id: notes
+        shell: bash
+        run: |
+          : > notes.md
+
+          if [[ "${{ steps.meta.outputs.PRERELEASE }}" == "true" ]]; then
+            echo "⚠️ **PRE-RELEASE – NOT FOR PRODUCTION**" >> notes.md
+            echo "" >> notes.md
+          fi
+
+          echo "Requires the PicoSDK (ps5000a driver) to be installed on the target machine." >> notes.md
+          echo "" >> notes.md
+
+          # Commits since previous tag (bullet list)
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            echo "### Changes since ${PREV_TAG}" >> notes.md
+            echo "" >> notes.md
+            git log "${PREV_TAG}..HEAD" --pretty=format:"- %s (%h)" >> notes.md
+            echo "" >> notes.md
+            echo "" >> notes.md
+            echo "**Full diff:** [\`${PREV_TAG}...${{ steps.meta.outputs.TAG }}\`](https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${{ steps.meta.outputs.TAG }})" >> notes.md
+          else
+            echo "### Commits" >> notes.md
+            echo "" >> notes.md
+            git log --pretty=format:"- %s (%h)" -20 >> notes.md
+          fi
+
+      # ── create release on tag push ──────────────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.TAG }}
+          name: ${{ steps.meta.outputs.TAG }}
+          body_path: notes.md
+          prerelease: ${{ steps.meta.outputs.PRERELEASE == 'true' }}
+          files: ${{ steps.meta.outputs.ARTIFACT_ZIP }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
