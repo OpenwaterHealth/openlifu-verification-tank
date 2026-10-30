@@ -636,7 +636,7 @@ class Characterization:
         (D.12) come from a focused-arrival pulse train
         (``calibrate_hydrophone_depth`` steered at the commanded
         z-focus), which averages more pulses and uses the first-RF-peak
-        picker with quarter-cycle correction. The focused depth is
+        picker with onset walk-back. The focused depth is
         graded against ``criteria.peak_depth`` (within ``tol_pct`` of
         ``nominal_mm``); the focused arrival time itself is
         informational.

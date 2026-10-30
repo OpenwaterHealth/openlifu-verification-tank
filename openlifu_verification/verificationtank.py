@@ -24,20 +24,25 @@ PICOSCOPE_RESOLUTION = "15BIT"
 SPEED_OF_SOUND = 1490  # m/s in water
 AUTO_SKIP_GUARD_US = 6.0  # us to add to the auto-calculated skip window
 ZERO_WINDOW_US = 4.0
-# Fixed electrical delay between the scope trigger's rising edge and
-# the actual start of ultrasound emission (visible in traces as a
-# small burst of EM pickup at t=0). Used to convert measured
-# time-of-arrival into an axial depth. Hard-coded from calibration on
-# current TX7332 firmware; override via ``VerificationTank(
-# system_transmit_delay_us=...)`` if a future firmware changes it.
-SYSTEM_TRANSMIT_DELAY_US = 113.5
+# Electrical delay (us) between the scope trigger's rising edge and the
+# first drive edge at the pulser output, per TX frequency (kHz). The
+# TX7332 datasheet predicts 8*TX_START_DEL+123 = 1147 BF_CLK periods
+# (114.7 us) regardless of frequency, but the measured start differs
+# by ~0.8 us between 155 and 400 kHz (cause unknown; not the cycle
+# count -- 400 kHz gave 114.34 us at 3 cycles and 114.25 us at 1).
+# Measured 2026-10-28 from the first-edge EM pickup of 32 plane-wave
+# pulses (per-pulse sigma ~0.1 us). Other frequencies use the nearest
+# measured entry until measured (scripts/transmit_delay_diagnostic.py).
+# Override for all frequencies via
+# ``VerificationTank(system_transmit_delay_us=...)``.
+SYSTEM_TRANSMIT_DELAY_US_BY_FREQ_KHZ = {155.0: 113.5, 400.0: 114.3}
 HYDROPHONE_CHANNEL = 'A'
 TRIGGER_CHANNEL = 'B'
 
 
 class HardwareNotConnectedError(ConnectionError):
     """Raised on ``VerificationTank`` startup when a required piece of
-    hardware (TX console, HV supply, etc.) is not connected.
+    hardware (Transducer, HV supply, etc.) is not connected.
 
     Distinct from a generic ``ConnectionError`` / ``Exception`` so
     callers (e.g. the GUI) can present a short, actionable dialog
@@ -48,7 +53,7 @@ class HardwareNotConnectedError(ConnectionError):
                  code: Optional[str] = None):
         super().__init__(message)
         #: Short human-readable name of the disconnected component,
-        #: e.g. ``"TX console"``, ``"HV output"``, ``"QPX600DP"``.
+        #: e.g. ``"Transducer"``, ``"HV output"``, ``"QPX600DP"``.
         self.hardware = hardware
         #: Optional stable error code (e.g. the SDK's ``"LIFU-1001"``)
         #: for the operator to quote in bug reports. ``None`` when we
@@ -153,7 +158,7 @@ class VerificationTank:
                  hydrophone_position=(0.0, 0.0, 50.0),
                  calibration_path=HYDROPHONE_STATE_PATH,
                  use_calibration=True,
-                 system_transmit_delay_us=SYSTEM_TRANSMIT_DELAY_US):
+                 system_transmit_delay_us=None):
         self.use_picoscope = use_picoscope
         self.resolution = resolution
         self.num_modules = num_modules
@@ -191,10 +196,26 @@ class VerificationTank:
         # scope volts. Useful when the operator wants to see the raw
         # signal even though a calibration is available.
         self.use_calibration = bool(use_calibration)
-        # Fixed electrical delay between trigger and actual ultrasound
-        # emission (µs). Used to convert arrival time ↔ axial depth
-        # via ``expected_arrival_us = system_transmit_delay_us + z_mm / SOS``.
-        self.system_transmit_delay_us = float(system_transmit_delay_us)
+        # Electrical delay between trigger and ultrasound emission is
+        # looked up per active TX frequency (see the
+        # ``system_transmit_delay_us`` property) unless overridden here.
+        self._transmit_delay_override_us = (
+            None if system_transmit_delay_us is None
+            else float(system_transmit_delay_us))
+        self._tx_frequency_khz = float(frequency)
+
+    @property
+    def system_transmit_delay_us(self) -> float:
+        """Trigger-to-emission delay (us) for the active TX frequency.
+
+        Used to convert arrival time to axial depth via
+        ``expected_arrival_us = system_transmit_delay_us + z_mm / SOS``.
+        """
+        if self._transmit_delay_override_us is not None:
+            return self._transmit_delay_override_us
+        nearest = min(SYSTEM_TRANSMIT_DELAY_US_BY_FREQ_KHZ,
+                      key=lambda f: abs(f - self._tx_frequency_khz))
+        return SYSTEM_TRANSMIT_DELAY_US_BY_FREQ_KHZ[nearest]
 
     def __enter__(self):
         """
@@ -257,14 +278,14 @@ class VerificationTank:
 
             if not tx_connected:
                 raise HardwareNotConnectedError(
-                    "TX console is not connected.\n\n"
+                    "Transducer is not connected.\n\n"
                     "Please check:\n"
                     "  \u2022 The console is powered on\n"
                     "  \u2022 The USB cable to the PC is plugged in\n"
                     "  \u2022 No other application (e.g. openlifu-app) "
                     "is holding the port\n\n"
                     "Then click Start again.",
-                    hardware="TX console",
+                    hardware="Transducer",
                 )
             logger.info(f"  TX Connected: {tx_connected}")
             logger.info("\u2705 LIFU Device fully connected.")
@@ -278,7 +299,7 @@ class VerificationTank:
             # command is issued to the SDK.
             if not self.ext_power_supply and not hv_connected:
                 raise HardwareNotConnectedError(
-                    "TX console HV output is not connected.\n\n"
+                    "Transducer HV output is not connected.\n\n"
                     "Please check:\n"
                     "  \u2022 The console\u2019s HV supply is powered "
                     "on (front-panel indicator)\n"
@@ -296,11 +317,11 @@ class VerificationTank:
 
             if not self.lifu.txdevice.ping():
                 raise HardwareNotConnectedError(
-                    "TX console did not respond to ping.\n\n"
+                    "Transducer did not respond to ping.\n\n"
                     "The USB link is up but the transmitter firmware "
                     "isn't answering. Power-cycle the console and "
                     "click Start again.",
-                    hardware="TX console",
+                    hardware="Transducer",
                 )
 
             tx_firmware_version = self.lifu.txdevice.get_version()
@@ -380,7 +401,7 @@ class VerificationTank:
             # shows a clean dialog instead of a raw traceback.
             code = f"LIFU-{e.code}" if e.code is not None else None
             code_suffix = f" (ERR CODE: {code})" if code else ""
-            hardware = "HV output" if "HV" in str(e) else "TX console"
+            hardware = "HV output" if "HV" in str(e) else "Transducer"
             self.__exit__(None, None, None)
             raise HardwareNotConnectedError(
                 f"Device not found ({e}).\n\n"
@@ -511,6 +532,7 @@ class VerificationTank:
             profile_increment=profile_increment,
             trigger_mode=trigger_mode,
         )
+        self._tx_frequency_khz = float(frequency_kHz)
         self.lifu_config = dict(
             frequency_kHz=frequency_kHz, voltage=voltage,
             duration_usec=duration_usec, interval_msec=interval_msec,
@@ -695,6 +717,7 @@ class VerificationTank:
             for addr, reg_values in data_regs.items():
                 if not self.lifu.txdevice.write_block(identifier=txi, start_address=addr, reg_values=reg_values):
                     logger.error(f"Error applying TX CHIP ID: {txi} registers")
+        self._tx_frequency_khz = float(frequency_kHz)
 
     def set_scope_trigger(self, channel=TRIGGER_CHANNEL, threshold_mV=100, direction="rising"):
         if not self.scope:
@@ -770,8 +793,9 @@ class VerificationTank:
         ``time_start_s`` and ``time_stop_s`` are given relative to the
         **start of ultrasound emission** (``t=0`` == first sample the
         transducer emits), *not* relative to the scope trigger. The
-        fixed ``system_transmit_delay_us`` between trigger and emission
-        is added internally when programming the scope, and subtracted
+        ``system_transmit_delay_us`` between trigger and emission (for
+        the active TX frequency) is added internally when programming
+        the scope, and subtracted
         back out of the returned ``time`` axis / ``time_start_s`` /
         ``time_stop_s`` fields. This makes arrivals easy to interpret:
         the time-of-arrival ``t`` at depth ``z`` mm is simply
@@ -2512,9 +2536,10 @@ class VerificationTank:
         infinite depth (``set_focus(0, 0, 1e6)``) so all transducer
         elements fire simultaneously and emit a plane wave along +z.
         The returned pulse train is coherently averaged, the first
-        envelope peak after ``skip_us`` is located, a quarter-cycle
-        is subtracted to map the envelope peak to the sinusoid's
-        leading zero-crossing, and that time is multiplied by the
+        RF crest after ``skip_us`` is located, the picker walks back
+        from it to the signal onset (see
+        :func:`~openlifu_verification.arrival_time.find_first_arrival_us`),
+        and that time is multiplied by the
         speed of sound to yield the axial distance.
 
         This method updates ``self.hydrophone_position[2]`` in place
@@ -2568,12 +2593,11 @@ class VerificationTank:
 
               - ``distance_mm``: Estimated array\u2192hydrophone
                 distance in mm.
-              - ``arrival_us``: Estimated arrival time (us,
-                post quarter-cycle correction, **before** the
-                max-delay adjustment).
-              - ``first_peak_us``: Raw first-RF-peak time before
-                the quarter-cycle correction.
-              - ``quarter_cycle_us``: The correction applied.
+              - ``arrival_us``: Estimated arrival (onset) time (us,
+                **before** the max-delay adjustment).
+              - ``first_peak_us``: First qualifying RF crest.
+              - ``onset_to_peak_us``: ``first_peak_us - arrival_us``
+                (a quarter cycle for an ideal hard-onset sinusoid).
               - ``max_delay_us``: The transducer's max element
                 delay for the requested focus (0 when firing a
                 plane wave). This is subtracted from
@@ -2581,6 +2605,8 @@ class VerificationTank:
               - ``z_focus_mm``: The focus depth actually used
                 (``None`` for plane wave).
               - ``sos_m_per_s``: Speed of sound used.
+              - ``system_transmit_delay_us``: Trigger-to-emission
+                delay used for the time axis.
               - ``mean_trace``, ``t_us``: The aggregated waveform
                 (per-sample median across pulses).
               - ``pulse_traces``: The aligned, baseline-subtracted
@@ -2746,10 +2772,10 @@ class VerificationTank:
         )
         logger.info(
             "calibrate_hydrophone_depth: first_peak=%.3f us, "
-            "quarter_cycle=%.3f us, arrival=%.3f us, "
+            "onset_to_peak=%.3f us, arrival=%.3f us, "
             "max_delay=%.3f us, distance=%.3f mm "
             "(SoS=%d m/s, %d pulses, focus=%s)",
-            arr.first_peak_us, arr.quarter_cycle_us, arr.arrival_us,
+            arr.first_peak_us, arr.onset_to_peak_us, arr.arrival_us,
             max_delay_us, distance_mm, SPEED_OF_SOUND, n_pulses,
             "plane wave" if z_focus_mm is None
             else f"z={float(z_focus_mm):.1f} mm",
@@ -2764,11 +2790,13 @@ class VerificationTank:
             "arrival_us": float(arr.arrival_us),
             "first_peak_us": float(arr.first_peak_us),
             "first_peak_value": float(arr.first_peak_value),
-            "quarter_cycle_us": float(arr.quarter_cycle_us),
+            "onset_to_peak_us": float(arr.onset_to_peak_us),
             "threshold": float(arr.threshold),
+            "noise_gate": float(arr.noise_gate),
             "max_delay_us": float(max_delay_us),
             "z_focus_mm": None if z_focus_mm is None else float(z_focus_mm),
             "sos_m_per_s": float(SPEED_OF_SOUND),
+            "system_transmit_delay_us": self.system_transmit_delay_us,
             "mean_trace": mean_trace,
             "pulse_traces": (
                 aligned - np.median(aligned[:, base_mask], axis=1,

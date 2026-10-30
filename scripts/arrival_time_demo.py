@@ -2,10 +2,10 @@
 
 Fires a train of short pulses at the hydrophone, coherently averages
 them, locates the first RF-carrier peak above a prominence threshold,
-applies a quarter-cycle correction, and reports the inferred
+walks back to the signal onset, and reports the inferred
 array-to-hydrophone distance. Also plots the aggregated waveform with
-the picked first peak, the prominence threshold, the
-quarter-cycle-corrected arrival, and a shaded pre-``skip_us``
+the picked first peak, the prominence threshold, the noise gate, the
+onset arrival, and a shaded pre-``skip_us``
 exclusion region so you can iterate on ``--skip-us``,
 ``--duration-usec``, and ``--voltage`` before wiring this into
 ``find_peak.py``.
@@ -104,6 +104,8 @@ def main():
     # --- Output ---
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-plot", type=str, default="")
+    parser.add_argument("--save-data", type=str, default="",
+                        help="Save the traces and pick results to this .npz")
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument("--verbose", "-v", action="store_true")
     verbosity.add_argument("--quiet", "-q", action="store_true")
@@ -155,13 +157,21 @@ def main():
     print(f"  first RF peak     : {result['first_peak_us']:.3f} us")
     print(f"  peak value        : {result['first_peak_value']:.4g} mV")
     print(f"  threshold         : {result['threshold']:.4g} mV")
-    print(f"  quarter-cycle corr: {result['quarter_cycle_us']:.3f} us")
+    print(f"  noise gate        : {result['noise_gate']:.4g} mV")
+    print(f"  onset -> peak     : {result['onset_to_peak_us']:.3f} us "
+          f"(T/4 = {250.0 / tank_frequency:.3f} us)")
     print(f"  raw arrival       : {result['arrival_us']:.3f} us")
     print(f"  max element delay : {result['max_delay_us']:.3f} us")
     corrected_us = result["arrival_us"] - result["max_delay_us"]
     print(f"  corrected arrival : {corrected_us:.3f} us")
     print(f"  SoS               : {result['sos_m_per_s']:.0f} m/s")
     print(f"  distance          : {result['distance_mm']:.3f} mm")
+
+    if args.save_data:
+        np.savez(args.save_data, frequency_kHz=tank_frequency,
+                 **{k: (np.nan if v is None else v)
+                    for k, v in result.items()})
+        logger.info("Saved data to %s", args.save_data)
 
     if not (args.plot or args.save_plot):
         return
@@ -182,6 +192,11 @@ def main():
     ax.axhline(result["threshold"], color="tab:orange", lw=0.8, ls=":",
                alpha=0.8,
                label=f"prominence threshold ({result['threshold']:.3g} mV)")
+    for sgn in (1, -1):
+        ax.axhline(sgn * result["noise_gate"], color="tab:purple", lw=0.8,
+                   ls=":", alpha=0.8,
+                   label=(f"noise gate (\u00b1{result['noise_gate']:.3g} mV)"
+                          if sgn > 0 else None))
     ax.axvspan(t_us[0], result["skip_us"], color="grey", alpha=0.15,
                label=f"skip < {result['skip_us']:g} us")
     ax.axvspan(result["skip_us"], result["skip_us"] + result["baseline_window_us"], color="tab:orange", alpha=0.15,
@@ -190,8 +205,8 @@ def main():
                ls="--", lw=1.2, label="1st RF peak (above threshold)")
     ax.axvline(result["arrival_us"], color="tab:red",
                ls="--", lw=1.5,
-               label=(f"arrival = peak - quarter-cycle "
-                      f"({result['quarter_cycle_us']:.2f} us)"))
+               label=(f"arrival (onset, {result['onset_to_peak_us']:.2f} us "
+                      f"before peak)"))
     if result["max_delay_us"] > 0:
         ax.axvline(result["max_delay_us"], color="tab:green",
                    ls="-.", lw=1.5,

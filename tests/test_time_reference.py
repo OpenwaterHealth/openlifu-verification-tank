@@ -176,3 +176,32 @@ def test_dry_run_tank_arrival_is_emission_relative():
     # And no signal before the acoustic arrival either.
     early_mask = (t_us >= 0.0) & (t_us < expected_us - 1.0)
     assert np.max(np.abs(trace[early_mask])) < 1e-9
+
+
+@pytest.mark.parametrize("freq_kHz", [155.0, 400.0])
+def test_transmit_delay_uses_measured_value_per_frequency(freq_kHz):
+    from openlifu_verification.verificationtank import (
+        SYSTEM_TRANSMIT_DELAY_US_BY_FREQ_KHZ,
+    )
+    tank = VerificationTank(frequency=freq_kHz, use_picoscope=False)
+    assert tank.system_transmit_delay_us == pytest.approx(
+        SYSTEM_TRANSMIT_DELAY_US_BY_FREQ_KHZ[freq_kHz])
+
+
+@pytest.mark.parametrize("freq_kHz, nearest_kHz", [
+    (100.0, 155.0), (200.0, 155.0), (300.0, 400.0), (1000.0, 400.0),
+])
+def test_transmit_delay_uses_nearest_measured_frequency(freq_kHz, nearest_kHz):
+    from openlifu_verification.verificationtank import (
+        SYSTEM_TRANSMIT_DELAY_US_BY_FREQ_KHZ as table,
+    )
+    tank = VerificationTank(frequency=freq_kHz, use_picoscope=False)
+    assert tank.system_transmit_delay_us == table[nearest_kHz]
+
+
+def test_transmit_delay_override_applies_to_all_frequencies():
+    tank = VerificationTank(frequency=155.0, use_picoscope=False,
+                            system_transmit_delay_us=110.0)
+    assert tank.system_transmit_delay_us == 110.0
+    tank._tx_frequency_khz = 400.0
+    assert tank.system_transmit_delay_us == 110.0

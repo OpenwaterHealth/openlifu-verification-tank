@@ -26,8 +26,8 @@ def _time_axis(dt_us=0.02, t_stop_us=100.0):
 @pytest.mark.parametrize("onset_us", [20.0, 33.3, 50.0, 66.7])
 def test_arrival_recovers_boxcar_onset(onset_us):
     """A hard-onset tone-burst starts with a rising sinusoid; the first
-    positive crest is at onset + T/4, so the quarter-cycle-corrected
-    arrival must equal the onset."""
+    positive crest is at onset + T/4, and the walk-back must land on
+    the onset."""
     freq_kHz = 400.0
     t_us = _time_axis()
     trace = _boxcar_burst(t_us=t_us, onset_us=onset_us, freq_kHz=freq_kHz)
@@ -73,7 +73,7 @@ def test_returns_none_when_no_positive_signal():
                                  skip_us=12.0) is None
 
 
-def test_quarter_cycle_correction_value():
+def test_onset_to_peak_is_quarter_cycle_for_clean_burst():
     freq_kHz = 400.0
     t_us = _time_axis()
     trace = _boxcar_burst(t_us=t_us, onset_us=40.0, freq_kHz=freq_kHz)
@@ -81,10 +81,63 @@ def test_quarter_cycle_correction_value():
                                 skip_us=12.0)
     assert res is not None
     # 250 / 400 = 0.625 us at 400 kHz.
-    assert res.quarter_cycle_us == pytest.approx(0.625, rel=1e-9)
-    assert res.first_peak_us - res.arrival_us == pytest.approx(
-        0.625, rel=1e-9,
-    )
+    assert res.onset_to_peak_us == pytest.approx(0.625, abs=0.03)
+
+
+def _ramped_burst(*, t_us, onset_us, freq_kHz, tau_cycles, amp=1.0,
+                  n_cycles=10):
+    """Resonant ring-up: ``amp * (1 - exp(-t/tau)) * sin(2π f t)``."""
+    T_us = 1000.0 / freq_kHz
+    dt = t_us - onset_us
+    on = (dt >= 0) & (dt <= n_cycles * T_us)
+    env = 1.0 - np.exp(-np.clip(dt, 0, None) / (tau_cycles * T_us))
+    return np.where(on, amp * env * np.sin(2 * np.pi * dt / T_us), 0.0)
+
+
+@pytest.mark.parametrize("freq_kHz", [155.0, 400.0])
+def test_sub_threshold_first_cycle_is_recovered(freq_kHz):
+    """Slow ring-up whose first crest is below the prominence threshold:
+    the first qualifying crest is a period late, and peak - T/4 would be
+    off by a whole period. The walk-back must recover the onset."""
+    t_us = _time_axis()
+    rng = np.random.default_rng(1)
+    trace = _ramped_burst(t_us=t_us, onset_us=33.6, freq_kHz=freq_kHz,
+                          tau_cycles=4.0)
+    trace = trace + rng.normal(0.0, 0.002, t_us.size)
+    res = find_first_arrival_us(t_us, trace, frequency_kHz=freq_kHz,
+                                skip_us=14.0, min_prominence_frac=0.2)
+    assert res is not None
+    T_us = 1000.0 / freq_kHz
+    assert res.first_peak_us - 33.6 > T_us  # crest picked is not the 1st
+    assert abs(res.arrival_us - 33.6) < 0.1 * T_us
+
+
+def test_negative_first_lobe_is_included():
+    """Inverted burst: the first positive crest is 3T/4 after the onset;
+    the walk-back must step over the leading negative lobe."""
+    freq_kHz = 155.0
+    t_us = _time_axis()
+    trace = -_boxcar_burst(t_us=t_us, onset_us=33.6, freq_kHz=freq_kHz,
+                           n_cycles=2)
+    res = find_first_arrival_us(t_us, trace, frequency_kHz=freq_kHz,
+                                skip_us=14.0)
+    assert res is not None
+    assert abs(res.arrival_us - 33.6) < 0.05
+
+
+def test_slow_baseline_drift_is_not_walked_into():
+    """A residual baseline slope wider than a carrier period before the
+    burst must not be mistaken for an earlier signal lobe."""
+    freq_kHz = 400.0
+    t_us = _time_axis()
+    rng = np.random.default_rng(2)
+    drift = np.where(t_us < 40.0, -0.05 * (40.0 - t_us) / 20.0, 0.0)
+    trace = (_boxcar_burst(t_us=t_us, onset_us=40.0, freq_kHz=freq_kHz)
+             + drift + rng.normal(0.0, 0.002, t_us.size))
+    res = find_first_arrival_us(t_us, trace, frequency_kHz=freq_kHz,
+                                skip_us=14.0)
+    assert res is not None
+    assert abs(res.arrival_us - 40.0) < 0.1
 
 
 def test_threshold_gates_early_low_amplitude_wobble():
