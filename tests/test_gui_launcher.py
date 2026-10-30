@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -35,11 +36,17 @@ def setup(tmp_path) -> SetupData:
     return s
 
 
-def _launcher(setup: SetupData, tmp_path, *flags: str) -> gui.LauncherDialog:
+def _launcher(setup: SetupData, tmp_path, *flags: str,
+              hardware_ok: bool = True) -> gui.LauncherDialog:
+    """Launcher (not shown, so not polling); ``hardware_ok`` marks
+    every hardware LED green so Start depends on the fields only."""
     args = gui.build_gui_parser().parse_args(
         ["--reports-root", str(tmp_path / "reports"), *flags])
-    return gui.LauncherDialog(args, app_version="9.9",
-                              setup_root=setup.root)
+    dlg = gui.LauncherDialog(args, app_version="9.9",
+                             setup_root=setup.root)
+    if hardware_ok:
+        dlg._show_hardware_status(dict.fromkeys(dlg.hw_leds, True))
+    return dlg
 
 
 def _scan(dlg: gui.LauncherDialog, edit, text: str) -> None:
@@ -198,3 +205,87 @@ def test_accept_saves_last_setup(setup, tmp_path):
     dlg.accept()
     assert setup.load_last_setup() == {
         "tester": "T1", "console": "WL134Q00007", "hydrophone": "HYDRO2585"}
+
+
+def _states(dlg: gui.LauncherDialog) -> dict:
+    return {name: led.property("state") for name, led in dlg.hw_leds.items()}
+
+
+def _wait_until(predicate, timeout_s: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while not predicate() and time.monotonic() < deadline:
+        QTest.qWait(10)
+    return predicate()
+
+
+@pytest.mark.parametrize("flags, hv", [((), "Console"),
+                                       (("--ext-power",), "HV supply")])
+def test_hardware_leds_show_probe_result(setup, tmp_path, monkeypatch,
+                                         flags, hv):
+    calls = []
+
+    def _probe(*, ext_power_supply):
+        calls.append(ext_power_supply)
+        return {"Scope": True, "Transducer": False, hv: True}
+
+    monkeypatch.setattr(gui, "probe_hardware", _probe)
+    dlg = _launcher(setup, tmp_path, *flags, hardware_ok=False)
+    assert _states(dlg) == dict.fromkeys(["Scope", "Transducer", hv],
+                                         "checking")
+    assert not calls  # polling starts only once the launcher is shown
+
+    dlg.show()
+    assert _wait_until(lambda: _states(dlg)["Scope"] == "ok")
+    assert _states(dlg) == {"Scope": "ok", "Transducer": "missing", hv: "ok"}
+    assert calls[0] is bool(flags)
+    assert "not detected" in dlg.hw_leds["Transducer"].toolTip()
+
+    dlg.reject()  # the run must not start while a probe is in flight
+    assert not dlg._hw_poller.isRunning()
+
+
+def test_hardware_leds_unknown_when_probe_fails(setup, tmp_path,
+                                                monkeypatch):
+    def _probe(*, ext_power_supply):
+        raise OSError("driver missing")
+
+    monkeypatch.setattr(gui, "probe_hardware", _probe)
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    dlg.show()
+    assert _wait_until(lambda: _states(dlg)["Scope"] == "")
+    assert set(_states(dlg).values()) == {""}
+    dlg.reject()
+
+
+def test_start_blocked_until_hardware_detected(setup, tmp_path):
+    setup.save_last_setup({"tester": "T1", "console": "WL134Q00007",
+                           "hydrophone": "HYDRO2246"})
+    dlg = _launcher(setup, tmp_path, "--use-last-setup", hardware_ok=False)
+    _scan(dlg, dlg.txm_edit, "WLM44Q00012")
+    assert not dlg.start_button.isEnabled()
+    assert dlg.start_button.toolTip() == "Checking hardware\u2026"
+
+    dlg._show_hardware_status(
+        {"Scope": True, "Transducer": False, "Console": False})
+    assert not dlg.start_button.isEnabled()
+    assert dlg.start_button.toolTip().startswith(
+        "Not detected: Transducer, Console.")
+
+    dlg._show_hardware_status(
+        {"Scope": True, "Transducer": True, "Console": True})
+    assert dlg.start_button.isEnabled()
+    assert dlg.start_button.toolTip() == ""
+
+    # A failed check must not lock the operator out; the run's own
+    # connection checks still apply.
+    dlg._show_hardware_status(None)
+    assert dlg.start_button.isEnabled()
+
+
+def test_no_hardware_leds_in_dry_run(setup, tmp_path, monkeypatch):
+    monkeypatch.setattr(gui, "probe_hardware", pytest.fail)
+    dlg = _launcher(setup, tmp_path, "--dry-run")
+    dlg.show()
+    assert dlg.hw_leds == {}
+    assert dlg._hw_poller is None
+    dlg.reject()

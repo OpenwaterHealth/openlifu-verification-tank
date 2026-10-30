@@ -5,7 +5,11 @@ tester, console and hydrophone IDs (typed or scanned with a barcode
 reader; Enter validates a field and moves to the next), and the
 reports folder. Tester, console and hydrophone IDs must be registered
 in the setup data folder (see :mod:`openlifu_verification.setup_data`),
-which also holds the hydrophone calibrations. Clicking Start runs the
+which also holds the hydrophone calibrations. Status LEDs show whether
+the scope, transducer and console (or external HV supply) are plugged
+in, re-checked every second while the launcher is open; Start stays
+disabled while any is missing. Clicking
+Start runs the
 same pipeline as :mod:`run_report` on a background thread while a
 Running dialog shows a live progress bar, the current phase label,
 and a mini terminal that mirrors the INFO log stream. The Running
@@ -82,6 +86,7 @@ from openlifu_verification import (
 from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
 from openlifu_verification.characterization import ReportRow
 from openlifu_verification.device_info import read_console_hwid
+from openlifu_verification.hardware_status import probe_hardware
 from openlifu_verification.report_io import NONSTANDARD_BANNER
 from openlifu_verification.setup_data import (
     CONSOLES,
@@ -376,6 +381,18 @@ def _build_qss(p: Palette) -> str:
     }}
     QLabel#gateGlyph[state="skip"] {{
         color: {p.muted};
+    }}
+    QLabel#hwLed {{
+        color: {p.muted};
+    }}
+    QLabel#hwLed[state="checking"] {{
+        color: {p.accent};
+    }}
+    QLabel#hwLed[state="ok"] {{
+        color: {p.success};
+    }}
+    QLabel#hwLed[state="missing"] {{
+        color: {p.danger};
     }}
     QLabel#gateLabel[state="pass"] {{
         color: {p.text};
@@ -746,6 +763,45 @@ _ALLOWED_FREQUENCIES_KHZ: tuple[float, ...] = SUPPORTED_FREQUENCIES_KHZ
 _DETAIL_WIDTH = 230  # px, status text to the right of each ID field
 
 
+class _HardwarePoller(QThread):
+    """Runs :func:`probe_hardware` every ``interval_s`` and emits
+    ``{name: present}``, or ``None`` if the probe failed. Must be
+    stopped before a run opens the scope."""
+
+    status = pyqtSignal(object)
+
+    def __init__(self, ext_power_supply: bool, interval_s: float = 1.0,
+                 parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._ext_power_supply = ext_power_supply
+        self._interval_s = interval_s
+        self._wake = threading.Event()
+        self._stopping = False
+
+    def stop(self) -> None:
+        self._stopping = True
+        self._wake.set()
+        self.wait()
+
+    def run(self) -> None:
+        last_error = None
+        while not self._stopping:
+            try:
+                result = probe_hardware(
+                    ext_power_supply=self._ext_power_supply)
+                last_error = None
+            except Exception as e:  # noqa: BLE001 - shown as unknown
+                if str(e) != last_error:
+                    logger.warning("Hardware status check failed: %s", e)
+                last_error = str(e)
+                result = None
+            if self._stopping:
+                break
+            self.status.emit(result)
+            self._wake.wait(self._interval_s)
+            self._wake.clear()
+
+
 @dataclass(eq=False)
 class _IdField:
     """A scanned / typed ID field and its latest validation result."""
@@ -862,7 +918,8 @@ class LauncherDialog(QDialog):
     buttons are shown. With ``--no-validate``, any non-empty TXM S/N,
     tester and console are accepted and the frequency is picked by
     hand; the hydrophone must still be registered. Start is enabled
-    only when every field is accepted and a frequency is set.
+    only when every field is accepted, a frequency is set and every
+    hardware status LED is green.
     """
 
     def __init__(self, args: argparse.Namespace,
@@ -989,6 +1046,29 @@ class LauncherDialog(QDialog):
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
 
+        # --- Hardware status LEDs (not shown in --dry-run) ---
+        # Polled while the launcher is open; the run opens the
+        # hardware only after the launcher closes. Start is blocked
+        # until every LED is green.
+        bottom_row = QHBoxLayout()
+        self.hw_leds: dict[str, QLabel] = {}
+        self._hw_blocker = ""  # why Start is blocked, "" if it isn't
+        self._hw_poller: Optional[_HardwarePoller] = None
+        if not getattr(args, "dry_run", False):
+            ext_power = bool(getattr(args, "ext_power", False))
+            for name in ("Scope", "Transducer",
+                         "HV supply" if ext_power else "Console"):
+                led = QLabel("\u25cf")
+                led.setObjectName("hwLed")
+                bottom_row.addWidget(led)
+                bottom_row.addWidget(QLabel(name))
+                bottom_row.addSpacing(10)
+                self.hw_leds[name] = led
+            self._hw_poller = _HardwarePoller(ext_power, parent=self)
+            self._hw_poller.status.connect(self._show_hardware_status)
+        bottom_row.addStretch(1)
+        bottom_row.addWidget(button_box)
+
         # --- Assemble ---
         sep = QFrame()
         sep.setObjectName("hLine")
@@ -1006,7 +1086,7 @@ class LauncherDialog(QDialog):
         outer.addWidget(info_group)
         outer.addWidget(out_group)
         outer.addStretch(1)
-        outer.addWidget(button_box)
+        outer.addLayout(bottom_row)
 
         # Enter validates and advances (barcode readers end each scan
         # with Enter); the filter keeps it from clicking Start.
@@ -1032,7 +1112,7 @@ class LauncherDialog(QDialog):
                 f.edit.setText(last.get(f.registry.kind, ""))
                 if f.edit.text():
                     self._validate(f)
-        self._refresh_start_enabled()
+        self._show_hardware_status({})  # LEDs "checking" until the first probe
         self.txm_edit.setFocus()
 
         self.setMinimumWidth(680)
@@ -1144,10 +1224,13 @@ class LauncherDialog(QDialog):
         return True
 
     def _refresh_start_enabled(self) -> None:
-        """Enable Start only when every field is valid."""
+        """Enable Start only when every field is valid and no hardware
+        is missing."""
         ok = (self.freq_combo.currentData() is not None
-              and all(f.valid for f in self._fields.values()))
+              and all(f.valid for f in self._fields.values())
+              and not self._hw_blocker)
         self.start_button.setEnabled(ok)
+        self.start_button.setToolTip(self._hw_blocker)
 
     def eventFilter(self, obj, event) -> bool:
         if (event.type() == QEvent.Type.KeyPress
@@ -1213,6 +1296,50 @@ class LauncherDialog(QDialog):
         except OSError as e:
             logger.warning("Could not save the last setup: %s", e)
         super().accept()
+
+    # ------------------------------------------------------------------
+    # Hardware status
+    # ------------------------------------------------------------------
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._hw_poller is not None and not self._hw_poller.isRunning():
+            self._hw_poller.start()
+
+    def done(self, result: int) -> None:
+        # Stop polling before the run opens the scope.
+        if self._hw_poller is not None:
+            self._hw_poller.stop()
+        super().done(result)
+
+    def _show_hardware_status(self, status: Optional[dict]) -> None:
+        """Color each LED and block Start until all are green.
+
+        ``status`` maps name to presence; a name not in it shows as
+        checking. ``None`` (probe failed) shows as unknown and does not
+        block Start; the run's own connection checks still apply."""
+        missing, checking = [], False
+        for name, led in self.hw_leds.items():
+            if status is None:
+                state, tip = "", "status unknown (check failed, see log)"
+            elif name not in status:
+                state, tip = "checking", "checking\u2026"
+                checking = True
+            elif status[name]:
+                state, tip = "ok", "connected"
+            else:
+                state, tip = "missing", "not detected \u2013 check power and USB"
+                missing.append(name)
+            led.setProperty("state", state)
+            led.setToolTip(f"{name}: {tip}")
+            _refresh_polish(led)
+        if missing:
+            self._hw_blocker = (f"Not detected: {', '.join(missing)}. "
+                                "Check power and USB.")
+        elif checking:
+            self._hw_blocker = "Checking hardware\u2026"
+        else:
+            self._hw_blocker = ""
+        self._refresh_start_enabled()
 
     # ------------------------------------------------------------------
     # Folders
