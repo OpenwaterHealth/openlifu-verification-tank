@@ -1,5 +1,6 @@
 """Setup data: registries of the testers, consoles and hydrophones the
-GUI accepts, plus the hydrophone calibration files and per-tank state.
+GUI accepts, plus the hydrophone calibration files, transducer pinmaps
+and per-tank state. One folder is shared by the GUI and the scripts.
 
 Layout::
 
@@ -8,13 +9,19 @@ Layout::
       consoles/consoles.json                    {sn: {"HWID": hwid}}
       hydrophone_calibrations/hydrophones.json  {id: {"Calibration": filename}}
       hydrophone_calibrations/<calibration files>
-      hydrophone.json                           last hydrophone position
+      transducers/openlifu_<n>x.json            transducer pinmaps
+      hydrophone.json                           last hydrophone position + ID
       last_setup.json                           last tester / console / hydrophone
 
-A new folder is seeded from the repo's ``setup_data/`` template.
+Missing files are copied from the template shipped in the package
+(:data:`paths.BUNDLED_SETUP_DATA_DIR`); existing files are never
+overwritten. Set up or switch the active folder with::
+
+    openlifu-setup-data [FOLDER]
 """
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import re
@@ -79,6 +86,23 @@ class SetupData:
     def __init__(self, root: Path):
         self.root = Path(root)
 
+    @classmethod
+    def active(cls) -> "SetupData":
+        """The folder saved by :meth:`make_active`, else
+        :data:`paths.DEFAULT_SETUP_DATA_DIR`."""
+        try:
+            saved = paths.SETUP_DATA_LOCATION_FILE.read_text(
+                encoding="utf-8").strip()
+        except OSError:
+            saved = ""
+        return cls(Path(saved) if saved else paths.DEFAULT_SETUP_DATA_DIR)
+
+    def make_active(self) -> None:
+        """Save :attr:`root` as the folder the GUI and scripts use."""
+        location = paths.SETUP_DATA_LOCATION_FILE
+        location.parent.mkdir(parents=True, exist_ok=True)
+        location.write_text(str(self.root.resolve()) + "\n", encoding="utf-8")
+
     @property
     def calibrations_dir(self) -> Path:
         return self.root / HYDROPHONES.folder
@@ -91,6 +115,9 @@ class SetupData:
     @property
     def last_setup_path(self) -> Path:
         return self.root / "last_setup.json"
+
+    def transducer_path(self, num_modules: int) -> Path:
+        return self.root / "transducers" / f"openlifu_{num_modules}x.json"
 
     def registry_path(self, registry: Registry) -> Path:
         return self.root / registry.folder / registry.filename
@@ -182,15 +209,59 @@ class SetupData:
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
-    def is_initialized(self) -> bool:
-        return all(self.registry_path(r).is_file() for r in REGISTRIES)
+    def _missing_files(self, template: Optional[Path]) -> list[Path]:
+        """Template files (relative paths) not present under root."""
+        template = Path(template or paths.BUNDLED_SETUP_DATA_DIR)
+        return [src.relative_to(template) for src in template.rglob("*")
+                if src.is_file()
+                and not (self.root / src.relative_to(template)).exists()]
 
-    def initialize(self, template: Path = paths.BUNDLED_SETUP_DATA_DIR) -> None:
-        """Copy every file from ``template`` that doesn't already
-        exist under :attr:`root` (never overwrites)."""
-        for src in Path(template).rglob("*"):
-            dest = self.root / src.relative_to(template)
-            if src.is_file() and not dest.exists():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dest)
-        logger.info("Initialized setup data at %s from %s", self.root, template)
+    def is_initialized(self, template: Optional[Path] = None) -> bool:
+        return not self._missing_files(template)
+
+    def initialize(self, template: Optional[Path] = None) -> list[Path]:
+        """Copy every file from ``template`` (default: the bundled
+        template) that doesn't already exist under :attr:`root` (never
+        overwrites). Returns the copied relative paths."""
+        template = Path(template or paths.BUNDLED_SETUP_DATA_DIR)
+        missing = self._missing_files(template)
+        for rel in missing:
+            dest = self.root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(template / rel, dest)
+        if missing:
+            logger.info("Copied %d template file(s) into setup data at %s",
+                        len(missing), self.root)
+        return missing
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """``openlifu-setup-data``: create / update the setup data folder
+    and make it the one the GUI and scripts use."""
+    parser = argparse.ArgumentParser(
+        prog="openlifu-setup-data",
+        description=("Copy any missing template files (registries, "
+                     "hydrophone calibrations, transducer pinmaps) into "
+                     "the setup data folder and make it the active one. "
+                     "Existing files are never overwritten."),
+    )
+    parser.add_argument(
+        "folder", nargs="?", type=Path, default=None,
+        help=("Setup data folder. Default: the active folder "
+              f"({SetupData.active().root})."),
+    )
+    args = parser.parse_args(argv)
+
+    setup = SetupData(args.folder) if args.folder else SetupData.active()
+    copied = setup.initialize()
+    setup.make_active()
+    for rel in copied:
+        print(f"  added {rel.as_posix()}")
+    print(f"Setup data folder: {setup.root.resolve()}")
+    for registry in REGISTRIES:
+        print(f"  {registry.kind}s: {len(setup.load(registry))}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

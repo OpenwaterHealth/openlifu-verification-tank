@@ -4,7 +4,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from openlifu_verification import apodization as apo
+from openlifu_verification import apodization as apo, paths
+
+TEMPLATE_1X = paths.BUNDLED_SETUP_DATA_DIR / "transducers" / "openlifu_1x.json"
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +304,7 @@ class TestWithTransducer:
         # Import lazily so pytest collection doesn't touch numpy-heavy
         # SDK imports.
         from openlifu_verification.verificationtank import _TransducerData
-        path = "transducers/openlifu_1x_evt1.json"
+        path = str(TEMPLATE_1X)
         arr = _TransducerData.from_file(path)
         arr.sort_by_pin()
 
@@ -311,7 +313,7 @@ class TestWithTransducer:
 
     def test_1x_center(self):
         from openlifu_verification.verificationtank import _TransducerData
-        path = "transducers/openlifu_1x_evt1.json"
+        path = str(TEMPLATE_1X)
         arr = _TransducerData.from_file(path)
         arr.sort_by_pin()
 

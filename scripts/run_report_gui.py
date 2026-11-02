@@ -81,7 +81,6 @@ from openlifu_verification import (
     OperatorPrefs,
     ScanConfig,
     VerificationTank,
-    paths,
 )
 from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
 from openlifu_verification.characterization import ReportRow
@@ -495,12 +494,6 @@ def build_gui_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--setup-data", type=Path, default=None,
-        help=("Setup data folder (tester / console / hydrophone registries "
-              "and calibrations). Default: the last folder picked in the "
-              f"launcher, else {paths.DEFAULT_SETUP_DATA_DIR}."),
-    )
-    parser.add_argument(
         "--use-last-setup", action="store_true",
         help="Pre-fill tester, console and hydrophone from the last run.",
     )
@@ -515,11 +508,6 @@ def build_gui_parser() -> argparse.ArgumentParser:
         help=("Accept any TXM S/N, tester and console and pick the "
               "frequency by hand; the console hardware ID is not checked. "
               "The hydrophone must still be in the setup data."),
-    )
-    parser.add_argument(
-        "--calibration-path", type=Path, default=None,
-        help=("Hydrophone position file. Default: hydrophone.json in the "
-              "setup data folder."),
     )
     return parser
 
@@ -1386,9 +1374,10 @@ class LauncherDialog(QDialog):
         if not setup.is_initialized():
             answer = QMessageBox.question(
                 self, "Setup data",
-                f"{path} does not contain setup data.\n\nCopy the default "
-                "setup data (bundled hydrophone calibrations, empty tester "
-                "and console lists) into it?",
+                f"{path} is missing setup data files.\n\nCopy the defaults "
+                "(bundled hydrophone calibrations, transducer pinmaps, "
+                "empty tester and console lists) into it? Existing files "
+                "are kept.",
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
@@ -2263,21 +2252,16 @@ def main(argv=None) -> int:
         args.reports_root = Path(saved) if saved else run_report.DEFAULT_OUTPUT_DIR
     args.reports_root = Path(args.reports_root).resolve()
 
-    # Setup data folder: --setup-data, else the last folder picked in
-    # the launcher, else the per-user default. Seeded from the bundled
-    # template on first use.
-    if args.setup_data is None:
-        saved = settings.value("setup_data_dir", "", type=str)
-        args.setup_data = Path(saved) if saved else paths.DEFAULT_SETUP_DATA_DIR
-    setup_root = Path(args.setup_data).resolve()
-    setup = SetupData(setup_root)
-    if not setup.is_initialized():
-        try:
-            setup.initialize()
-        except OSError as e:
-            QMessageBox.critical(None, "Setup data",
-                                 f"Could not initialize {setup_root}:\n{e}")
-            return 2
+    # Setup data folder: --setup-data, else the active one shared with
+    # the scripts. Missing template files are copied in.
+    setup_root = (Path(args.setup_data) if args.setup_data is not None
+                  else SetupData.active().root).resolve()
+    try:
+        SetupData(setup_root).initialize()
+    except OSError as e:
+        QMessageBox.critical(None, "Setup data",
+                             f"Could not initialize {setup_root}:\n{e}")
+        return 2
     calibration_path_arg = args.calibration_path
 
     exit_code = 130
@@ -2294,7 +2278,8 @@ def main(argv=None) -> int:
         args.reports_root = launcher.selected_reports_root
         settings.setValue("reports_root", str(args.reports_root))
         setup_root = launcher.selected_setup_root
-        settings.setValue("setup_data_dir", str(setup_root))
+        SetupData(setup_root).make_active()
+        args.setup_data = setup_root
         args.hydrophone = str(launcher.selected_hydrophone_calibration)
         args.console_hwid = launcher.selected_console_hwid
         args.calibration_path = (calibration_path_arg

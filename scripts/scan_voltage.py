@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from openlifu_verification import VerificationTank, paths, set_log_level
+from openlifu_verification import VerificationTank, set_log_level, setup_data
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def main():
     # --- Hydrophone / calibration ---
     parser.add_argument("--hydrophone", type=str, default="")
     parser.add_argument("--calibration-path", type=str,
-                        default=str(paths.HYDROPHONE_STATE_PATH),
+                        default=str(setup_data.SetupData.active().hydrophone_state_path),
                         help="JSON file storing hydrophone position + last-used ID.")
     parser.add_argument("--hydro-range-mv", type=int, default=5000,
                         help="Scope full-scale on the hydrophone channel (default 5000 mV).")

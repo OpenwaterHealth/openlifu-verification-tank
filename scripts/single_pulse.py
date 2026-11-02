@@ -10,7 +10,7 @@ import logging
 import numpy as np
 import matplotlib.pyplot as plt
 
-from openlifu_verification import ScanResult, VerificationTank, paths, set_log_level
+from openlifu_verification import ScanResult, VerificationTank, set_log_level, setup_data
 from openlifu_verification.characterization import _find_arrival_us
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ def main():
                         help="Hydrophone calibration file or bare ID. Falls "
                              "back to the last-used ID stored in --calibration-path.")
     parser.add_argument("--calibration-path", type=str,
-                        default=str(paths.HYDROPHONE_STATE_PATH))
+                        default=str(setup_data.SetupData.active().hydrophone_state_path))
     parser.add_argument("--num-modules", type=int, default=1)
     parser.add_argument("--apodization", type=str, default=None,
                         help="Element apodization mask as a 16-digit hex "

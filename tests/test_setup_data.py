@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from openlifu_verification import paths
+from openlifu_verification import paths, setup_data
 from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
 from openlifu_verification.setup_data import (
     CONSOLES,
@@ -55,10 +55,62 @@ def test_initialize_copies_template_without_overwriting(tmp_path):
     assert s.lookup(TESTERS, "anyone") == (False, None)
     for key in ("HYDRO2246", "HYDRO2581", "HYDRO2585"):
         assert s.calibration_path(key).is_file()
+    for n in (1, 2):
+        assert s.transducer_path(n).is_file()
 
     s.add(TESTERS, "T1", "Jane Doe")
-    s.initialize()
+    assert s.initialize() == []
     assert s.lookup(TESTERS, "T1") == (True, {"Name": "Jane Doe"})
+
+
+def test_initialize_adds_new_template_files_to_existing_folder(setup):
+    """A folder made before a template file existed gets it on the
+    next initialize, e.g. the transducer pinmaps."""
+    setup.transducer_path(2).unlink()
+    assert not setup.is_initialized()
+    assert [p.as_posix() for p in setup.initialize()] \
+        == ["transducers/openlifu_2x.json"]
+    assert setup.is_initialized()
+
+
+def test_active_defaults_then_follows_make_active(tmp_path):
+    assert SetupData.active().root == paths.DEFAULT_SETUP_DATA_DIR
+    other = SetupData(tmp_path / "lab_setup")
+    other.make_active()
+    assert SetupData.active().root == other.root.resolve()
+
+
+def test_cli_initializes_and_activates_folder(tmp_path, capsys):
+    folder = tmp_path / "lab_setup"
+    assert setup_data.main([str(folder)]) == 0
+    assert SetupData(folder).is_initialized()
+    assert SetupData.active().root == folder.resolve()
+    assert "transducers/openlifu_1x.json" in capsys.readouterr().out
+
+    # Re-running on the active folder copies nothing.
+    assert setup_data.main([]) == 0
+    assert "added" not in capsys.readouterr().out
+
+
+def test_template_transducer_loads(setup):
+    from openlifu_verification.verificationtank import _TransducerData
+    arr = _TransducerData.from_file(str(setup.transducer_path(1)))
+    assert arr.numelements() == 64
+
+
+def test_verification_tank_state_defaults_to_setup_data(tmp_path):
+    from openlifu_verification import VerificationTank
+    active = SetupData(tmp_path / "lab_setup")
+    active.make_active()
+    tank = VerificationTank(use_picoscope=False)
+    assert tank.setup_data.root == active.root.resolve()
+    assert tank.calibration_path == tank.setup_data.hydrophone_state_path
+
+    other = tmp_path / "other"
+    tank = VerificationTank(use_picoscope=False, setup_data=other)
+    assert tank.calibration_path == other / "hydrophone.json"
+    assert VerificationTank(use_picoscope=False,
+                            calibration_path=None).calibration_path is None
 
 
 def test_bundled_template_matches_calibrations():
@@ -88,7 +140,7 @@ def test_malformed_registry_raises(setup):
 
 
 def test_add_hydrophone_copies_calibration(setup, tmp_path):
-    src = next(paths.REPO_CALIBRATIONS_DIR.glob("HNR0500-2246*.txt"))
+    src = next(paths.BUNDLED_CALIBRATIONS_DIR.glob("HNR0500-2246*.txt"))
     copy = tmp_path / src.name
     copy.write_bytes(src.read_bytes())
     setup.add_hydrophone("HYDRO9999", copy)

@@ -1,7 +1,7 @@
 """Tests for :class:`openlifu_verification.Hydrophone`.
 
-Uses the calibration file shipped in ``setup_data/hydrophone_calibrations/``
-so tests don't need network / hardware access.
+Uses the calibration files shipped in the package's setup data
+template so tests don't need network / hardware access.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from openlifu_verification import Hydrophone, paths
+from openlifu_verification.setup_data import SetupData
 
 
 CAL_ID = "2246"
@@ -20,7 +21,7 @@ CAL_ID = "2246"
 @pytest.fixture()
 def cal_file() -> Path:
     """Absolute path to the shipped 2246 calibration file."""
-    hits = list(paths.REPO_CALIBRATIONS_DIR.glob(f"HNR0500-{CAL_ID}*.txt"))
+    hits = list(paths.BUNDLED_CALIBRATIONS_DIR.glob(f"HNR0500-{CAL_ID}*.txt"))
     assert hits, "shipped 2246 calibration missing"
     return hits[0]
 
@@ -37,35 +38,16 @@ def test_load_by_bare_id_finds_shipped_file():
     assert hydro.metadata.get("HYD_SN") == CAL_ID
 
 
-def test_load_by_bare_id_prefers_cwd_config_over_shipped(
-    clean_cwd, cal_file, tmp_path
-):
-    """When a ``config/hydrophone_calibrations/`` folder exists under
-    the CWD, its files must win over the repo-shipped fallback."""
-    local_dir = tmp_path / "config" / "hydrophone_calibrations"
-    local_dir.mkdir(parents=True)
-    local_copy = local_dir / cal_file.name
+def test_load_by_bare_id_prefers_active_setup_data(cal_file, tmp_path):
+    """Calibrations in the active setup data folder win over the
+    shipped fallback."""
+    setup = SetupData(tmp_path / "lab_setup")
+    setup.calibrations_dir.mkdir(parents=True)
+    local_copy = setup.calibrations_dir / cal_file.name
     shutil.copy2(cal_file, local_copy)
+    setup.make_active()
 
-    # Now load by bare ID from a CWD that has both a config copy and
-    # the repo fallback available.
-    hydro = Hydrophone(CAL_ID)
-    assert hydro.metadata.get("HYD_SN") == CAL_ID
-    # Round-trip through the resolver to confirm the CWD copy wins.
-    resolved = Hydrophone._resolve_calibration_path(CAL_ID)
-    assert resolved == local_copy
-
-
-def test_load_by_bare_id_falls_back_to_legacy_layout(clean_cwd, cal_file, tmp_path):
-    """Pre-refactor deployments kept files at ``hydrophone_calibrations/``.
-    That legacy layout must still resolve so old CWDs keep working."""
-    legacy_dir = tmp_path / "hydrophone_calibrations"
-    legacy_dir.mkdir()
-    legacy_copy = legacy_dir / cal_file.name
-    shutil.copy2(cal_file, legacy_copy)
-
-    hydro = Hydrophone(CAL_ID)
-    assert hydro.metadata.get("HYD_SN") == CAL_ID
+    assert Hydrophone._resolve_calibration_path(CAL_ID) == local_copy
 
 
 def test_sensitivity_is_finite_within_calibrated_range(cal_file):

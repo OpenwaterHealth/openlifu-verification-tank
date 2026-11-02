@@ -12,7 +12,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from openlifu_verification import VerificationTank, paths, set_log_level
+from openlifu_verification import VerificationTank, set_log_level, setup_data
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ def main():
     parser.add_argument("--hydrophone", type=str, default="",
                         help="Hydrophone calibration file or bare ID.")
     parser.add_argument("--calibration-path", type=str,
-                        default=str(paths.HYDROPHONE_STATE_PATH),
+                        default=str(setup_data.SetupData.active().hydrophone_state_path),
                         help="JSON file storing hydrophone position + last-used ID.")
     parser.add_argument("--raw-mv", action="store_true",
                         help="Skip the mV->Pa calibration even if a "

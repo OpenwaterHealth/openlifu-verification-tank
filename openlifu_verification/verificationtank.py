@@ -11,7 +11,7 @@ from .picoscope import Picoscope
 from .qpx600dp import QPX600DP
 from .scan_results import ScanResult
 from .hydrophone import Hydrophone
-from .paths import HYDROPHONE_STATE_PATH
+from .setup_data import SetupData
 from .pulse_align import align_pulse_traces
 
 from openlifu_sdk.io import LIFUInterface
@@ -38,6 +38,9 @@ ZERO_WINDOW_US = 4.0
 SYSTEM_TRANSMIT_DELAY_US_BY_FREQ_KHZ = {155.0: 113.5, 400.0: 114.3}
 HYDROPHONE_CHANNEL = 'A'
 TRIGGER_CHANNEL = 'B'
+#: ``calibration_path`` default: ``hydrophone.json`` in the setup data
+#: folder.
+SETUP_DATA_CALIBRATION = object()
 
 
 class HardwareNotConnectedError(ConnectionError):
@@ -156,9 +159,16 @@ class VerificationTank:
                  trigger_direction="rising",
                  hydrophone=None,
                  hydrophone_position=(0.0, 0.0, 50.0),
-                 calibration_path=HYDROPHONE_STATE_PATH,
+                 calibration_path=SETUP_DATA_CALIBRATION,
                  use_calibration=True,
-                 system_transmit_delay_us=None):
+                 system_transmit_delay_us=None,
+                 setup_data=None):
+        # Setup data folder (transducer pinmaps, hydrophone state and
+        # calibrations); ``None`` = the active one shared with the GUI.
+        self.setup_data = (SetupData(setup_data) if setup_data is not None
+                           else SetupData.active())
+        if calibration_path is SETUP_DATA_CALIBRATION:
+            calibration_path = self.setup_data.hydrophone_state_path
         self.use_picoscope = use_picoscope
         self.resolution = resolution
         self.num_modules = num_modules
@@ -334,22 +344,26 @@ class VerificationTank:
                  raise Exception(f"Number of TX7332 devices found: {num_tx_devices} != 2x{self.num_modules}")
             logger.info(f"Number of TX7332 devices found: {num_tx_devices}")
 
-            transducers_path = Path(__file__).parent.parent.resolve()
+            self.setup_data.initialize()
             self.arr = _TransducerData.from_file(
-                f"{transducers_path}/transducers/openlifu_{self.num_modules}x_evt1.json"
+                str(self.setup_data.transducer_path(self.num_modules))
             )
             self.arr.sort_by_pin()
 
             # Auto-load a previously-calibrated hydrophone position if
             # one has been saved to ``calibration_path``. On first-time
             # run the file is seeded with the current (default) position
-            # so the operator has an editable copy to tweak.
+            # so the operator has an editable copy to tweak. An
+            # explicitly passed hydrophone is saved as the last used one.
             cal_source = None
             if self.calibration_path is not None:
                 if self.calibration_path.is_file():
+                    explicit_hydrophone = self.hydrophone is not None
                     try:
                         self.load_calibration()
                         cal_source = f"loaded from {self.calibration_path}"
+                        if explicit_hydrophone:
+                            self.save_calibration()
                     except Exception as e:
                         logger.warning(
                             "Failed to load hydrophone calibration from %s: %s",

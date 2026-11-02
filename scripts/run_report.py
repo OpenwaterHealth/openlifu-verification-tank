@@ -49,16 +49,15 @@ from openlifu_verification import (
     ScanConfig,
     VerificationTank,
     characterization,
-    paths,
     report_io,
     set_log_level,
 )
 from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
+from openlifu_verification.setup_data import SetupData
 
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_CALIBRATION_PATH = paths.HYDROPHONE_STATE_PATH
 DEFAULT_OUTPUT_DIR = Path("test_reports")
 
 
@@ -175,9 +174,13 @@ def build_parser() -> argparse.ArgumentParser:
     # --- Hydrophone ---
     p.add_argument("--hydrophone", type=str, default="",
                    help="Hydrophone calibration file or ID (e.g. '2246').")
-    p.add_argument("--calibration-path", type=Path,
-                   default=DEFAULT_CALIBRATION_PATH,
-                   help="Auto-load / save destination for hydrophone_position.")
+    p.add_argument("--calibration-path", type=Path, default=None,
+                   help="Auto-load / save destination for hydrophone_position. "
+                        "Default: hydrophone.json in the setup data folder.")
+    p.add_argument("--setup-data", type=Path, default=None,
+                   help="Setup data folder (transducer pinmaps, hydrophone "
+                        "calibrations and state). Default: the active one "
+                        "(see openlifu-setup-data).")
     # --- Report inputs / outputs ---
     p.add_argument("--scan-config", type=Path, default=None,
                    help="Diagnostics only: partial JSON of scan/scope settings "
@@ -397,13 +400,16 @@ def _run(args: argparse.Namespace,
         logger.info("=== DRY RUN (no hardware) ===")
         tank_cm = DryRunTank(frequency=args.frequency_khz)
     else:
+        setup = (SetupData(args.setup_data) if args.setup_data is not None
+                 else SetupData.active())
         tank_cm = VerificationTank(
             frequency=int(args.frequency_khz),
             num_modules=args.num_modules,
             ext_power_supply=args.ext_power,
             hydrophone_range_mv=scan_config.scope.hydrophone_range_mv,
             hydrophone=args.hydrophone or None,
-            calibration_path=args.calibration_path or None,
+            calibration_path=args.calibration_path or setup.hydrophone_state_path,
+            setup_data=setup.root,
         )
 
     with ExitStack() as stack:

@@ -16,7 +16,7 @@ import logging
 
 import numpy as np
 
-from openlifu_verification import ScanResult, VerificationTank, paths, set_log_level
+from openlifu_verification import ScanResult, VerificationTank, set_log_level, setup_data
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ def main():
     parser.add_argument("--hydrophone", type=str, default="",
                         help="Hydrophone calibration file or bare ID.")
     parser.add_argument("--calibration-path", type=str,
-                        default=str(paths.HYDROPHONE_STATE_PATH))
+                        default=str(setup_data.SetupData.active().hydrophone_state_path))
     parser.add_argument("--raw-mv", action="store_true",
                         help="Skip the mV->Pa calibration even if a "
                              "hydrophone ID is saved. Position calibration "

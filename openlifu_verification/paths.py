@@ -1,49 +1,32 @@
-"""Centralized default paths for configuration and reference data.
+"""Centralized default paths.
 
-All machine-local state lives under ``config/`` in the CWD
-so scripts, notebooks, and the report generator agree on one spot::
-
-    <cwd>/
-      config/
-        hydrophone.json           # last-known hydrophone position + ID
-        hydrophone_calibrations/  # HNR0500-<sn>_*.txt files
+Machine-local state (registries, hydrophone calibrations, transducer
+pinmaps, last hydrophone position) lives in one setup data folder
+shared by the GUI and every script (see :mod:`.setup_data`). Its
+location is stored in :data:`SETUP_DATA_LOCATION_FILE` and defaults
+to :data:`DEFAULT_SETUP_DATA_DIR`. New folders are seeded from the
+template shipped inside the package.
 
 Scan settings are NOT read from here: the standard configuration is
 built into :class:`~openlifu_verification.ScanConfig`.
-
-The repo ships a ``setup_data/`` template (hydrophone calibrations and
-empty tester / console registries, see :mod:`.setup_data`). The GUI
-copies it into its setup data folder on first use; bare hydrophone IDs
-in scripts still resolve against the bundled calibrations.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-#: Repo root (parent of ``openlifu_verification/``).
-REPO_ROOT = Path(__file__).resolve().parent.parent
+#: Setup data template shipped as package data (see :mod:`.setup_data`).
+BUNDLED_SETUP_DATA_DIR = Path(__file__).resolve().parent / "setup_data_template"
 
-# ----------------------------------------------------------------------
-# CWD-relative defaults (what user commands write to / read from).
-# ----------------------------------------------------------------------
-#: User-editable configuration folder (relative to CWD).
-CONFIG_DIR = Path("config")
+#: Shipped calibration files. Last-resort search directory for bare
+#: hydrophone IDs.
+BUNDLED_CALIBRATIONS_DIR = BUNDLED_SETUP_DATA_DIR / "hydrophone_calibrations"
 
-#: Persisted hydrophone state (position + last-used ID).
-HYDROPHONE_STATE_PATH = CONFIG_DIR / "hydrophone.json"
+#: Per-user folder for app state.
+USER_DIR = Path.home() / ".openlifu_verification"
 
-#: Local calibration-file cache (CWD-relative).
-CALIBRATIONS_DIR = CONFIG_DIR / "hydrophone_calibrations"
+#: Default setup data folder.
+DEFAULT_SETUP_DATA_DIR = USER_DIR / "setup_data"
 
-# ----------------------------------------------------------------------
-# Repo-shipped fallbacks (absolute).
-# ----------------------------------------------------------------------
-#: Repo-shipped setup data template (see :mod:`.setup_data`).
-BUNDLED_SETUP_DATA_DIR = REPO_ROOT / "setup_data"
-
-#: Repo-bundled calibration files. Used as the last-resort search
-#: directory so the shipped hydrophones "just work" from any CWD.
-REPO_CALIBRATIONS_DIR = BUNDLED_SETUP_DATA_DIR / "hydrophone_calibrations"
-
-#: Default setup data folder for the GUI (changeable in the launcher).
-DEFAULT_SETUP_DATA_DIR = Path.home() / ".openlifu_verification" / "setup_data"
+#: Text file holding the active setup data folder (written by the GUI
+#: launcher and ``openlifu-setup-data``).
+SETUP_DATA_LOCATION_FILE = USER_DIR / "setup_data_location.txt"

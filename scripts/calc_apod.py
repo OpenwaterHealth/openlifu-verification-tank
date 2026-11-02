@@ -23,8 +23,9 @@ Examples::
     python scripts/calc_apod.py --type disk --x0 0 --y0 0 --r 6 --invert
 
 The ``--transducer`` flag selects which JSON pinmap to consult;
-by default the tool auto-detects ``transducers/openlifu_1x_evt1.json``
-(or ``openlifu_2x_evt1.json``) matching the ``--num-modules`` flag.
+by default the tool uses ``transducers/openlifu_1x.json`` (or
+``openlifu_2x.json``) in the setup data folder, matching the
+``--num-modules`` flag.
 """
 from __future__ import annotations
 
@@ -36,16 +37,15 @@ from typing import Iterable, Optional
 import numpy as np
 
 from openlifu_verification import apodization as apo
+from openlifu_verification.setup_data import SetupData
 from openlifu_verification.verificationtank import _TransducerData
-
-
-REPO_ROOT = Path(__file__).parent.parent.resolve()
 
 
 def _default_transducer_path(num_modules: int) -> Path:
     """Mirror ``VerificationTank`` transducer path resolution."""
-    return (REPO_ROOT / "transducers" /
-            f"openlifu_{num_modules}x_evt1.json")
+    setup = SetupData.active()
+    setup.initialize()
+    return setup.transducer_path(num_modules)
 
 
 def _load_transducer(path: Path) -> _TransducerData:
