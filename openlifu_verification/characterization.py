@@ -1587,11 +1587,26 @@ class Characterization:
         expected = self.expected_console_hwid
         if expected and expected not in (info.console_hwid,
                                          info.console_hwid_hex):
-            msg = (f"Connected console hardware ID "
-                   f"{info.console_hwid or '(unreadable)'} does not match "
-                   f"{expected}, recorded for console {self.prefs.console_sn}")
-            logger.error("%s. Stopping the run.", msg)
-            raise RunHalted(msg + ".")
+            # Consoles registered from older reports hold the legacy
+            # 6-byte base58 form: accept it, but ask for the full ID.
+            from openlifu_sdk.util.hwid import encode_hwid
+            try:
+                legacy = encode_hwid(bytes.fromhex(info.console_hwid_hex),
+                                     base58=True, legacy_6byte=True)
+            except ValueError:
+                legacy = ""
+            if expected == legacy:
+                logger.warning(
+                    "Console %s is registered with the legacy 6-byte "
+                    "hardware ID %s; re-register it with the full ID %s.",
+                    self.prefs.console_sn, expected, info.console_hwid)
+            else:
+                msg = (f"Connected console hardware ID "
+                       f"{info.console_hwid or '(unreadable)'} does not "
+                       f"match {expected}, recorded for console "
+                       f"{self.prefs.console_sn}")
+                logger.error("%s. Stopping the run.", msg)
+                raise RunHalted(msg + ".")
         self._check_abort()
         # Refine hydrophone depth via plane-wave arrival BEFORE the
         # peak search so find_peak fires focused pulses at the true

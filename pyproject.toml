@@ -11,10 +11,12 @@ dependencies = [
     "scipy",
     "matplotlib",
     "picosdk",
-    "openlifu-sdk",
+    # Pinned to the openlifu-sdk#111 commit that adds
+    # ``get_hardware_id(base58=True)``; move to a release tag once it
+    # is merged and tagged.
+    "openlifu-sdk @ git+https://github.com/OpenwaterHealth/openlifu-sdk.git@409f0214a413c71c93da025e09f70e6857fcde1a",
     "tqdm",
     "openpyxl",
-    "base58",
 ]
 
 [project.optional-dependencies]
