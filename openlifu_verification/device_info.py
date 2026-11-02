@@ -3,7 +3,7 @@
 Reads what the SDK can tell us about the connected LIFU interface
 (SDK version, TXM/console HW ID + FW version) and packs it into
 :class:`DeviceInfo`. HW IDs are exposed in both hex and base58 forms
-so the report matches whatever the app expects.
+(the base58 form is the full 12-byte UID, as calibration records carry).
 """
 from __future__ import annotations
 
@@ -109,34 +109,29 @@ class DeviceInfo:
 
 
 def _read_hwid(dev, module: int, label: str) -> tuple[str, str]:
-    """Return ``(hex_hwid, base58_hwid)`` for a device, or empty strings."""
+    """Return ``(hex_hwid, base58_hwid)`` for a device, or empty strings.
+
+    ``base58_hwid`` is the SDK's base58 form of the full 12-byte MCU
+    UID -- the form calibration records and the report carry. Records
+    written before this form hold base58 of only the first 6 bytes
+    (``base58=True, legacy_6byte=True`` in the SDK).
+    """
     try:
-        hex_hwid = dev.get_hardware_id(module, raw_hex=True)
-    except TypeError:
-        # Some devices (e.g. HV controller) don't take ``module``.
         try:
+            hex_hwid = dev.get_hardware_id(module, raw_hex=True)
+            args: tuple = (module,)
+        except TypeError:
+            # Some devices (e.g. HV controller) don't take ``module``.
             hex_hwid = dev.get_hardware_id(raw_hex=True)
-        except Exception as e:
-            logger.warning("Could not read %s HW ID: %s", label, e)
-            return "", ""
+            args = ()
     except Exception as e:
         logger.warning("Could not read %s HW ID: %s", label, e)
         return "", ""
 
     try:
-        # Match the test app's HWID convention *exactly* so the XLSX we
-        # emit is byte-identical to what the app would produce for the
-        # same device. The app slices ``hwid_hex[:HW_ID_DATA_LENGTH]``
-        # (12 hex chars = 6 bytes) before base58-encoding -- see
-        # openlifu-test-app/test_reports/test_reports.py. That's what
-        # ends up in the report/config schema, so we mirror it.
-        import base58
-        from openlifu_sdk.io.LIFUConfig import HW_ID_DATA_LENGTH
-        b58 = base58.b58encode(
-            bytes.fromhex(hex_hwid[:HW_ID_DATA_LENGTH])
-        ).decode("utf-8")
+        b58 = dev.get_hardware_id(*args, base58=True)
     except Exception as e:
-        logger.warning("Could not base58-encode %s HW ID: %s", label, e)
+        logger.warning("Could not read %s base58 HW ID: %s", label, e)
         b58 = ""
     return hex_hwid, b58
 

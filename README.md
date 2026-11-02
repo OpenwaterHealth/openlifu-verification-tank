@@ -167,7 +167,7 @@ hydrophone.json                            last hydrophone position
 last_setup.json                            last tester / console / hydrophone
 ```
 
-The tester and console lists start empty; run with `--add-items` to add a missing, well-formed ID from the launcher (this flag also shows the "…" buttons for changing the setup data and reports folders). `--use-last-setup` pre-fills the tester, console and hydrophone from the previous run. The frequency is set from the TXM S/N (`WLM24Q#####` = 155 kHz, `WLM44Q#####` = 400 kHz). A run halts if the connected console's hardware ID doesn't match the one registered for the console S/N. `--no-validate` accepts any TXM S/N, tester and console (frequency picked by hand, no console HWID check); the hydrophone must still be registered.
+The tester and console lists start empty; run with `--add-items` to add a missing, well-formed ID from the launcher (this flag also shows the "…" buttons for changing the setup data and reports folders). `--use-last-setup` pre-fills the tester, console and hydrophone from the previous run. The frequency is set from the TXM S/N (`WLM24Q#####` = 155 kHz, `WLM44Q#####` = 400 kHz). A run halts if the connected console's hardware ID doesn't match the one registered for the console S/N. Hardware IDs are base58 of the full 12-byte UID; a console registered with the older 6-byte form is accepted with a warning to re-register it. `--no-validate` accepts any TXM S/N, tester and console (frequency picked by hand, no console HWID check); the hydrophone must still be registered.
 
 ## Safety and Best Practices
 
