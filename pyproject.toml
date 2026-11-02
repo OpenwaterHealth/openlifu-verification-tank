@@ -11,10 +11,11 @@ dependencies = [
     "scipy",
     "matplotlib",
     "picosdk",
-    "openlifu-sdk",
+    # openlifu-sdk 2.1.0-rc.3 (pre-release) is the first release with
+    # ``get_hardware_id(base58=True)`` (openlifu-sdk#111).
+    "openlifu-sdk @ git+https://github.com/OpenwaterHealth/openlifu-sdk.git@2.1.0-rc.3",
     "tqdm",
     "openpyxl",
-    "base58",
     # run_report_gui (QtCore / QtGui / QtWidgets / QtTest only).
     "PySide6-Essentials==6.12.0",
 ]

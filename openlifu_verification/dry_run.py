@@ -475,8 +475,11 @@ class _DryDevice:
     def get_version(self, *_):
         return self._fw_version
 
-    def get_hardware_id(self, *_, raw_hex=False):
-        return self._hwid_hex
+    def get_hardware_id(self, *_, raw_hex=False, base58=False,
+                        legacy_6byte=False):
+        from openlifu_sdk.util.hwid import encode_hwid
+        return encode_hwid(bytes.fromhex(self._hwid_hex), raw_hex, base58,
+                           legacy_6byte)
 
 
 class _DryLifu:

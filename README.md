@@ -138,36 +138,30 @@ Comprehensive API documentation is available in the `docs/` directory:
 
 ## Configuration
 
-### Transducer Setup
-Transducer configurations are stored as JSON files in the `transducers/` directory:
-```json
-{
-  "name": "OpenLIFU 1x180 EVT1",
-  "frequency_hz": 1000000,
-  "element_count": 180,
-  "geometry": "...",
-  "focus_distance_mm": 30.0
-}
+### Setup Data
+The GUI and every script share one setup data folder (default `~/.openlifu_verification/setup_data`). Create it, add any template files missing from an existing one, or switch to another folder with:
+
+```
+openlifu-setup-data [FOLDER]        # or: python -m openlifu_verification.setup_data
 ```
 
-### Hydrophone Calibration
-The repo's `setup_data/hydrophone_calibrations/` folder ships the known calibration files. Supports standard formats from:
-- Onda Corporation
-- Precision Acoustics  
-- Other manufacturers using similar text-based formats
-
-### Setup Data (GUI)
-`scripts/run_report_gui.py` only accepts testers, consoles and hydrophones registered in its setup data folder (default `~/.openlifu_verification/setup_data`, changeable in the launcher or with `--setup-data`). A new folder is seeded from the repo's `setup_data/` template:
+The GUI and `VerificationTank` also copy in any missing template files on first use. The template ships inside the package (`openlifu_verification/setup_data_template/`); existing files are never overwritten:
 
 ```
 testers/testers.json                       {"<tester ID>": {"Name": "<name>"}}
 consoles/consoles.json                     {"WL134Q#####": {"HWID": "<hardware ID>"}}
 hydrophone_calibrations/hydrophones.json   {"HYDRO####": {"Calibration": "<file in this folder>"}}
-hydrophone.json                            last hydrophone position
-last_setup.json                            last tester / console / hydrophone
+hydrophone_calibrations/<calibration files>
+transducers/openlifu_1x.json, openlifu_2x.json   transducer pinmaps
+hydrophone.json                            last hydrophone position + ID (used when --hydrophone is omitted)
+last_setup.json                            last tester / console / hydrophone (GUI)
 ```
 
-The tester and console lists start empty; run with `--add-items` to add a missing, well-formed ID from the launcher (this flag also shows the "…" buttons for changing the setup data and reports folders). `--use-last-setup` pre-fills the tester, console and hydrophone from the previous run. The frequency is set from the TXM S/N (`WLM24Q#####` = 155 kHz, `WLM44Q#####` = 400 kHz). A run halts if the connected console's hardware ID doesn't match the one registered for the console S/N. `--no-validate` accepts any TXM S/N, tester and console (frequency picked by hand, no console HWID check); the hydrophone must still be registered.
+Bare hydrophone IDs (e.g. `--hydrophone 2246`) resolve against `hydrophone_calibrations/` in the setup data folder. Supported calibration formats come from Onda Corporation, Precision Acoustics and other manufacturers using similar text-based formats.
+
+`scripts/run_report_gui.py` only accepts testers, consoles and hydrophones registered in the setup data folder (changeable in the launcher or with `--setup-data`; the folder picked in the launcher becomes the active one for the scripts too).
+
+The tester and console lists start empty; run with `--add-items` to add a missing, well-formed ID from the launcher (this flag also shows the "…" buttons for changing the setup data and reports folders). `--use-last-setup` pre-fills the tester, console and hydrophone from the previous run. The frequency is set from the TXM S/N (`WLM24Q#####` = 155 kHz, `WLM44Q#####` = 400 kHz). A run halts if the connected console's hardware ID doesn't match the one registered for the console S/N. Hardware IDs are base58 of the full 12-byte UID; a console registered with the older 6-byte form is accepted with a warning to re-register it. `--no-validate` accepts any TXM S/N, tester and console (frequency picked by hand, no console HWID check); the hydrophone must still be registered.
 
 ## Safety and Best Practices
 
