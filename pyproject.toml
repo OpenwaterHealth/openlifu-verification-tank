@@ -15,14 +15,11 @@ dependencies = [
     "tqdm",
     "openpyxl",
     "base58",
+    # run_report_gui (QtCore / QtGui / QtWidgets / QtTest only).
+    "PySide6-Essentials==6.12.0",
 ]
 
 [project.optional-dependencies]
-# ``run_report_gui`` uses PyQt6 for the launcher dialog. Kept
-# optional so headless / CLI-only installs don't need it.
-gui = [
-    "PyQt6",
-]
 # Building the Windows executable (OpenLIFU-VerificationTank.spec) and
 # running the test suite.
 dev = [
@@ -30,5 +27,12 @@ dev = [
     "pytest",
 ]
 
+[project.scripts]
+openlifu-setup-data = "openlifu_verification.setup_data:main"
+
 [tool.setuptools]
 packages = ["openlifu_verification"]
+
+[tool.setuptools.package-data]
+# Template copied into the setup data folder (see setup_data.py).
+openlifu_verification = ["setup_data_template/*/*"]

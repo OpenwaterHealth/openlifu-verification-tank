@@ -49,14 +49,14 @@ from pathlib import Path
 from typing import Optional
 
 # Vendored subset of the CLI arg parser. Import first so a --help
-# invocation on a machine without PyQt6 still works.
+# invocation on a machine without PySide6 still works.
 import run_report
 
-from PyQt6.QtCore import (
-    Qt, QEvent, QObject, QSettings, QThread, QTimer, QUrl, pyqtSignal,
+from PySide6.QtCore import (
+    Qt, QEvent, QObject, QSettings, QThread, QTimer, QUrl, Signal,
 )
-from PyQt6.QtGui import QDesktopServices, QFont, QFontMetrics, QTextCursor
-from PyQt6.QtWidgets import (
+from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QTextCursor
+from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
@@ -619,7 +619,7 @@ class _LogBridge(QObject):
     """
 
     # (formatted_line, raw_message)
-    message = pyqtSignal(str, str)
+    message = Signal(str, str)
 
 
 class _QtLogHandler(logging.Handler):
@@ -656,19 +656,19 @@ class _RunSignals(QObject):
     """Qt signal bundle so the worker can post progress + result back
     to the GUI thread without touching widgets directly."""
 
-    finished = pyqtSignal(object, bool)  # (RunResult, can_write)
-    failed = pyqtSignal(str)       # emits traceback string
+    finished = Signal(object, bool)  # (RunResult, can_write)
+    failed = Signal(str)       # emits traceback string
     #: Emitted when the run stopped because the operator pressed Abort.
-    aborted = pyqtSignal()
+    aborted = Signal()
     #: Emitted when the run stopped because depth calibration or the
     #: peak search failed. Payload is the operator-facing reason.
-    halted = pyqtSignal(str)
+    halted = Signal(str)
     #: Emitted after a device write requested from the result dialog.
-    write_done = pyqtSignal(bool)
+    write_done = Signal(bool)
     #: Emitted when the run aborted because a required piece of
     #: hardware is disconnected. Payload is a short, user-facing
     #: message (no traceback).
-    hardware_disconnected = pyqtSignal(str, str)  # (hardware, message)
+    hardware_disconnected = Signal(str, str)  # (hardware, message)
 
 
 class _WorkerThread(QThread):
@@ -756,7 +756,7 @@ class _HardwarePoller(QThread):
     ``{name: present}``, or ``None`` if the probe failed. Must be
     stopped before a run opens the scope."""
 
-    status = pyqtSignal(object)
+    status = Signal(object)
 
     def __init__(self, ext_power_supply: bool, interval_s: float = 1.0,
                  parent: Optional[QObject] = None):
@@ -1629,7 +1629,6 @@ class _GateRow(QWidget):
         # Timer that animates the CHECKING glyph. Owned per row so
         # rows can independently sit in CHECKING; only started when
         # the row enters the CHECKING state.
-        from PyQt6.QtCore import QTimer
         self._timer = QTimer(self)
         self._timer.setInterval(180)
         self._timer.timeout.connect(self._tick)
@@ -1756,7 +1755,7 @@ class RunningDialog(QDialog):
     """
 
     #: Emitted once when the operator presses Abort.
-    abort_requested = pyqtSignal()
+    abort_requested = Signal()
 
     def __init__(self, *, phases: list[_Phase], dry_run: bool = False,
                  parent: Optional[QWidget] = None):
@@ -1939,7 +1938,7 @@ class ResultDialog(QDialog):
     :attr:`choice` is ``"another"`` or ``"exit"``.
     """
 
-    write_requested = pyqtSignal()
+    write_requested = Signal()
 
     _TIP_NOT_PASSING = ("Calibration Data can only be written from a "
                         "successful report")
@@ -2214,7 +2213,7 @@ def main(argv=None) -> int:
     # heavy QSS overrides and looks identical on Windows / macOS /
     # Linux so the theme renders the same everywhere.
     try:
-        from PyQt6.QtWidgets import QStyleFactory
+        from PySide6.QtWidgets import QStyleFactory
         fusion = QStyleFactory.create("Fusion")
         if fusion is not None:
             app.setStyle(fusion)

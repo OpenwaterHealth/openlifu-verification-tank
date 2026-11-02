@@ -11,9 +11,9 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import run_report_gui as gui  # noqa: E402
-from PyQt6.QtCore import Qt  # noqa: E402
-from PyQt6.QtTest import QTest  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QPushButton  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton  # noqa: E402
 
 from openlifu_verification.setup_data import (  # noqa: E402
     CONSOLES,

@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import run_report  # noqa: E402
 import run_report_gui as gui  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox  # noqa: E402
 
 from openlifu_verification.characterization import ReportRow  # noqa: E402
 
