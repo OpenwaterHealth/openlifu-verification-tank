@@ -39,6 +39,10 @@ def main():
     parser.add_argument("--x", type=float, default=0.0)
     parser.add_argument("--y", type=float, default=0.0)
     parser.add_argument("--z", type=float, default=50.0)
+    parser.add_argument("--from-saved-xy", action="store_true",
+                        help="Treat --x/--y as offsets from the saved "
+                             "hydrophone x/y in --calibration-path instead of "
+                             "absolute coords (--z stays absolute).")
     # --- Capture ---
     parser.add_argument("--no-scope", action="store_true",
                         help="Do not open the Picoscope. Fire the TX pulse only "
@@ -101,7 +105,12 @@ def main():
                 interval_msec=args.interval_msec,
                 apodization=args.apodization,
             )
-            ver.set_focus(args.x, args.y, args.z)
+            x, y = args.x, args.y
+            if args.from_saved_xy:
+                x += float(ver.hydrophone_position[0])
+                y += float(ver.hydrophone_position[1])
+            logger.info("Focus: (%.3f, %.3f, %.3f) mm", x, y, args.z)
+            ver.set_focus(x, y, args.z)
             ver.enable_hv_output(wait=True)
 
             input("Press Enter to start")
@@ -133,7 +142,7 @@ def main():
                         metadata={
                             "voltage_V": float(resolved["voltage"]),
                             "frequency_kHz": float(resolved["frequency_kHz"]),
-                            "focus_mm": np.array([args.x, args.y, args.z], dtype=float),
+                            "focus_mm": np.array([x, y, args.z], dtype=float),
                         },
                     )
     except (ConnectionError, ValueError, Exception) as e:

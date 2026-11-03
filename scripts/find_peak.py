@@ -111,6 +111,10 @@ def main():
                         default=True,
                         help="Cross-correlate repeats before averaging "
                              "(only meaningful when --n-averages > 1).")
+    parser.add_argument("--metric", choices=("pnp", "rms"), default="pnp",
+                        help="Quantity to maximise: 'pnp' (default) is the "
+                             "mean negative peak in the window after transmit "
+                             "RF pickup ends; 'rms' is the whole-capture RMS.")
     parser.add_argument("--pause", action="store_true",
                         help="Pause for a keypress at the end of every "
                              "iteration (after each set of 5 samples: 4 "
@@ -226,6 +230,7 @@ def main():
                 sampling_interval_ns=args.sampling_interval_ns,
                 n_averages=args.n_averages,
                 align=args.align,
+                metric=args.metric,
                 plot=True,
                 store=True,
                 save=args.save_calibration,

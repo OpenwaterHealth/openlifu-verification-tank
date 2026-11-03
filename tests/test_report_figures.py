@@ -19,7 +19,7 @@ FIGURE_ROWS = {
     "scan_2d": ("peak_x_mm", "peak_y_mm"),
     "lateral_1d": ("lateral_peak_offset_mm",),
     "elevation_1d": ("elevation_peak_offset_mm",),
-    "axial_1d": ("peak_z_focus_mm",),
+    "axial_1d": ("axial_peak_offset_mm",),
     "waveform_at_peak": ("pnp_at_peak_MPa",),
     "freq_response": ("freq_deviation_pct",),
     "voltage_linearity": ("voltage_r2",),

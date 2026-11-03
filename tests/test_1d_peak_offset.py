@@ -6,6 +6,7 @@ peak, so both reduce the scan with PNP (not Vpp).
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from openlifu_verification import AcceptanceCriteria, ScanConfig
 from openlifu_verification.characterization import (
@@ -65,3 +66,21 @@ def test_1d_offset_limit_is_frequency_dependent():
         chz.report.scans["elevation_1d"] = scan
         chz.report.set_row(ROW["elevation_peak_offset_mm"], "x", 0.0, unit="mm")
         assert chz._grade_elevation_peak_offset() is expected
+
+
+@pytest.mark.parametrize("peak_dz, expected", [
+    (-6.0, False), (-5.0, True), (0.0, True), (10.0, True), (11.0, False),
+])
+def test_axial_peak_graded_against_asymmetric_window(peak_dz, expected):
+    assert AcceptanceCriteria().peak_offset.axial_1d_window_mm == [-5.0, 10.0]
+    zs = np.arange(-20.0, 21.0)
+    traces = np.zeros((zs.size, 3))
+    traces[:, 1] = -np.exp(-(zs - peak_dz) ** 2 / 50.0) * 1e6
+    chz = _chz(400.0)
+    chz.report.scans["axial_1d"] = ScanResult(
+        scan_type="1d", t=np.arange(3.0), traces=traces,
+        coords={"zfoci": zs}, units="Pa")
+    chz.report.set_row(ROW["axial_peak_offset_mm"], "x", 0.0, unit="mm")
+    assert chz._grade_axial_peak_offset() is expected
+    assert chz.report.rows[ROW["axial_peak_offset_mm"]].status == (
+        "PASS" if expected else "FAIL")

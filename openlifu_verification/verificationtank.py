@@ -13,6 +13,7 @@ from .scan_results import ScanResult
 from .hydrophone import Hydrophone
 from .setup_data import SetupData
 from .pulse_align import align_pulse_traces
+from .pnp import clean_pnp_window_us, emitted_duration_us, windowed_pnp
 
 from openlifu_sdk.io import LIFUInterface
 from openlifu_sdk.io.exceptions import LIFUError, LIFUNotConnectedError
@@ -711,6 +712,24 @@ class VerificationTank:
                 if not self.lifu.txdevice.write_block(identifier=txi, start_address=addr, reg_values=reg_values):
                     logger.error(f"Error applying TX CHIP ID: {txi} registers")
         self.focus_args = (x, y, z, apodizations)
+
+    def focus_timing_us(self, x, y, z, hydrophone_mm=None) -> tuple[float, float, float]:
+        """``(first_arrival_us, last_arrival_us, max_delay_us)`` for a
+        :meth:`set_focus` at ``(x, y, z)`` mm, seen by a hydrophone at
+        ``hydrophone_mm`` (default: at the focus).
+
+        Element ``i`` fires at ``tof_f.max() - tof_f[i]`` and its wavefront
+        reaches the hydrophone ``tof_h[i]`` later; at the focus all arrive
+        together at ``tof_f.max()``."""
+        if self.arr is None:
+            raise RuntimeError("Transducer array not loaded; cannot compute delays.")
+        positions = self.arr.get_positions(units="mm")
+        focus = np.array([x, y, z], dtype=float)
+        hydrophone = focus if hydrophone_mm is None else np.asarray(hydrophone_mm, dtype=float)
+        tof_f = np.linalg.norm(focus - positions, axis=1) * 1e-3 / SPEED_OF_SOUND * 1e6
+        tof_h = np.linalg.norm(hydrophone - positions, axis=1) * 1e-3 / SPEED_OF_SOUND * 1e6
+        arrivals = tof_f.max() - tof_f + tof_h
+        return float(arrivals.min()), float(arrivals.max()), float(tof_f.max() - tof_f.min())
 
     def set_pulse(self, frequency_kHz, duration_usec):
         pulse_profile = Tx7332PulseProfile(
@@ -1843,6 +1862,7 @@ class VerificationTank:
                 "voltage_V": float(self.hv_voltage) if self.hv_voltage is not None else float("nan"),
                 "captured_mask": ok_mask,
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
+                "focus_points_mm": np.asarray(focus_points, dtype=float),
                 "absolute": bool(absolute),
                 "n_averages": int(n_averages),
                 "align": bool(align),
@@ -1985,6 +2005,7 @@ class VerificationTank:
                 "voltage_V": float(self.hv_voltage) if self.hv_voltage is not None else float("nan"),
                 "captured_mask": ok_mask,
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
+                "focus_points_mm": np.asarray(focus_points, dtype=float),
                 "absolute": bool(absolute),
                 "n_averages": int(n_averages),
                 "align": bool(align),
@@ -2847,6 +2868,8 @@ class VerificationTank:
                   sampling_interval_ns=100,
                   n_averages=1,
                   align=True,
+                  metric="rms",
+                  pnp_window_us=None,
                   plot=False,
                   store=True,
                   save=False,
@@ -2919,6 +2942,13 @@ class VerificationTank:
                 average per probe. Default 1.
             align: Cross-correlate repeats before averaging.
                 Default ``True``.
+            metric: Quantity the search maximises. ``"rms"`` (default)
+                is the RMS over the whole capture; ``"pnp"`` is the mean
+                of the negative peaks in the interference-free window
+                (see :mod:`openlifu_verification.pnp`).
+            pnp_window_us: ``(start, stop)`` window for ``metric="pnp"``.
+                ``None`` derives it from the configured pulse and the
+                array geometry at the start point.
             plot: Live matplotlib figure. Default ``False``.
             store: Update ``self.hydrophone_position`` with the
                 located ``(x, y, z)``. Default ``True``.
@@ -2939,6 +2969,8 @@ class VerificationTank:
                 f"find_peak method must be 'grid' or 'gradient', "
                 f"got {method!r}"
             )
+        if metric not in ("rms", "pnp"):
+            raise ValueError(f"find_peak metric must be 'rms' or 'pnp', got {metric!r}")
 
         if z is None:
             z = float(self.hydrophone_position[2])
@@ -2947,12 +2979,26 @@ class VerificationTank:
         if y0 is None:
             y0 = float(self.hydrophone_position[1])
 
+        cfg = self.lifu_config or {}
+        freq_kHz = float(cfg.get("frequency_kHz", self.frequency))
+        if metric == "pnp" and pnp_window_us is None:
+            if "duration_usec" not in cfg:
+                raise RuntimeError("metric='pnp' needs a configured pulse; call apply_pulse first.")
+            first_us, last_us, max_delay_us = self.focus_timing_us(x0, y0, z)
+            pnp_window_us = clean_pnp_window_us(
+                duration_us=emitted_duration_us(cfg["duration_usec"], freq_kHz),
+                arrival_us=first_us, last_arrival_us=last_us, max_delay_us=max_delay_us,
+            )
+        metric_name = "mean PNP" if metric == "pnp" else "RMS"
+        if metric == "pnp":
+            logger.info("find_peak: metric = mean PNP in %.1f-%.1f us", *pnp_window_us)
+
         handles = None
         on_progress = None
         if plot:
             handles = search.make_live_figure()
             handles["ax_scatter"].set_title(
-                f"find_peak @ z={z:.2f} mm  (color = RMS)"
+                f"find_peak @ z={z:.2f} mm  (color = {metric_name})"
             )
 
             def on_progress(**kw):
@@ -2979,7 +3025,7 @@ class VerificationTank:
                         pass
 
         def measure_fn(x, y):
-            return self.measure_pressure(
+            meas = self.measure_pressure(
                 x, y, z,
                 time_start_s=time_start_s,
                 time_stop_s=time_stop_s,
@@ -2987,6 +3033,12 @@ class VerificationTank:
                 n_averages=n_averages,
                 align=align,
             )
+            if meas is not None and metric == "pnp":
+                # The search algorithms maximise meas["rms"].
+                m = windowed_pnp(meas["t"], meas["trace"], pnp_window_us,
+                                 frequency_kHz=freq_kHz)["mean"]
+                meas["rms"] = m if np.isfinite(m) else 0.0
+            return meas
 
         if method == "grid":
             logger.info(
@@ -3032,10 +3084,10 @@ class VerificationTank:
         x, y = result["center_x"], result["center_y"]
         logger.info(
             "find_peak: %s at center (%.4f, %.4f, %.4f) mm  "
-            "RMS=%.4g %s  (global max sample=%.4g %s at "
+            "%s=%.4g %s  (global max sample=%.4g %s at "
             "(%.4f, %.4f))  (%d iterations, %d evaluations)",
             "converged" if result["converged"] else "hit max_iter",
-            x, y, z, result["center_rms"], result["units"],
+            x, y, z, metric_name, result["center_rms"], result["units"],
             result["best_rms"], result["units"],
             result["best_x"], result["best_y"],
             result["iterations"], result["evaluations"],

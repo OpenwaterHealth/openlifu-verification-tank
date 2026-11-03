@@ -145,15 +145,6 @@ SECTION_HEADERS = [
 # ----------------------------------------------------------------------
 # Small helpers
 # ----------------------------------------------------------------------
-def _pnp_MPa_grid(traces: np.ndarray) -> np.ndarray:
-    """Reduce a 2-D or higher trace array to per-point PNP in MPa.
-
-    ``traces`` last axis is time. Returns array with that axis removed.
-    """
-    arr = np.asarray(traces, dtype=float)
-    return -arr.min(axis=-1) / 1e6
-
-
 def _sanitize_stem(name: str) -> str:
     """Filesystem-safe stem for a serial number / path fragment."""
     return re.sub(r"[^A-Za-z0-9\-_]+", "_", str(name)).strip("_") or "unknown"
@@ -261,7 +252,7 @@ def build_figures(report: TestReport) -> dict:
     if s2d is not None:
         xs = s2d.coords.get("xfoci")
         ys = s2d.coords.get("yfoci")
-        pnp_kPa = _pnp_MPa_grid(s2d.traces) * 1000.0
+        pnp_kPa = s2d.reduce("pnp") / 1e3
         extent = (float(xs[0]), float(xs[-1]), float(ys[0]), float(ys[-1]))
         fig, ax = plt.subplots(figsize=(5, 4.6))
         im = ax.imshow(pnp_kPa, extent=extent,
@@ -335,44 +326,27 @@ def build_figures(report: TestReport) -> dict:
     # Figure 4: 1-D axial (z sweep).
     axi = scans.get("axial_1d")
     if axi is not None:
-        zs = axi.coords.get("zfoci")
-        traces = axi.traces
-        traces_2d = np.atleast_2d(traces)
-        if traces_2d.ndim == 3 and traces_2d.shape[1] == 1:
-            traces_2d = traces_2d[:, 0, :]
-        pnp_kPa = _pnp_MPa_grid(traces_2d) * 1000.0
-        zs = np.ravel(np.asarray(zs, dtype=float))
+        # Same reduction the grader uses, so the marked peak is the graded one.
+        zs, pnp_MPa, ipk = _1d_scan_pnp_peak(axi)
+        pnp_kPa = pnp_MPa * 1000.0
         z0 = _scan_origin(axi, 2)
         fig, ax = plt.subplots(figsize=(6, 3.4))
         detail = ""
-        depth_row = report.rows.get(ROW["plane_wave_depth_mm"])
-        focus_row = report.rows.get(ROW["peak_z_focus_mm"])
-        depth = None if depth_row is None else depth_row.value
-        focus = None if focus_row is None else focus_row.value
-        if depth is not None and np.isfinite(depth):
-            dz = float(depth) - z0
-            if crit is not None:
-                tol = float(depth) * float(crit.peak_depth.peak_z_focus_tol_pct) / 100.0
-                ax.axvspan(dz - tol, dz + tol, color="tab:green", alpha=0.12,
-                           label=f"focus pass \u00b1{tol:.2f} mm")
-                if focus is not None and np.isfinite(focus):
-                    detail = (f"focus {float(focus):.2f} mm vs depth {float(depth):.2f} mm, "
-                              f"margin {tol - abs(float(focus) - float(depth)):+.2f} mm")
-            ax.axvline(dz, color="tab:red", lw=0.9,
-                       label=f"plane-wave depth {float(depth):.2f} mm")
-        if focus is not None and np.isfinite(focus):
-            ax.axvline(float(focus) - z0, color="k", ls="--", lw=0.9,
-                       label=f"commanded focus {float(focus):.2f} mm")
+        if crit is not None:
+            lo, hi = (float(v) for v in crit.peak_offset.axial_1d_window_mm)
+            ax.axvspan(lo, hi, color="tab:green", alpha=0.12,
+                       label=f"pass {lo:+g} \u2264 \u0394z \u2264 {hi:+g} mm")
+            detail = (f"offset {zs[ipk]:+.2f} mm, "
+                      f"margin {min(zs[ipk] - lo, hi - zs[ipk]):+.2f} mm")
+        ax.axvline(0.0, color="0.7", lw=0.7)
         ax.plot(zs, pnp_kPa, "o-", lw=1.5, color="tab:green")
-        if pnp_kPa.size == zs.size and pnp_kPa.size:
-            ipk = int(np.argmax(pnp_kPa))
-            ax.plot(zs[ipk], pnp_kPa[ipk], "r*", ms=12,
-                    label=f"axial peak \u0394z = {zs[ipk]:+.2f} mm")
+        ax.plot(zs[ipk], pnp_kPa[ipk], "r*", ms=12,
+                label=f"axial peak \u0394z = {zs[ipk]:+.2f} mm")
         ax.legend(loc="lower right", fontsize=7)
-        ax.set_xlabel(f"\u0394z (z\u2080 = {z0:.2f} mm)")
+        ax.set_xlabel(f"\u0394z commanded focus (z\u2080 = {z0:.2f} mm, hydrophone depth)")
         ax.set_ylabel("PNP (kPa)")
         _title(ax, f"Figure 4: 1-D Axial scan @ {report.frequency_kHz:.0f} kHz, "
-                   f"{report.voltage_V:.0f} V", _status("peak_z_focus_mm"), detail)
+                   f"{report.voltage_V:.0f} V", _status("axial_peak_offset_mm"), detail)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         figs["axial_1d"] = fig
@@ -396,16 +370,34 @@ def build_figures(report: TestReport) -> dict:
         _plot_pulses(ax, t_us, wf.get("pulse_traces"), scale)
         ax.plot(t_us, y, lw=0.9, color="tab:blue", label="median")
         detail = ""
+        win = wf.get("pnp_window_us")
+        if win is not None:
+            ax.axvspan(win[0], win[1], color="tab:green", alpha=0.08,
+                       label=f"PNP window {win[0]:.1f}\u2013{win[1]:.1f} us")
         if in_pa and y.size:
-            i_min = int(np.argmin(y))
-            ax.plot(t_us[i_min], y[i_min], "rv", ms=7,
-                    label=f"PNP {pnp_MPa:.3f} MPa")
+            if win is not None:
+                pk_t = np.asarray(wf.get("pnp_peak_t_us", []), dtype=float)
+                pk_MPa = np.asarray(wf.get("pnp_peak_MPa", []), dtype=float)
+                std_MPa = float(wf.get("pnp_std_MPa", float("nan")))
+                ax.plot(pk_t, -pk_MPa * 1e3, "rv", ms=4,
+                        label=f"negative peaks (n={pk_t.size})")
+                ax.plot(win, [-pnp_MPa * 1e3] * 2, color="tab:red", lw=1.2,
+                        label=f"mean PNP {pnp_MPa:.3f} \u00b1 {std_MPa:.3f} MPa")
+                if np.isfinite(std_MPa):
+                    ax.fill_between(win, -(pnp_MPa + std_MPa) * 1e3,
+                                    -(pnp_MPa - std_MPa) * 1e3,
+                                    color="tab:red", alpha=0.15, lw=0)
+            else:
+                i_min = int(np.argmin(y))
+                ax.plot(t_us[i_min], y[i_min], "rv", ms=7,
+                        label=f"PNP {pnp_MPa:.3f} MPa")
             if crit is not None:
                 ref_V = float(crit.pnp_at_peak.reference_voltage_V)
                 thr_MPa = crit.pnp_min_MPa_for(freq_kHz) * pnp_V / ref_V
                 ax.axhline(-thr_MPa * 1e3, color="firebrick", ls="--", lw=0.9,
                            label=f"pass: PNP \u2265 {thr_MPa:.3f} MPa")
-                detail = (f"PNP {pnp_MPa:.3f} vs \u2265 {thr_MPa:.3f} MPa, "
+                detail = (f"{'mean ' if win is not None else ''}PNP "
+                          f"{pnp_MPa:.3f} vs \u2265 {thr_MPa:.3f} MPa, "
                           f"margin {(pnp_MPa / thr_MPa - 1) * 100:+.1f}%")
         arrival_us = wf.get("arrival_us")
         if arrival_us is not None and np.isfinite(arrival_us):
@@ -414,7 +406,9 @@ def build_figures(report: TestReport) -> dict:
         ax.legend(loc="upper right", fontsize=7)
         ax.set_xlabel("Time (us)")
         ax.set_ylabel(ylabel)
-        _title(ax, f"Figure 5: Waveform at peak, {pnp_V:g} V",
+        dur_us = wf.get("pnp_duration_us")
+        dur_txt = f", {float(dur_us):.0f} us pulse" if dur_us is not None else ""
+        _title(ax, f"Figure 5: Waveform at peak, {pnp_V:g} V{dur_txt}",
                _status("pnp_at_peak_MPa"), detail)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
@@ -426,7 +420,10 @@ def build_figures(report: TestReport) -> dict:
         freqs = np.asarray(fr["frequencies_kHz"], dtype=float)
         pnp_kPa = np.asarray(fr["pnp_MPa"], dtype=float) * 1000.0
         fig, ax = plt.subplots(figsize=(6, 3.4))
-        ax.plot(freqs, pnp_kPa, "o-", lw=1.5)
+        std = fr.get("pnp_std_MPa")
+        ax.errorbar(freqs, pnp_kPa,
+                    yerr=None if std is None else np.asarray(std, dtype=float) * 1000.0,
+                    fmt="o-", lw=1.5, capsize=3)
         detail = ""
         if pnp_kPa.size and pnp_kPa.size == freqs.size:
             # Same selection as ``_grade_freq_response``.
@@ -446,7 +443,7 @@ def build_figures(report: TestReport) -> dict:
                 detail = (f"deviation {dev:.1f}% vs \u2264 {max_dev:g}%, "
                           f"margin {max_dev - dev:+.1f} pts")
         ax.set_xlabel("Frequency (kHz)")
-        ax.set_ylabel("PNP (kPa)")
+        ax.set_ylabel("Mean PNP \u00b1 1\u03c3 (kPa)" if std is not None else "PNP (kPa)")
         _title(ax, f"Figure 6: Frequency response @ {report.voltage_V:.0f} V",
                _status("freq_deviation_pct"), detail)
         ax.grid(True, alpha=0.3)
@@ -467,14 +464,17 @@ def build_figures(report: TestReport) -> dict:
         fig, (ax, ax_res) = plt.subplots(
             2, 1, figsize=(6, 4.2), sharex=True,
             gridspec_kw={"height_ratios": (3, 1)})
-        ax.plot(volts, pnp_kPa, "o", label="measured")
+        ax.errorbar(volts, pnp_kPa,
+                    yerr=(None if vr.get("pnp_std_MPa") is None
+                          else np.asarray(vr["pnp_std_MPa"], dtype=float) * 1000.0),
+                    fmt="o", capsize=3, label="measured")
         ax.plot(volts, fit, "-", lw=1, label=f"fit (R\u00b2 = {r2:.4f})")
         detail = ""
         if crit is not None:
             r2_min = float(crit.voltage_linearity.r2_min)
             detail = (f"R\u00b2 {r2:.4f} vs \u2265 {r2_min:g}, "
                       f"margin {r2 - r2_min:+.4f}")
-        ax.set_ylabel("PNP (kPa)")
+        ax.set_ylabel("Mean PNP \u00b1 1\u03c3 (kPa)" if "pnp_std_MPa" in vr else "PNP (kPa)")
         _title(ax, f"Figure 7: Voltage linearity @ {report.frequency_kHz:.0f} kHz",
                _status("voltage_r2"), detail)
         ax.grid(True, alpha=0.3)
@@ -836,7 +836,7 @@ def write_csv_bundle(report: TestReport, out_dir: Path,
     for name, scan in report.scans.items():
         if not isinstance(scan, ScanResult):
             continue
-        pnp = _pnp_MPa_grid(scan.traces)
+        pnp = scan.reduce("pnp") / 1e6
         csv_path = out_dir / f"{name}.csv"
         with csv_path.open("w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
@@ -867,6 +867,11 @@ def write_csv_bundle(report: TestReport, out_dir: Path,
             t=np.asarray(wf["t"]), trace=np.asarray(wf["trace"]),
             units=str(wf.get("units", "")),
             pnp_MPa=float(wf.get("pnp_MPa", float("nan"))),
+            pnp_std_MPa=float(wf.get("pnp_std_MPa", float("nan"))),
+            pnp_window_us=np.asarray(wf.get("pnp_window_us") or (np.nan, np.nan),
+                                     dtype=float),
+            pnp_peak_t_us=np.asarray(wf.get("pnp_peak_t_us", []), dtype=float),
+            pnp_peak_MPa=np.asarray(wf.get("pnp_peak_MPa", []), dtype=float),
             axial_depth_mm=float(wf.get("axial_depth_mm", float("nan"))),
         )
 

@@ -118,7 +118,7 @@ def _standard_plans() -> dict[str, ScanPlan]:
         "155": ScanPlan(
             lateral_1d=Scan1D(extent_mm=9.0, points=37),
             elevation_1d=Scan1D(extent_mm=9.0, points=37),
-            axial_1d=Scan1D(extent_mm=10.0, points=21),
+            axial_1d=Scan1D(extent_mm=20.0, points=41),
             scan_2d=Scan2D(extent_mm=2.0, points=9),
             frequency_sweep=FrequencySweep(offsets_kHz=[
                 -25.0, -20.0, -15.0, -10.0, -5.0, 0.0,
@@ -129,7 +129,7 @@ def _standard_plans() -> dict[str, ScanPlan]:
         "400": ScanPlan(
             lateral_1d=Scan1D(extent_mm=9.0, points=37),
             elevation_1d=Scan1D(extent_mm=9.0, points=37),
-            axial_1d=Scan1D(extent_mm=10.0, points=21),
+            axial_1d=Scan1D(extent_mm=20.0, points=41),
             scan_2d=Scan2D(extent_mm=2.0, points=9),
             frequency_sweep=FrequencySweep(offsets_kHz=[
                 -25.0, -20.0, -15.0, -10.0, -5.0, 0.0,

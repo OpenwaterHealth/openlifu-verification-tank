@@ -72,6 +72,8 @@ class DryRunTank:
         # no effect on the returned traces. Consumers that inspect
         # ``ver.use_calibration`` still see the intended value.
         self.use_calibration = bool(use_calibration)
+        #: Burst duration set by :meth:`apply_pulse`; ``None`` = 20 cycles.
+        self._burst_duration_us: Optional[float] = None
 
     # --- context manager ------------------------------------------------
     def __enter__(self):
@@ -100,10 +102,21 @@ class DryRunTank:
     def set_focus(self, x, y, z):  # noqa: D401 - stub
         return None
 
+    def focus_timing_us(self, x, y, z, hydrophone_mm=None):
+        """Point-source synth: arrival at hydrophone depth / SOS, no steering delay."""
+        zh = float(z) if hydrophone_mm is None else float(hydrophone_mm[2])
+        return zh / 1.5, zh / 1.5, 0.0
+
     def set_pulse(self, *, frequency_kHz=None, **_):
         if frequency_kHz is not None:
             self.frequency = float(frequency_kHz)
         return None
+
+    def apply_pulse(self, *, duration_usec=None, **kwargs):
+        """Records the burst duration; other settings are ignored."""
+        if duration_usec is not None:
+            self._burst_duration_us = float(duration_usec)
+        return {**kwargs, "duration_usec": duration_usec}
 
     def add_log_file(self, *_):
         return None
@@ -143,10 +156,9 @@ class DryRunTank:
         water) with no transmit-delay offset applied.
         """
         arrival_us = float(z_mm) / 1.5
-        # 20-cycle burst @ current frequency.
-        cycles = 20.0
         f_Hz = self.frequency * 1e3
-        burst_dur_us = 1e6 * cycles / f_Hz
+        burst_dur_us = (self._burst_duration_us if self._burst_duration_us is not None
+                        else 1e6 * 20.0 / f_Hz)
         # Flat-top tone burst with one-cycle cosine ramps, so the
         # envelope onset is sharp like a real burst (a full-length
         # raised cosine delays the 15% arrival threshold by ~6 us).
@@ -314,6 +326,7 @@ class DryRunTank:
         coord_axis = np.linspace(scan_range[0], scan_range[1], num)
         t_us = self._make_time_axis(time_start_s, time_stop_s, sampling_interval_ns)
         traces = np.empty((num, t_us.size), dtype=float)
+        foci = []
         for i, v in enumerate(coord_axis):
             if dim == "x":
                 xi, yi, zi = float(v) + x_origin, float(y) + y_origin, z_fixed
@@ -321,8 +334,14 @@ class DryRunTank:
                 xi, yi, zi = float(x) + x_origin, float(v) + y_origin, z_fixed
             else:  # "z"
                 xi, yi, zi = float(x) + x_origin, float(y) + y_origin, float(v) + z_origin
+            foci.append((xi, yi, zi))
             amp = self._amplitude_Pa(xi, yi)
-            traces[i] = self._synth_trace(amp, zi, t_us)
+            if dim == "z":
+                # Focal gain vs commanded focus; peaks slightly deep like a real array.
+                dz = zi - float(self.hydrophone_position[2]) - 2.0
+                amp *= np.exp(-dz ** 2 / (2 * 8.0 ** 2))
+            # The pulse arrives at the (fixed) hydrophone, not the focus.
+            traces[i] = self._synth_trace(amp, float(self.hydrophone_position[2]), t_us)
 
         coord_key = {"x": "xfoci", "y": "yfoci", "z": "zfoci"}[dim]
         return ScanResult(
@@ -339,6 +358,7 @@ class DryRunTank:
                 "frequency_kHz": float(self.frequency),
                 "voltage_V": float(self.hv_voltage) if self.hv_voltage else float("nan"),
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
+                "focus_points_mm": np.asarray(foci, dtype=float),
                 "absolute": bool(absolute),
             },
         )
@@ -385,6 +405,7 @@ class DryRunTank:
                 "frequency_kHz": float(self.frequency),
                 "voltage_V": float(self.hv_voltage) if self.hv_voltage else float("nan"),
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
+                "focus_points_mm": np.array([(xi, yi, float(z)) for yi in ys_abs for xi in xs_abs]),
                 "absolute": bool(absolute),
             },
         )
@@ -412,6 +433,8 @@ class DryRunTank:
         traces = np.empty((freqs.size, t_us.size), dtype=float)
         x, y, z = self.hydrophone_position
         original_freq = self.frequency
+        original_dur = self._burst_duration_us
+        self._burst_duration_us = float(duration_usec)
         try:
             for i, f in enumerate(freqs):
                 self.frequency = float(f)
@@ -419,6 +442,7 @@ class DryRunTank:
                 traces[i] = self._synth_trace(amp, z, t_us)
         finally:
             self.frequency = original_freq
+            self._burst_duration_us = original_dur
         return ScanResult(
             scan_type="frequency",
             t=t_us,

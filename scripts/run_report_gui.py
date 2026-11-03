@@ -1537,14 +1537,14 @@ _GATES: list[dict] = [
         "verdict_res": (_grade_re("Elevation peak offset"),),
         "combine": "first",
     },
-    # --- Focused-pulse measurements (D.12, D.14, D.16) ---
     {
-        "key": "peak_z_focus",
-        "label": "Peak Z focus vs D.3 (D.12)",
-        "start_marker": "Measuring waveform at peak",
-        "verdict_res": (_grade_re("Peak Z focus"),),
+        "key": "axial_peak_offset",
+        "label": "Axial 1-D peak offset (D.12)",
+        "start_marker": "Running 1-D axial",
+        "verdict_res": (_grade_re("Axial peak offset"),),
         "combine": "first",
     },
+    # --- Focused-pulse measurements (D.14, D.16) ---
     {
         "key": "pnp_at_peak",
         "label": "Focused pulse PNP (D.14)",

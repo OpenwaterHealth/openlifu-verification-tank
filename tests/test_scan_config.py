@@ -17,7 +17,7 @@ from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
 _STANDARD_PLAN = {
     "lateral_1d": {"extent_mm": 9.0, "points": 37},
     "elevation_1d": {"extent_mm": 9.0, "points": 37},
-    "axial_1d": {"extent_mm": 10.0, "points": 21},
+    "axial_1d": {"extent_mm": 20.0, "points": 41},
     "scan_2d": {"extent_mm": 2.0, "points": 9},
     "frequency_sweep": {"offsets_kHz": [-25.0, -20.0, -15.0, -10.0, -5.0, 0.0,
                                         5.0, 10.0, 15.0, 20.0, 25.0]},

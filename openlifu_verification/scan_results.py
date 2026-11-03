@@ -84,7 +84,10 @@ class ScanResult:
         """Return a scalar-per-point summary of the traces.
 
         Args:
-            kind: One of ``"vpp"``, ``"vmin"``, ``"vmax"``.
+            kind: One of ``"vpp"``, ``"vmin"``, ``"vmax"``, ``"pnp"``.
+                ``"pnp"`` is ``metadata["window_pnp"]`` (clean-window mean,
+                see :func:`~openlifu_verification.pnp.scan_window_pnp`) when
+                present, otherwise ``-vmin``.
         """
         kind = kind.lower()
         if kind == "vpp":
@@ -93,7 +96,10 @@ class ScanResult:
             return self.vmin
         if kind == "vmax":
             return self.vmax
-        raise ValueError(f"Unknown reduction {kind!r}; use vpp/vmin/vmax.")
+        if kind == "pnp":
+            pnp = self.metadata.get("window_pnp")
+            return -self.vmin if pnp is None else np.asarray(pnp, dtype=float)
+        raise ValueError(f"Unknown reduction {kind!r}; use vpp/vmin/vmax/pnp.")
 
     # ---- plotting -----------------------------------------------------
     def plot(self,
@@ -124,7 +130,7 @@ class ScanResult:
                   coord axis (only meaningful for 1-D sweeps).
 
             reduce: Reduction used by ``"line"``/``"heatmap"`` --
-                ``"vpp"`` (default), ``"vmin"``, or ``"vmax"``.
+                ``"vpp"`` (default), ``"vmin"``, ``"vmax"`` or ``"pnp"``.
             index: Trace picker for ``"trace"``.
             ax: Optional matplotlib Axes to draw into.
             show: Call ``plt.show()`` at the end.
@@ -408,6 +414,7 @@ _REDUCTION_LABELS = {
     "vpp": "Vpp (mV)",
     "vmin": "V min (mV)",
     "vmax": "V max (mV)",
+    "pnp": "PNP (mV)",
 }
 # Base names used by ``ScanResult._reduction_label`` (units are added
 # from ``ScanResult.units`` so mV/Pa scans get the right axis label).
@@ -415,6 +422,7 @@ _REDUCTION_BASES = {
     "vpp": "Vpp",
     "vmin": "V min",
     "vmax": "V max",
+    "pnp": "PNP",
 }
 
 

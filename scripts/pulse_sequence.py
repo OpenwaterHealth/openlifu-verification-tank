@@ -17,6 +17,7 @@ import logging
 import numpy as np
 
 from openlifu_verification import ScanResult, VerificationTank, set_log_level, setup_data
+from openlifu_verification.pnp import clean_pnp_window_us, emitted_duration_us, windowed_pnp
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,10 @@ def main():
     parser.add_argument("--x", type=float, default=0.0)
     parser.add_argument("--y", type=float, default=0.0)
     parser.add_argument("--z", type=float, default=50.0)
+    parser.add_argument("--from-saved-xy", action="store_true",
+                        help="Treat --x/--y as offsets from the saved "
+                             "hydrophone x/y in --calibration-path instead of "
+                             "absolute coords (--z stays absolute).")
     # --- Capture ---
     parser.add_argument("--time-start-us", type=float, default=-10.0,
                         help="Capture window start (µs), relative to the "
@@ -96,6 +101,18 @@ def main():
                              "0xFFFFFFFFFFFFFFFF (default) fires all "
                              "elements. Use scripts/calc_apod.py to build "
                              "one from a shape.")
+    # --- Clean-window PNP ---
+    parser.add_argument("--pnp-start-margin-us", type=float, default=3.0,
+                        help="Settle time after transmit ends (or the pulse "
+                             "arrives, whichever is later) before the PNP "
+                             "window opens (us).")
+    parser.add_argument("--pnp-end-margin-us", type=float, default=3.0,
+                        help="Margin before the end of the acoustic pulse "
+                             "where the PNP window closes (us).")
+    parser.add_argument("--pnp-window-us", type=float, nargs=2, default=None,
+                        metavar=("START", "STOP"),
+                        help="Explicit PNP window (us); overrides the "
+                             "geometry-derived window.")
     # --- Plot / output ---
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-plot", type=str, default="",
@@ -150,8 +167,15 @@ def main():
                 trigger_mode="single",
                 apodization=args.apodization,
             )
-            ver.set_focus(args.x, args.y, args.z)
+            x, y = args.x, args.y
+            if args.from_saved_xy:
+                x += float(ver.hydrophone_position[0])
+                y += float(ver.hydrophone_position[1])
+            logger.info("Focus: (%.3f, %.3f, %.3f) mm", x, y, args.z)
+            ver.set_focus(x, y, args.z)
             ver.enable_hv_output(wait=True)
+            focus_mm = np.array([x, y, args.z], dtype=float)
+            arrival_us, _, max_delay_us = ver.focus_timing_us(x, y, args.z)
 
             # A conservative default: enough time for all pulses to fire
             # plus a couple of seconds of USB/scope margin.
@@ -193,8 +217,11 @@ def main():
                         "voltage_V": float(resolved["voltage"]),
                         "frequency_kHz": float(resolved["frequency_kHz"]),
                         "interval_msec": float(resolved["interval_msec"]),
-                        "duration_usec": float(resolved["duration_usec"]),
-                        "focus_mm": np.array([args.x, args.y, args.z], dtype=float),
+                        "duration_usec": emitted_duration_us(
+                            resolved["duration_usec"], resolved["frequency_kHz"]),
+                        "focus_mm": focus_mm,
+                        "arrival_us": arrival_us,
+                        "max_delay_us": max_delay_us,
                     },
                 )
     except (ConnectionError, ValueError, Exception) as e:
@@ -217,13 +244,52 @@ def main():
         for i in range(n_pulses)
     ])
 
-    logger.info("Per-pulse summary (%s):", scan_result.units)
-    logger.info("  pulse  arrival_us     Vpp        RMS")
+    # --- Clean-window PNP setup ---
+    md = scan_result.metadata
+    freq_kHz = float(md["frequency_kHz"])
+    pnp_scale, pnp_unit = (1e-6, "MPa") if scan_result.units == "Pa" else (1.0, "mV")
+    pnp_window = None
+    try:
+        if args.pnp_window_us is not None:
+            pnp_window = (float(args.pnp_window_us[0]), float(args.pnp_window_us[1]))
+        else:
+            pnp_window = clean_pnp_window_us(
+                duration_us=float(md["duration_usec"]),
+                arrival_us=float(md["arrival_us"]),
+                max_delay_us=float(md["max_delay_us"]),
+                start_margin_us=args.pnp_start_margin_us,
+                end_margin_us=args.pnp_end_margin_us,
+            )
+        logger.info(
+            "Clean PNP window: %.2f - %.2f us (tx end=%.2f us, arrival=%.2f us, "
+            "pulse=%.2f us)", *pnp_window,
+            float(md["duration_usec"]) + float(md["max_delay_us"]),
+            float(md["arrival_us"]), float(md["duration_usec"]),
+        )
+        if pnp_window[1] > t_us[-1]:
+            logger.warning(
+                "PNP window ends at %.2f us but capture stops at %.2f us; "
+                "increase --time-stop-us.", pnp_window[1], t_us[-1])
+        pulse_pnp = [windowed_pnp(t_us, traces[i], pnp_window, frequency_kHz=freq_kHz)
+                     for i in range(n_pulses)]
+    except ValueError as e:
+        logger.warning("Skipping clean-window PNP: %s", e)
+        pnp_window = None
+        pulse_pnp = None
+
+    logger.info("Per-pulse summary (%s; window PNP in %s):", scan_result.units, pnp_unit)
+    logger.info("  pulse  arrival_us     Vpp        RMS     PNPmax   PNPmean   PNPstd  npk")
     for i in range(n_pulses):
         arr = arrivals_us[i]
         arr_str = f"{arr:8.3f}" if np.isfinite(arr) else "     nan"
-        logger.info("  %5d   %s   %.4g   %.4g",
-                    i, arr_str, vpp[i], rms[i])
+        if pulse_pnp is not None:
+            p = pulse_pnp[i]
+            pnp_str = (f"{p['pnp'] * pnp_scale:8.4g}  {p['mean'] * pnp_scale:8.4g}  "
+                       f"{p['std'] * pnp_scale:7.3g}  {p['n_peaks']:3d}")
+        else:
+            pnp_str = ""
+        logger.info("  %5d   %s   %.4g   %.4g   %s",
+                    i, arr_str, vpp[i], rms[i], pnp_str)
     if np.isfinite(arrivals_us).sum() >= 2:
         finite = arrivals_us[np.isfinite(arrivals_us)]
         logger.info(
@@ -284,6 +350,27 @@ def main():
                 agg_vpp, agg_rms, noise_rms, snr,
             )
 
+    pnp_trace = mean_trace if mean_trace is not None else traces[0]
+    agg_pnp = None
+    if pnp_window is not None:
+        agg_pnp = windowed_pnp(t_us, pnp_trace, pnp_window, frequency_kHz=freq_kHz)
+        logger.info(
+            "  window PNP (%s): max=%.4g %s, local negative peaks: n=%d, "
+            "mean=%.4g %s, std=%.3g %s (%.2f%%)",
+            "aggregated" if mean_trace is not None else "pulse 0",
+            agg_pnp["pnp"] * pnp_scale, pnp_unit, agg_pnp["n_peaks"],
+            agg_pnp["mean"] * pnp_scale, pnp_unit,
+            agg_pnp["std"] * pnp_scale, pnp_unit,
+            100.0 * agg_pnp["std"] / agg_pnp["mean"] if agg_pnp["mean"] else float("nan"),
+        )
+        per_pulse_means = np.array([p["mean"] for p in pulse_pnp]) * pnp_scale
+        if n_pulses >= 2 and np.isfinite(per_pulse_means).any():
+            logger.info(
+                "  per-pulse window-PNP mean across pulses: mean=%.4g %s, std=%.3g %s",
+                np.nanmean(per_pulse_means), pnp_unit,
+                np.nanstd(per_pulse_means, ddof=1), pnp_unit,
+            )
+
     if not (args.plot or args.save_plot):
         return
 
@@ -336,6 +423,18 @@ def main():
         ax_mean.grid(True, alpha=0.3)
         align_note = "cross-corr aligned" if args.align else "no alignment"
         ax_mean.set_title(f"aggregated across {n_pulses} pulses ({align_note})")
+
+    if agg_pnp is not None:
+        ax_pnp = ax_mean if ax_mean is not None else ax_traces
+        ax_pnp.axvspan(*agg_pnp["window_us"], color="tab:blue", alpha=0.08,
+                       label="clean PNP window")
+        ax_pnp.plot(agg_pnp["peak_t_us"], -agg_pnp["peak_values"], "v",
+                    color="tab:red", ms=5, label=f"neg. peaks (n={agg_pnp['n_peaks']})")
+        ax_pnp.axhline(-agg_pnp["mean"], color="tab:red", ls="--", lw=1,
+                       label=(f"mean PNP {agg_pnp['mean'] * pnp_scale:.4g} "
+                              f"\u00b1 {agg_pnp['std'] * pnp_scale:.3g} {pnp_unit}"))
+        ax_pnp.legend(loc="upper right", fontsize=8)
+    elif ax_mean is not None:
         ax_mean.legend(loc="upper right", fontsize=8)
 
     idx = np.arange(n_pulses)

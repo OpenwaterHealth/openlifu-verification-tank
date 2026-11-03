@@ -8,18 +8,26 @@ two coords held fixed at either the calibrated hydrophone position
 
 If you want a 2-D grid, use ``scan_2d.py``.
 
+Defaults match the characterization report's beam scans (pulse length,
+voltage, per-axis extent / points, averaging, scope range and capture
+window) and the plot shows PNP like the report figures. The scan is
+centered on the saved hydrophone position, so run
+``find_peak.py --save-calibration`` first.
+
 Examples::
 
-    python scripts/scan_1d.py --dim x --num 41
+    python scripts/scan_1d.py --dim z                      # report's axial scan
+    python scripts/scan_1d.py --dim x                      # report's lateral scan
     python scripts/scan_1d.py --dim y --num 41 --range -5 5
-    python scripts/scan_1d.py --dim z --num 21 --range -10 10 --save-plot axial.png
     python scripts/scan_1d.py --dim x --no-plot            # data-only headless run
 """
 import argparse
 import logging
 from pathlib import Path
 
-from openlifu_verification import VerificationTank, set_log_level, setup_data
+from openlifu_verification import (Characterization, ScanConfig, VerificationTank,
+                                   set_log_level, setup_data)
+from openlifu_verification.pnp import emitted_duration_us, scan_window_pnp
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +42,7 @@ def _configure_root_logger():
 
 
 def main():
+    cfg = ScanConfig()
     parser = argparse.ArgumentParser(description=__doc__)
     # --- Pulse / drive (defaults live on VerificationTank; None = use default) ---
     parser.add_argument("--frequency-khz", type=float, default=None,
@@ -42,20 +51,23 @@ def main():
     parser.add_argument("--voltage", type=float, default=None,
                         help="HV rail in V "
                              "(default: VerificationTank.DEFAULT_VOLTAGE_BY_FREQ_KHZ).")
-    parser.add_argument("--duration-usec", type=float, default=None,
-                        help="Pulse duration in µs "
-                             "(default: cycles / frequency).")
+    parser.add_argument("--duration-usec", type=float,
+                        default=Characterization.PULSE_DURATION_US,
+                        help="Pulse duration in µs (default: the report's "
+                             "%(default)g µs).")
     parser.add_argument("--interval-msec", type=float, default=None,
                         help="Pulse interval in ms "
                              "(default: VerificationTank.DEFAULT_INTERVAL_MSEC).")
     # --- Scan geometry ---
     parser.add_argument("--dim", type=str, choices=["x", "y", "z"], default="x",
                         help="Which axis to sweep.")
-    parser.add_argument("--range", type=float, nargs=2, default=[-10.0, 10.0],
+    parser.add_argument("--range", type=float, nargs=2, default=None,
                         dest="scan_range",
-                        help="(min, max) in mm along the swept axis.")
-    parser.add_argument("--num", type=int, default=41,
-                        help="Number of samples across --range.")
+                        help="(min, max) in mm along the swept axis "
+                             "(default: the report's +/- extent for --dim).")
+    parser.add_argument("--num", type=int, default=None,
+                        help="Number of samples across --range "
+                             "(default: the report's point count for --dim).")
     parser.add_argument("--x", type=float, default=0.0,
                         help="Fixed x offset when --dim is y or z. "
                              "Ignored when --dim x.")
@@ -81,16 +93,29 @@ def main():
                              "hydrophone ID is saved. Position calibration "
                              "and hydrophone ID still load normally; only "
                              "the trace/rms/vpp reporting stays in mV.")
+    # --- Capture ---
+    parser.add_argument("--time-start-us", type=float, default=cfg.scope.time_start_us)
+    parser.add_argument("--time-stop-us", type=float, default=None,
+                        help="Capture stop (µs). Default: like the report, "
+                             f"max({cfg.scope.time_stop_us:g}, deepest arrival + "
+                             "pulse + margin).")
+    parser.add_argument("--sampling-interval-ns", type=float,
+                        default=cfg.scope.sampling_interval_ns)
+    parser.add_argument("--hydro-range-mv", type=int,
+                        default=cfg.scope.hydrophone_range_mv)
     # --- Misc ---
     parser.add_argument("--chunk-size", type=int, default=0,
                         help="Rapid-block chunk size (0 = whole sweep).")
-    parser.add_argument("--n-averages", type=int, default=1,
+    parser.add_argument("--n-averages", type=int, default=cfg.scope.n_averages,
                         help="Repeat every scan point this many times and "
-                             "coherently average the traces.")
+                             "coherently average the traces (default: %(default)s).")
     parser.add_argument("--align", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Cross-correlate repeats against the first "
                              "before averaging (default on).")
+    parser.add_argument("--reduce", choices=["pnp", "vpp", "vmin", "vmax"],
+                        default="pnp",
+                        help="Per-point value to plot (default: PNP, as in the report).")
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-data", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-plot", type=str, default="")
@@ -124,23 +149,45 @@ def main():
     tank_frequency = int(args.frequency_khz
                          if args.frequency_khz is not None
                          else VerificationTank.DEFAULT_FREQUENCY_KHZ)
+    if args.scan_range is None or args.num is None:
+        plan = cfg.plan_for(tank_frequency)
+        axis = {"x": plan.lateral_1d, "y": plan.elevation_1d, "z": plan.axial_1d}[args.dim]
+        if args.scan_range is None:
+            args.scan_range = [-axis.extent_mm, axis.extent_mm]
+        if args.num is None:
+            args.num = axis.points
 
     try:
         with VerificationTank(frequency=tank_frequency,
                               num_modules=1,
                               ext_power_supply=False,
                               hydrophone=args.hydrophone or None,
+                              hydrophone_range_mv=args.hydro_range_mv,
                               use_calibration=not args.raw_mv,
                               calibration_path=args.calibration_path or None) as ver:
             if args.log_file:
                 ver.add_log_file(args.log_file)
-            ver.apply_pulse(
+            resolved = ver.apply_pulse(
                 frequency_kHz=args.frequency_khz,
                 voltage=args.voltage,
                 duration_usec=args.duration_usec,
                 interval_msec=args.interval_msec,
             )
             ver.enable_hv_output(wait=True)
+
+            time_stop_us = args.time_stop_us
+            if time_stop_us is None:
+                origin_z = 0.0 if args.absolute else float(ver.hydrophone_position[2])
+                if args.dim == "z":
+                    deepest_mm = origin_z + max(args.scan_range)
+                else:
+                    deepest_mm = args.z if args.z is not None else float(ver.hydrophone_position[2])
+                time_stop_us = max(
+                    cfg.scope.time_stop_us,
+                    deepest_mm / (cfg.sos_water_m_per_s / 1000.0)
+                    + float(resolved["duration_usec"])
+                    + Characterization.BURST_WINDOW_MARGIN_US,
+                )
             input("Press Enter to start")
 
             scan_kwargs = dict(
@@ -150,6 +197,9 @@ def main():
                 x=args.x,
                 y=args.y,
                 absolute=args.absolute,
+                time_start_s=args.time_start_us * 1e-6,
+                time_stop_s=time_stop_us * 1e-6,
+                sampling_interval_ns=args.sampling_interval_ns,
                 chunk_size=args.chunk_size,
                 n_averages=args.n_averages,
                 align=args.align,
@@ -158,6 +208,14 @@ def main():
             if args.z is not None:
                 scan_kwargs["z"] = args.z
             result = ver.scan_1d(**scan_kwargs)
+            result.metadata["window_pnp"] = scan_window_pnp(
+                result, ver.focus_timing_us,
+                duration_us=emitted_duration_us(resolved["duration_usec"],
+                                                resolved["frequency_kHz"]),
+                frequency_kHz=resolved["frequency_kHz"],
+                start_margin_us=Characterization.PNP_WINDOW_START_MARGIN_US,
+                end_margin_us=Characterization.PNP_WINDOW_END_MARGIN_US,
+            )
     except (ConnectionError, ValueError, Exception) as e:
         logger.error("Scan aborted: %s", e)
         raise
@@ -167,7 +225,7 @@ def main():
         result.save(out)
 
     if args.plot or args.save_plot:
-        result.plot(show=args.plot, save_as=args.save_plot)
+        result.plot(reduce=args.reduce, show=args.plot, save_as=args.save_plot)
 
 
 if __name__ == "__main__":

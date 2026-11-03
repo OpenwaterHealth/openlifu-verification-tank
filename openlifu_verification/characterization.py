@@ -36,6 +36,7 @@ from scipy.signal import hilbert
 from .acceptance import AcceptanceCriteria
 from .device_info import DeviceInfo
 from .operator_prefs import OperatorPrefs
+from .pnp import clean_pnp_window_us, emitted_duration_us, scan_window_pnp, windowed_pnp
 from .scan_config import PICOSCOPE_RANGES_MV, ScanConfig, choose_range_mv
 from .scan_results import ScanResult
 from .verificationtank import VerificationTank
@@ -102,11 +103,9 @@ ROW = {
     "elevation_image":       "D.9",
     "elevation_peak_offset_mm": "D.10",
     "axial_image":           "D.11",
-    # Peak Z Focus is the commanded focus depth (from the plane-wave
-    # depth cal / 1-D axial scan) that seeds the focused-pulse
-    # measurement. Graded against the plane-wave depth (D.3) within
-    # ``criteria.peak_depth.peak_z_focus_tol_pct``.
-    "peak_z_focus_mm":       "D.12",
+    # Offset of the 1-D axial scan's peak from the hydrophone depth,
+    # graded within ``criteria.peak_offset.axial_1d_window_mm``.
+    "axial_peak_offset_mm":  "D.12",
     "waveform_image":        "D.13",
     # Focused-pulse block: the focused-pulse PNP (D.14), the raw
     # focused arrival time (D.15, informational only), and the
@@ -232,13 +231,13 @@ def _1d_scan_pnp_peak(scan) -> tuple[np.ndarray, np.ndarray, int]:
     offset always agree.
     """
     coord = np.ravel(np.asarray(next(iter(scan.coords.values())), dtype=float))
-    traces = np.asarray(scan.traces, dtype=float)
-    traces = traces.reshape(-1, traces.shape[-1])
-    pnp = -traces.min(axis=-1) / 1e6
+    pnp = np.ravel(scan.reduce("pnp")) / 1e6
     if pnp.size != coord.size or pnp.size == 0:
         raise ValueError(
             f"1-D scan has {pnp.size} traces but {coord.size} coords")
-    return coord, pnp, int(np.argmax(pnp))
+    if not np.isfinite(pnp).any():
+        raise ValueError("1-D scan has no finite PNP values")
+    return coord, pnp, int(np.nanargmax(pnp))
 
 
 def _linear_r2(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
@@ -524,6 +523,12 @@ class Characterization:
         """
         for k, v in self._burst_scope_kwargs().items():
             kw.setdefault(k, v)
+        if "pnp_window_us" not in kw:
+            try:
+                kw["pnp_window_us"] = self._pnp_window_us()
+                kw.setdefault("metric", "pnp")
+            except (ValueError, RuntimeError) as e:
+                logger.warning("Peak search falling back to RMS: %s", e)
         x, y = self.ver.find_peak(x0=x0, y0=y0,
                                   plot=self.plot, store=True, save=False,
                                   keep_plot_open=False, **kw)
@@ -564,6 +569,7 @@ class Characterization:
             absolute=False, n_averages=n_avg, **scope_kw,
         )
         self.report.scans["lateral_1d"] = lat
+        self._attach_window_pnp(lat)
         self._set_1d_peak_offset_row(lat, ROW["lateral_peak_offset_mm"],
                                      "1-D Lateral Peak Offset")
         self._grade_lateral_peak_offset()
@@ -578,6 +584,7 @@ class Characterization:
             absolute=False, n_averages=n_avg, **scope_kw,
         )
         self.report.scans["elevation_1d"] = elev
+        self._attach_window_pnp(elev)
         self._set_1d_peak_offset_row(elev, ROW["elevation_peak_offset_mm"],
                                      "1-D Elevation Peak Offset")
         self._grade_elevation_peak_offset()
@@ -592,6 +599,10 @@ class Characterization:
             absolute=False, n_averages=n_avg, **scope_kw,
         )
         self.report.scans["axial_1d"] = axial
+        self._attach_window_pnp(axial)
+        self._set_1d_peak_offset_row(axial, ROW["axial_peak_offset_mm"],
+                                     "1-D Axial Peak Offset")
+        self._grade_axial_peak_offset()
         self._check_abort()
 
         ext2 = plan.scan_2d.extent_mm
@@ -603,6 +614,7 @@ class Characterization:
             absolute=False, n_averages=n_avg, **scope_kw,
         )
         self.report.scans["scan_2d"] = two_d
+        self._attach_window_pnp(two_d)
         return {"lateral_1d": lat, "elevation_1d": elev,
                 "axial_1d": axial, "scan_2d": two_d}
 
@@ -630,6 +642,12 @@ class Characterization:
         probe pulse at the scan voltage sizes the scope range; the
         capture steps to a wider range if it still clips.
 
+        The capture fires :attr:`PULSE_DURATION_US` pulses so the
+        transducer fully rings up. The graded PNP is the mean of the
+        local negative peaks inside :func:`clean_pnp_window_us` (after
+        transmit RF pickup ends, before the acoustic pulse ends), with
+        the window anchored on the focused arrival measured below.
+
         Also fills the five "image" rows D.4-D.8 with
         ``"see Figure N"`` cross-references. The reported focused
         arrival time (D.11) and focused-arrival hydrophone depth
@@ -644,7 +662,13 @@ class Characterization:
         logger.info("Measuring waveform at peak...")
         pos = self.ver.hydrophone_position
         xyz = (float(pos[0]), float(pos[1]), float(pos[2]))
+        pnp_duration_us = emitted_duration_us(self._pulse_duration_us(),
+                                              self.frequency_kHz)
         scope_kw = self._burst_scope_kwargs()
+        if hasattr(self.ver, "apply_pulse"):
+            self.ver.apply_pulse(frequency_kHz=self.frequency_kHz,
+                                 voltage=self.voltage_V,
+                                 duration_usec=self._pulse_duration_us())
         self._apply_baseline_range()
         probe = self.ver.measure_pressure(*xyz, **scope_kw)
         if probe is None:
@@ -681,7 +705,6 @@ class Characterization:
         finally:
             self.ver.set_voltage(self.voltage_V, wait=True)
             self._apply_baseline_range()
-        pnp_MPa = _pnp_MPa(meas["trace"]) if meas["units"] == "Pa" else float("nan")
 
         # Focused arrival + depth via the plane-wave-style calibrator
         # steered at the commanded z-focus. The picker subtracts the
@@ -712,16 +735,14 @@ class Characterization:
             axial_depth_mm = float(depth_result["distance_mm"])
             max_delay_us = float(depth_result["max_delay_us"])
         except Exception as e:  # noqa: BLE001 - dry-run safety
+            # The long-pulse PNP capture overlaps transmit RF pickup, so it
+            # can't stand in for the focused-arrival transmit.
             logger.warning(
-                "Focused depth calibration failed (%s); "
-                "falling back to Hilbert-envelope arrival on the "
-                "single-pulse trace.", e,
+                "Focused depth calibration failed (%s); focused arrival "
+                "and depth are unavailable.", e,
             )
-            arrival_us = _find_arrival_us(meas["t"], meas["trace"],
-                                          skip_us=0.0)
-            sos_m_per_s = float(cfg.sos_water_m_per_s)
-            axial_depth_mm = (arrival_us * sos_m_per_s / 1000.0
-                              if arrival_us is not None else float("nan"))
+            arrival_us = None
+            axial_depth_mm = float("nan")
             max_delay_us = 0.0
         finally:
             # calibrate_hydrophone_depth leaves the LIFU armed with the
@@ -730,10 +751,23 @@ class Characterization:
             # that follow fire the intended waveform.
             self._apply_baseline_pulse()
 
+        pnp = (self._pnp_stats(meas["t"], meas["trace"])
+               if meas["units"] == "Pa" else None)
+        nan = float("nan")
+        pnp_MPa = pnp["mean"] / 1e6 if pnp else nan
+        pnp_std_MPa = pnp["std"] / 1e6 if pnp else nan
+
         sos_m_per_s = float(cfg.sos_water_m_per_s)
         result = {
             **meas,
             "pnp_MPa": pnp_MPa,
+            "pnp_std_MPa": pnp_std_MPa,
+            "pnp_max_MPa": pnp["pnp"] / 1e6 if pnp else nan,
+            "pnp_n_peaks": pnp["n_peaks"] if pnp else 0,
+            "pnp_window_us": pnp["window_us"] if pnp else None,
+            "pnp_peak_t_us": pnp["peak_t_us"] if pnp else np.empty(0),
+            "pnp_peak_MPa": pnp["peak_values"] / 1e6 if pnp else np.empty(0),
+            "pnp_duration_us": pnp_duration_us,
             "pnp_voltage_V": pnp_voltage_V,
             "peak_z_focus_mm": z_focus_mm,
             "focused_depth_mm": axial_depth_mm,
@@ -759,19 +793,15 @@ class Characterization:
         self.report.set_row(ROW["axial_image"],     "1-D Axial Scan",    "see Figure 4")
         self.report.set_row(ROW["waveform_image"],  "Waveform at Peak",  "see Figure 5")
 
-        # D.10 shows the commanded focus depth (Peak Z Focus, =
-        # the plane-wave-derived hydrophone depth). D.12 is the
-        # focused-pulse PNP (graded against ``criteria.pnp_at_peak``).
-        # D.13 is the raw focused-pulse arrival time (informational
-        # only; the focused pulse arrives at
+        # D.14 is the focused-pulse PNP (graded against
+        # ``criteria.pnp_at_peak``). D.15 is the raw focused-pulse
+        # arrival time (informational only; the focused pulse arrives at
         # ``distance / SOS + max_delay_us`` so a meaningful acceptance
         # threshold would have to reference the geometric max delay).
-        # D.14 is the arrival-derived depth (max-delay corrected)
+        # D.16 is the arrival-derived depth (max-delay corrected)
         # which IS graded against ``criteria.peak_depth``.
-        self.report.set_row(ROW["peak_z_focus_mm"], "Peak Z Focus",
-                            z_focus_mm, unit="mm")
         self.report.set_row(ROW["pnp_at_peak_MPa"],
-                            f"Focused Pulse PNP ({pnp_voltage_V:g}V/"
+                            f"Focused Pulse Mean PNP ({pnp_voltage_V:g}V/"
                             f"{2 * pnp_voltage_V:g}Vpp)",
                             pnp_MPa, unit="MPa")
         self.report.set_row(ROW["focused_arrival_us"],
@@ -782,9 +812,12 @@ class Characterization:
                             "Focused Pulse Hydrophone Depth",
                             axial_depth_mm, unit="mm")
         logger.info(
-            "Waveform at peak: PNP=%.3f MPa at %g V, arrival=%s, depth=%.2f mm "
+            "Waveform at peak: mean PNP=%.3f \u00b1 %.3f MPa over %d negative "
+            "peaks in %s us (%.0f us pulse) at %g V, arrival=%s, depth=%.2f mm "
             "(sos=%.0f m/s)",
-            pnp_MPa, pnp_voltage_V,
+            pnp_MPa, pnp_std_MPa, result["pnp_n_peaks"],
+            "%.1f-%.1f" % pnp["window_us"] if pnp else "n/a",
+            pnp_duration_us, pnp_voltage_V,
             f"{arrival_us:.2f}us" if arrival_us is not None else "n/a",
             axial_depth_mm, sos_m_per_s,
         )
@@ -793,7 +826,6 @@ class Characterization:
         # the end of the run.
         self._grade_pnp_at_peak()
         self._grade_peak_depth()
-        self._grade_peak_z_focus()
         return result
 
     def sweep_frequency(self, *, duration_usec: Optional[float] = None) -> ScanResult:
@@ -818,20 +850,22 @@ class Characterization:
             n_averages=int(cfg.scope.pnp_n_averages),
             **self._burst_scope_kwargs(duration_usec),
         )
-        # Per-freq PNP.
+        # Per-freq clean-window mean PNP.
         traces = np.atleast_2d(result.traces)
-        pnp = np.array([_pnp_MPa(row) for row in traces])
+        pnp, pnp_std = self._sweep_pnp_MPa(result.t, traces, freqs,
+                                           duration_us=duration_usec)
         self.report.scans["freq_sweep"] = result
         self.report.freq_response = {
             "frequencies_kHz": freqs,
             "pnp_MPa": pnp,
+            "pnp_std_MPa": pnp_std,
             "voltage_V": self.voltage_V,
         }
         self.report.set_row("E.1", "Voltage Rail Setting", self.voltage_V, unit="V (+/-)")
         # E.2.. : informational per-frequency PNP values (no grading).
         for i, (f, p) in enumerate(zip(freqs, pnp), start=2):
             row_id = f"E.{i}"
-            label = f"PNP ({int(round(f))} kHz)"
+            label = f"Mean PNP ({int(round(f))} kHz)"
             self.report.set_row(row_id, label, float(p), unit="MPa")
         # PNP deviation at nominal freq is the graded row and sits at
         # the end of the E section because it is only computed after
@@ -941,12 +975,14 @@ class Characterization:
         self._apply_baseline_range()
 
         traces = np.atleast_2d(result.traces)
-        pnp = np.array([_pnp_MPa(row) for row in traces])
+        pnp, pnp_std = self._sweep_pnp_MPa(
+            result.t, traces, np.full(traces.shape[0], self.frequency_kHz))
         slope, intercept, r2 = _linear_r2(volts, pnp)
         self.report.scans["voltage_sweep"] = result
         self.report.voltage_response = {
             "voltages_V": volts,
             "pnp_MPa": pnp,
+            "pnp_std_MPa": pnp_std,
             "slope_MPa_per_V": slope,
             "intercept_MPa": intercept,
             "r2": r2,
@@ -954,7 +990,7 @@ class Characterization:
         self.report.set_row("F.1", "Frequency Setting", self.frequency_kHz, unit="kHz")
         for i, (v, p) in enumerate(zip(volts, pnp), start=2):
             row_id = f"F.{i}"
-            label = f"PNP ({int(round(v))}V/{int(round(2*v))}Vpp)"
+            label = f"Mean PNP ({int(round(v))}V/{int(round(2*v))}Vpp)"
             self.report.set_row(row_id, label, float(p), unit="MPa")
         # F.8 carries the linearity R**2 (the metric the section's
         # PASS/FAIL is graded on). The individual F.2 - F.7 PNP rows
@@ -974,11 +1010,83 @@ class Characterization:
     # ------------------------------------------------------------------
     #: Extra time (us) kept after the end of the burst's arrival.
     BURST_WINDOW_MARGIN_US = 10.0
+    #: Acceptance pulse duration (us); long enough to fully ring up.
+    PULSE_DURATION_US = 60.0
+    #: Margins (us) for :func:`clean_pnp_window_us` on every PNP measurement.
+    PNP_WINDOW_START_MARGIN_US = 3.0
+    PNP_WINDOW_END_MARGIN_US = 3.0
 
     def _pulse_duration_us(self) -> float:
-        """Acceptance pulse duration (us) at the nominal frequency,
-        from ``VerificationTank.DEFAULT_DURATION_US_BY_FREQ_KHZ``."""
-        return VerificationTank.default_duration_us_for(self.frequency_kHz)
+        """Acceptance pulse duration (us) requested from the LIFU."""
+        return float(self.PULSE_DURATION_US)
+
+    def _pnp_window_us(self, frequency_kHz: Optional[float] = None,
+                       duration_us: Optional[float] = None) -> tuple[float, float]:
+        """Clean PNP window at the hydrophone for the acceptance pulse.
+
+        Anchored on the measured focused arrival once
+        :meth:`measure_waveform_at_peak` has run, otherwise on the
+        array geometry at ``hydrophone_position``.
+        """
+        f = self.frequency_kHz if frequency_kHz is None else float(frequency_kHz)
+        dur = emitted_duration_us(
+            self._pulse_duration_us() if duration_us is None else duration_us, f)
+        dc = self.report.depth_cal_focused
+        if dc:
+            arrival_us, max_delay_us = float(dc["arrival_us"]), float(dc["max_delay_us"])
+        else:
+            pos = self.ver.hydrophone_position
+            arrival_us, _, max_delay_us = self.ver.focus_timing_us(
+                float(pos[0]), float(pos[1]), float(pos[2]))
+        return clean_pnp_window_us(
+            duration_us=dur, arrival_us=arrival_us, max_delay_us=max_delay_us,
+            start_margin_us=self.PNP_WINDOW_START_MARGIN_US,
+            end_margin_us=self.PNP_WINDOW_END_MARGIN_US,
+        )
+
+    def _attach_window_pnp(self, scan: ScanResult) -> None:
+        """Store per-point clean-window mean PNP in ``scan.metadata["window_pnp"]``
+        so the graders and figures (via ``scan.reduce("pnp")``) use it."""
+        try:
+            pnp = scan_window_pnp(
+                scan, self.ver.focus_timing_us,
+                duration_us=emitted_duration_us(self._pulse_duration_us(),
+                                                self.frequency_kHz),
+                frequency_kHz=self.frequency_kHz,
+                start_margin_us=self.PNP_WINDOW_START_MARGIN_US,
+                end_margin_us=self.PNP_WINDOW_END_MARGIN_US,
+            )
+        except (KeyError, ValueError, RuntimeError) as e:
+            logger.warning("Scan PNP falls back to the whole-trace minimum: %s", e)
+            return
+        n_bad = int(np.count_nonzero(~np.isfinite(pnp)))
+        if n_bad:
+            logger.warning("%d of %d scan points have no clean PNP window",
+                           n_bad, pnp.size)
+        scan.metadata["window_pnp"] = pnp
+
+    def _pnp_stats(self, t_us, trace, *, frequency_kHz: Optional[float] = None,
+                   duration_us: Optional[float] = None) -> Optional[dict]:
+        """:func:`windowed_pnp` over :meth:`_pnp_window_us`, or ``None``
+        if no clean window can be formed."""
+        f = self.frequency_kHz if frequency_kHz is None else float(frequency_kHz)
+        try:
+            window = self._pnp_window_us(f, duration_us)
+            return windowed_pnp(t_us, trace, window, frequency_kHz=f)
+        except (ValueError, RuntimeError) as e:
+            logger.warning("Clean-window PNP unavailable: %s", e)
+            return None
+
+    def _sweep_pnp_MPa(self, t_us, traces, freqs_kHz, *,
+                       duration_us: Optional[float] = None,
+                       ) -> tuple[np.ndarray, np.ndarray]:
+        """Per-trace clean-window ``(mean, std)`` PNP in MPa (NaN if unavailable)."""
+        stats = [self._pnp_stats(t_us, row, frequency_kHz=f, duration_us=duration_us)
+                 for f, row in zip(freqs_kHz, traces)]
+        nan = float("nan")
+        mean = np.array([s["mean"] / 1e6 if s else nan for s in stats])
+        std = np.array([s["std"] / 1e6 if s else nan for s in stats])
+        return mean, std
 
     def _burst_scope_kwargs(self, duration_usec: Optional[float] = None) -> dict:
         """Scope kwargs with ``time_stop`` extended to cover the full burst.
@@ -1428,42 +1536,11 @@ class Characterization:
                     "PASS" if passed else "FAIL", note)
         return passed
 
-    def _grade_peak_z_focus(self) -> Optional[bool]:
-        """Grade D.12 (Peak Z Focus) against D.3 (hydrophone depth).
-
-        Passes when
-        ``|peak_z - hydrophone_depth| <= peak_z_focus_tol_pct% *
-        hydrophone_depth``. Because Peak Z Focus is seeded from the
-        plane-wave depth calibration these should agree to within
-        rounding under normal operation; the tolerance catches
-        pathological cases where the calibration silently fell back
-        to the initial estimate."""
-        depth_row = self.report.rows.get(ROW["plane_wave_depth_mm"])
-        focus_row = self.report.rows.get(ROW["peak_z_focus_mm"])
-        if depth_row is None or focus_row is None:
-            return None
-        if depth_row.value is None or focus_row.value is None:
-            return None
-        depth = float(depth_row.value)
-        focus = float(focus_row.value)
-        if depth <= 0:
-            return None
-        crit = self.criteria.peak_depth
-        tol_pct = float(crit.peak_z_focus_tol_pct)
-        tol_mm = depth * tol_pct / 100.0
-        passed = abs(focus - depth) <= tol_mm
-        threshold = f"|focus - {depth:.2f}| \u2264 {tol_mm:.2f} mm"
-        note = (f"focus = {focus:.3f} mm, hydrophone = {depth:.3f} mm "
-                f"(tol \u00b1{tol_pct:g}%)")
-        self.report.grade_row(ROW["peak_z_focus_mm"], passed=passed,
-                              threshold=threshold, note=note)
-        logger.info("[grade] Peak Z focus \u2192 %s (%s)",
-                    "PASS" if passed else "FAIL", note)
-        return passed
-
     def _grade_1d_peak_offset(self, *, scan_key: str, axis: str,
-                               row_key: str, label: str) -> Optional[bool]:
-        """Grade the D.8 / D.10 rows (1-D lateral / elevation peak offset).
+                               row_key: str, label: str,
+                               limits_mm: Optional[tuple[float, float]] = None,
+                               reference: str = "2-D peak") -> Optional[bool]:
+        """Grade the D.8 / D.10 / D.12 rows (1-D lateral / elevation / axial peak offset).
 
         ``scan_key`` is the :attr:`TestReport.scans` key
         (``"lateral_1d"`` or ``"elevation_1d"``). ``axis`` is
@@ -1487,10 +1564,15 @@ class Characterization:
         # is the 2-D peak. The offset is therefore the peak coord
         # itself.
         offset_mm = float(peak_coord)
-        max_mm = self.criteria.peak_offset.max_1d_axis_mm_for(self.frequency_kHz)
-        passed = abs(offset_mm) <= max_mm
-        threshold = f"|{axis}| \u2264 {max_mm} mm"
-        note = f"1-D peak {axis} = {offset_mm:+.3f} mm from 2-D peak"
+        if limits_mm is None:
+            max_mm = self.criteria.peak_offset.max_1d_axis_mm_for(self.frequency_kHz)
+            lo, hi = -max_mm, max_mm
+            threshold = f"|{axis}| \u2264 {max_mm} mm"
+        else:
+            lo, hi = float(limits_mm[0]), float(limits_mm[1])
+            threshold = f"{lo:+g} \u2264 \u0394{axis} \u2264 {hi:+g} mm"
+        passed = lo <= offset_mm <= hi
+        note = f"1-D peak {axis} = {offset_mm:+.3f} mm from {reference}"
         # The row was created by ``run_beam_scans`` right after the
         # scan completed; grade it in-place.
         if row_key in self.report.rows:
@@ -1512,6 +1594,14 @@ class Characterization:
             row_key=ROW["elevation_peak_offset_mm"], label="Elevation",
         )
 
+    def _grade_axial_peak_offset(self) -> Optional[bool]:
+        return self._grade_1d_peak_offset(
+            scan_key="axial_1d", axis="z",
+            row_key=ROW["axial_peak_offset_mm"], label="Axial",
+            limits_mm=tuple(self.criteria.peak_offset.axial_1d_window_mm),
+            reference="hydrophone depth",
+        )
+
     def grade(self) -> dict:
         """Aggregate the per-section verdicts into an overall PASS/FAIL.
 
@@ -1530,7 +1620,7 @@ class Characterization:
         summary["peak_xy"] = self._grade_peak_xy()
         summary["lateral_peak_offset"] = self._grade_lateral_peak_offset()
         summary["elevation_peak_offset"] = self._grade_elevation_peak_offset()
-        summary["peak_z_focus"] = self._grade_peak_z_focus()
+        summary["axial_peak_offset"] = self._grade_axial_peak_offset()
         summary["pnp_at_peak"] = self._grade_pnp_at_peak()
         summary["peak_depth"] = self._grade_peak_depth()
         summary["freq_response"] = self._grade_freq_response()

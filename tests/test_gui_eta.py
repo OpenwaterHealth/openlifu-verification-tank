@@ -38,12 +38,16 @@ def _config(tmp_path, overrides):
 
 
 _HV_RESEND_SAVING_S = 6 * (7.94 - 2.32)
+# The measured runs used a 21-point axial scan.
+_MEASURED_AXIAL = {f: {"axial_1d": {"extent_mm": 10.0, "points": 21}}
+                   for f in ("155", "400")}
 
 
 @pytest.mark.parametrize("overrides, measured_s", [
-    ({}, 222.0),
+    ({"by_freq_kHz": _MEASURED_AXIAL}, 222.0),
     ({"by_freq_kHz": {"155": _HALF_POINTS, "400": _HALF_POINTS}}, 153.7),
-    ({"scope": {"n_averages": 1, "pnp_n_averages": 1}}, 176.5),
+    ({"scope": {"n_averages": 1, "pnp_n_averages": 1},
+      "by_freq_kHz": _MEASURED_AXIAL}, 176.5),
 ])
 def test_model_matches_measured_155_runs(tmp_path, overrides, measured_s):
     phases = gui._estimate_phases(_config(tmp_path, overrides), 155, 40)

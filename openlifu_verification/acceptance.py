@@ -83,13 +83,14 @@ def _peak_depth_from_dict(data: dict) -> "PeakDepth":
     New shape (per-freq LUT):
         ``{"nominal_by_freq_kHz": {"155": 50.0, "400": 50.0},
            "hydrophone_tol_mm": 2.0,
-           "focused_tol_pct": 5.0,
-           "peak_z_focus_tol_pct": 5.0}``
+           "focused_tol_pct": 5.0}``
 
     A legacy single depth (``nominal_mm`` or ``default_nominal_mm``)
     is applied to every supported frequency when no LUT is given.
     """
     data = dict(data or {})
+    # Retired: graded the commanded focus against the depth it was seeded from.
+    data.pop("peak_z_focus_tol_pct", None)
     # Migrate legacy keys in place so the filter step below picks them
     # up as their new names.
     legacy = [data.pop(k) for k in ("default_nominal_mm", "nominal_mm")
@@ -122,6 +123,11 @@ class PeakOffset:
     elevation (y) scan and the peak located by the 2-D scan. Grades
     the D-section rows inserted right after the 1-D lateral /
     elevation figures.
+
+    ``axial_1d_window_mm`` is the allowed ``(min, max)`` offset of the
+    1-D axial scan's peak from the hydrophone depth (commanded focus
+    minus hydrophone depth). It is asymmetric because deep foci pull
+    in proximally, so the peak lands at a deeper commanded focus.
     """
     max_mm: float = 3.0
     max_axis_mm: float = 1.0
@@ -129,11 +135,17 @@ class PeakOffset:
         "155": 1.0,
         "400": 0.5,
     })
+    axial_1d_window_mm: list[float] = field(default_factory=lambda: [-5.0, 10.0])
 
     def __post_init__(self):
         self.max_1d_axis_mm_by_freq_kHz = _require_all_freqs(
             self.max_1d_axis_mm_by_freq_kHz,
             "peak_offset.max_1d_axis_mm_by_freq_kHz")
+        lo, hi = (float(v) for v in self.axial_1d_window_mm)
+        if lo >= hi:
+            raise ValueError(
+                f"peak_offset.axial_1d_window_mm must be [min, max], got {[lo, hi]}")
+        self.axial_1d_window_mm = [lo, hi]
 
     def max_1d_axis_mm_for(self, freq_kHz: float) -> float:
         """1-D peak-offset limit (mm) for ``freq_kHz``."""
@@ -152,12 +164,6 @@ class PeakDepth:
     small nominal shifts don't require re-tuning a percentage; D.14
     uses the percentage form (``focused_tol_pct``) so tighter
     depths automatically get tighter windows.
-
-    ``peak_z_focus_tol_pct`` grades the commanded focus depth
-    (D.10, ``peak_z_focus_mm``) against the measured plane-wave
-    hydrophone depth (D.3) - i.e., the two should agree because
-    the pipeline uses the plane-wave value as the seed for the
-    focused-pulse measurement.
     """
     # LUT: frequency (kHz) -> nominal hydrophone depth (mm).
     nominal_by_freq_kHz: dict[str, float] = field(default_factory=lambda: {
@@ -166,7 +172,6 @@ class PeakDepth:
     })
     hydrophone_tol_mm: float = 2.0
     focused_tol_pct: float = 5.0
-    peak_z_focus_tol_pct: float = 5.0
 
     def __post_init__(self):
         self.nominal_by_freq_kHz = _require_all_freqs(
@@ -307,11 +312,12 @@ class AcceptanceCriteria:
             "peak_offset":      {"max_mm":        self.peak_offset.max_mm,
                                  "max_axis_mm":   self.peak_offset.max_axis_mm,
                                  "max_1d_axis_mm_by_freq_kHz": dict(
-                                     self.peak_offset.max_1d_axis_mm_by_freq_kHz)},
+                                     self.peak_offset.max_1d_axis_mm_by_freq_kHz),
+                                 "axial_1d_window_mm": list(
+                                     self.peak_offset.axial_1d_window_mm)},
             "peak_depth":       {"nominal_by_freq_kHz": dict(self.peak_depth.nominal_by_freq_kHz),
                                  "hydrophone_tol_mm":   self.peak_depth.hydrophone_tol_mm,
-                                 "focused_tol_pct":     self.peak_depth.focused_tol_pct,
-                                 "peak_z_focus_tol_pct": self.peak_depth.peak_z_focus_tol_pct},
+                                 "focused_tol_pct":     self.peak_depth.focused_tol_pct},
             "pnp_at_peak":      {"reference_voltage_V": self.pnp_at_peak.reference_voltage_V,
                                  "min_MPa_by_freq_kHz": dict(
                                      self.pnp_at_peak.min_MPa_by_freq_kHz)},
