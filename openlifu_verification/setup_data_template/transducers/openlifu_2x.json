@@ -1,7 +1,7 @@
 {
     "type": "TransducerArray",
-    "id": "openlifu_2x_evt1",
-    "name": "OpenLIFU 2x EVT1",
+    "id": "openlifu_2x",
+    "name": "OpenLIFU 2x",
     "modules": [
         {
             "id": "openlifu_tm400_evt1",

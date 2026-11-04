@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 import sys
@@ -141,6 +142,13 @@ class VerificationTank:
     # Pulse duration (us): 70 us (~11 cycles) at 155 kHz, 50 us
     # (20 cycles) at 400 kHz.
     DEFAULT_DURATION_US_BY_FREQ_KHZ: dict[float, float] = {155.0: 70.0, 400.0: 50.0}
+    # Minimum plane-wave depth-calibration peak (mV of hydrophone signal
+    # per V of HV rail) below which the arrival pick is not trusted.
+    # Passing reports peaked at ~0.2 mV/V (155 kHz, 40 V) and
+    # 0.25-0.5 mV/V (400 kHz, 20 V); a bubble on the hydrophone drops
+    # it well below these limits (4 mV at 40 V / 2.5 mV at 20 V).
+    MIN_PLANE_WAVE_PEAK_MV_PER_V_BY_FREQ_KHZ: dict[float, float] = {
+        155.0: 0.10, 400.0: 0.125}
     DEFAULT_INTERVAL_MSEC: float = 20.0
     DEFAULT_PULSE_COUNT: int = 1
     DEFAULT_TRIGGER_MODE: str = "single"
@@ -2355,11 +2363,13 @@ class VerificationTank:
         to Pa via the single-frequency lookup at ``self.frequency``.
 
         When ``n_averages > 1`` the hydrophone trace is captured that
-        many times back-to-back, optionally aligned by
+        many times, optionally aligned by
         cross-correlation (:func:`~openlifu_verification.pulse_align.align_pulse_traces`)
-        and coherently averaged before RMS/vpp are computed -- giving
-        a much lower-noise measurement at the cost of ``n_averages``\u00d7
-        the wall-time.
+        and median-combined before RMS/vpp are computed. If the LIFU
+        is configured with ``pulse_count == n_averages`` the whole
+        train is captured from one trigger via
+        :meth:`capture_pulse_train` (rapid block); otherwise each
+        repeat is a separate trigger + :meth:`run_capture`.
 
         Args:
             x, y, z: Focus in mm.
@@ -2397,25 +2407,38 @@ class VerificationTank:
             raise ValueError("n_averages must be >= 1")
 
         self.set_focus(x, y, z)
-        traces_mv: list[np.ndarray] = []
-        t_axis = None
-        for _ in range(n_averages):
-            data = self.run_capture(
+        cfg = self.lifu_config or {}
+        if n_averages > 1 and cfg.get("pulse_count") == n_averages:
+            bulk = self.capture_pulse_train(
+                n_pulses=n_averages,
                 time_start_s=time_start_s,
                 time_stop_s=time_stop_s,
                 sampling_interval_ns=sampling_interval_ns,
-                timeout_s=timeout_s,
+                timeout_s=timeout_s + n_averages * float(cfg["interval_msec"]) * 1e-3,
             )
-            if data is None:
-                continue
-            traces_mv.append(np.asarray(data[self.hydrophone_channel], dtype=float))
-            if t_axis is None:
-                t_axis = data["time"]
+            if bulk is None:
+                return None
+            stack = np.atleast_2d(np.asarray(bulk[self.hydrophone_channel], dtype=float))
+            t_axis = bulk["time"]
+        else:
+            traces_mv: list[np.ndarray] = []
+            t_axis = None
+            for _ in range(n_averages):
+                data = self.run_capture(
+                    time_start_s=time_start_s,
+                    time_stop_s=time_stop_s,
+                    sampling_interval_ns=sampling_interval_ns,
+                    timeout_s=timeout_s,
+                )
+                if data is None:
+                    continue
+                traces_mv.append(np.asarray(data[self.hydrophone_channel], dtype=float))
+                if t_axis is None:
+                    t_axis = data["time"]
+            if not traces_mv:
+                return None
+            stack = np.stack(traces_mv, axis=0)
 
-        if not traces_mv:
-            return None
-
-        stack = np.stack(traces_mv, axis=0)
         if stack.shape[0] > 1 and align:
             aligned, _lags = align_pulse_traces(
                 stack,
@@ -2789,6 +2812,21 @@ class VerificationTank:
         # inside it; search only after it.
         search_start_us = (float(t_us[base_mask][-1]) if base_mask.any()
                            else skip_us)
+        peak_mv = float(np.max(np.abs(mean_trace[t_us >= search_start_us]),
+                               initial=0.0))
+        min_mv_per_v = self.MIN_PLANE_WAVE_PEAK_MV_PER_V_BY_FREQ_KHZ.get(
+            float(self.frequency))
+        if z_focus_mm is None and min_mv_per_v is not None:
+            min_peak_mv = min_mv_per_v * float(voltage_V)
+            if peak_mv < min_peak_mv:
+                raise RuntimeError(
+                    "The plane wave signal is too low and the arrival time "
+                    "could not be estimated (peak "
+                    f"{peak_mv:.2f} mV, need at least {min_peak_mv:.2f} mV "
+                    f"at {float(voltage_V):g} V, {float(self.frequency):g} kHz). "
+                    "Check for bubbles on the hydrophone tip and the "
+                    "transducer face, and try again.",
+                )
         arr = find_first_arrival_us(
             t_us, mean_trace,
             frequency_kHz=float(self.frequency),
@@ -2808,10 +2846,10 @@ class VerificationTank:
         logger.info(
             "calibrate_hydrophone_depth: first_peak=%.3f us, "
             "onset_to_peak=%.3f us, arrival=%.3f us, "
-            "max_delay=%.3f us, distance=%.3f mm "
+            "max_delay=%.3f us, distance=%.3f mm, peak=%.2f mV "
             "(SoS=%d m/s, %d pulses, focus=%s)",
             arr.first_peak_us, arr.onset_to_peak_us, arr.arrival_us,
-            max_delay_us, distance_mm, SPEED_OF_SOUND, n_pulses,
+            max_delay_us, distance_mm, peak_mv, SPEED_OF_SOUND, n_pulses,
             "plane wave" if z_focus_mm is None
             else f"z={float(z_focus_mm):.1f} mm",
         )
@@ -2826,6 +2864,7 @@ class VerificationTank:
             "first_peak_us": float(arr.first_peak_us),
             "first_peak_value": float(arr.first_peak_value),
             "onset_to_peak_us": float(arr.onset_to_peak_us),
+            "peak_mv": peak_mv,
             "threshold": float(arr.threshold),
             "noise_gate": float(arr.noise_gate),
             "max_delay_us": float(max_delay_us),
@@ -2945,8 +2984,10 @@ class VerificationTank:
             metric: Quantity the search maximises. ``"rms"`` (default)
                 is the RMS over the whole capture; ``"pnp"`` is the mean
                 of the negative peaks in the interference-free window
-                (see :mod:`openlifu_verification.pnp`).
-            pnp_window_us: ``(start, stop)`` window for ``metric="pnp"``.
+                (see :mod:`openlifu_verification.pnp`); ``"prms"`` is
+                the RMS over that same window.
+            pnp_window_us: ``(start, stop)`` window for ``metric="pnp"``
+                or ``"prms"``.
                 ``None`` derives it from the configured pulse and the
                 array geometry at the start point.
             plot: Live matplotlib figure. Default ``False``.
@@ -2969,8 +3010,9 @@ class VerificationTank:
                 f"find_peak method must be 'grid' or 'gradient', "
                 f"got {method!r}"
             )
-        if metric not in ("rms", "pnp"):
-            raise ValueError(f"find_peak metric must be 'rms' or 'pnp', got {metric!r}")
+        if metric not in ("rms", "pnp", "prms"):
+            raise ValueError(
+                f"find_peak metric must be 'rms', 'pnp' or 'prms', got {metric!r}")
 
         if z is None:
             z = float(self.hydrophone_position[2])
@@ -2981,17 +3023,22 @@ class VerificationTank:
 
         cfg = self.lifu_config or {}
         freq_kHz = float(cfg.get("frequency_kHz", self.frequency))
-        if metric == "pnp" and pnp_window_us is None:
-            if "duration_usec" not in cfg:
-                raise RuntimeError("metric='pnp' needs a configured pulse; call apply_pulse first.")
+        # End of transmit (last element stops driving): RF pickup before this.
+        tx_end_us = None
+        if "duration_usec" in cfg and self.arr is not None:
             first_us, last_us, max_delay_us = self.focus_timing_us(x0, y0, z)
+            duration_us = emitted_duration_us(cfg["duration_usec"], freq_kHz)
+            tx_end_us = duration_us + max_delay_us
+        if metric != "rms" and pnp_window_us is None:
+            if tx_end_us is None:
+                raise RuntimeError(f"metric={metric!r} needs a configured pulse; call apply_pulse first.")
             pnp_window_us = clean_pnp_window_us(
-                duration_us=emitted_duration_us(cfg["duration_usec"], freq_kHz),
+                duration_us=duration_us,
                 arrival_us=first_us, last_arrival_us=last_us, max_delay_us=max_delay_us,
             )
-        metric_name = "mean PNP" if metric == "pnp" else "RMS"
-        if metric == "pnp":
-            logger.info("find_peak: metric = mean PNP in %.1f-%.1f us", *pnp_window_us)
+        metric_name = {"rms": "RMS", "pnp": "mean PNP", "prms": "windowed RMS"}[metric]
+        if metric != "rms":
+            logger.info("find_peak: metric = %s in %.1f-%.1f us", metric_name, *pnp_window_us)
 
         handles = None
         on_progress = None
@@ -3000,6 +3047,15 @@ class VerificationTank:
             handles["ax_scatter"].set_title(
                 f"find_peak @ z={z:.2f} mm  (color = {metric_name})"
             )
+            ax_trace = handles["ax_trace"]
+            if tx_end_us is not None:
+                ax_trace.axvspan(0.0, tx_end_us, color="tab:red", alpha=0.15,
+                                 lw=0, label="transmit (RF pickup)")
+            if metric != "rms":
+                ax_trace.axvspan(*pnp_window_us, color="tab:green", alpha=0.2,
+                                 lw=0, label=f"{metric_name} window")
+            if ax_trace.patches:
+                ax_trace.legend(loc="upper right", fontsize=7)
 
             def on_progress(**kw):
                 search.update_live_figure(handles, **kw)
@@ -3038,6 +3094,14 @@ class VerificationTank:
                 m = windowed_pnp(meas["t"], meas["trace"], pnp_window_us,
                                  frequency_kHz=freq_kHz)["mean"]
                 meas["rms"] = m if np.isfinite(m) else 0.0
+            elif meas is not None and metric == "prms":
+                t = np.asarray(meas["t"])
+                in_win = (t >= pnp_window_us[0]) & (t <= pnp_window_us[1])
+                if not in_win.any():
+                    raise ValueError(
+                        f"Window {pnp_window_us} us is outside the capture "
+                        f"({t[0]:.1f}-{t[-1]:.1f} us)")
+                meas["rms"] = float(np.sqrt(np.mean(meas["trace"][in_win] ** 2)))
             return meas
 
         if method == "grid":
@@ -3048,7 +3112,8 @@ class VerificationTank:
                 x0, y0, z, grid_step, max_evaluations,
                 fit_window, n_averages,
             )
-            result = search.grid_walk_search(
+            run_search = functools.partial(
+                search.grid_walk_search,
                 measure_fn,
                 x0=x0, y0=y0,
                 step=grid_step,
@@ -3063,7 +3128,8 @@ class VerificationTank:
                 "initial_step=%.3f mm  tol=%.3f mm  n_averages=%d",
                 x0, y0, z, initial_step, tol, n_averages,
             )
-            result = search.gradient_search(
+            run_search = functools.partial(
+                search.gradient_search,
                 measure_fn,
                 x0=x0, y0=y0,
                 initial_step=initial_step,
@@ -3077,6 +3143,27 @@ class VerificationTank:
                 rotate_basis=rotate_basis,
                 on_progress=on_progress,
             )
+        # With n_averages > 1, each probe fires one train of
+        # n_averages pulses captured in rapid block (see
+        # measure_pressure), like scan_frequency.
+        base_config = self.lifu_config
+        pulse_train = n_averages > 1 and base_config is not None
+        if pulse_train:
+            self.configure_lifu(**{
+                **base_config,
+                "pulse_count": int(n_averages),
+                "pulse_train_interval_msec": 0,
+                "pulse_train_count": 1,
+                "trigger_mode": "single",
+            })
+        try:
+            result = run_search()
+        finally:
+            if pulse_train:
+                self.configure_lifu(**base_config)
+                if self.focus_args is not None:
+                    fx, fy, fz, apo = self.focus_args
+                    self.set_focus(fx, fy, fz, apodizations=apo)
         # Use the *symmetry-center* the search settled on, not the
         # highest single RMS sample. On a noisy top the max sample
         # is a lucky noise spike; the center is what we actually
@@ -3092,6 +3179,12 @@ class VerificationTank:
             result["best_x"], result["best_y"],
             result["iterations"], result["evaluations"],
         )
+        confirm_rms = result.get("confirm_rms")
+        if confirm_rms is not None:
+            log = logger.info if confirm_rms >= result["best_rms"] else logger.warning
+            log("find_peak: measured %s at the fitted peak = %.4g %s (fit %.4g, "
+                "best grid sample %.4g)", metric_name, confirm_rms,
+                result["units"], result["center_rms"], result["best_rms"])
 
         if store:
             self.hydrophone_position = np.array([x, y, z], dtype=float)

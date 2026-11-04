@@ -523,17 +523,10 @@ def gradient_search(
 # ----------------------------------------------------------------------
 # grid_walk_search: fixed-grid walk + LSQ paraboloid centering
 # ----------------------------------------------------------------------
-def _fit_paraboloid_vertex(points, *, guard_radius=None):
-    """Least-squares fit ``z = A x**2 + B y**2 + C xy + D x + E y + F``
-    to ``points`` (iterable of ``(x, y, z)``) and return the vertex
-    ``(xv, yv, zv)`` where the gradient vanishes.
-
-    Returns ``None`` if:
-      * fewer than 6 points (system is underdetermined),
-      * the Hessian is not concave-down (``4AB - C**2 <= 0`` or
-        ``A >= 0``),
-      * or the vertex lies farther than ``guard_radius`` from the
-        centroid of the input points (fit is extrapolating).
+def _fit_paraboloid(points):
+    """Least-squares coefficients ``(A, B, C, D, E, F)`` of
+    ``z = A x**2 + B y**2 + C xy + D x + E y + F`` for ``points``
+    (iterable of ``(x, y, z)``), or ``None`` with fewer than 6 points.
     """
     if len(points) < 6:
         return None
@@ -546,7 +539,30 @@ def _fit_paraboloid_vertex(points, *, guard_radius=None):
         coeffs, *_ = np.linalg.lstsq(M, pz, rcond=None)
     except np.linalg.LinAlgError:
         return None
-    a, b, c, d, e, f = (float(v) for v in coeffs)
+    return tuple(float(v) for v in coeffs)
+
+
+def _eval_paraboloid(coeffs, x, y):
+    """Evaluate :func:`_fit_paraboloid` coefficients at ``(x, y)``."""
+    a, b, c, d, e, f = coeffs
+    return a * x * x + b * y * y + c * x * y + d * x + e * y + f
+
+
+def _fit_paraboloid_vertex(points, *, guard_radius=None):
+    """Fit :func:`_fit_paraboloid` to ``points`` and return the
+    vertex ``(xv, yv, zv)`` where the gradient vanishes.
+
+    Returns ``None`` if:
+      * fewer than 6 points (system is underdetermined),
+      * the Hessian is not concave-down (``4AB - C**2 <= 0`` or
+        ``A >= 0``),
+      * or the vertex lies farther than ``guard_radius`` from the
+        centroid of the input points (fit is extrapolating).
+    """
+    coeffs = _fit_paraboloid(points)
+    if coeffs is None:
+        return None
+    a, b, c, d, e, _f = coeffs
     det = 4.0 * a * b - c * c
     if det <= 1e-18 or a >= 0.0:
         # Not a concave-down elliptic paraboloid (saddle, plane, or
@@ -556,13 +572,11 @@ def _fit_paraboloid_vertex(points, *, guard_radius=None):
     xv = (c * e - 2.0 * b * d) / det
     yv = (c * d - 2.0 * a * e) / det
     if guard_radius is not None:
-        cx = float(px.mean())
-        cy = float(py.mean())
+        cx = float(np.mean([p[0] for p in points]))
+        cy = float(np.mean([p[1] for p in points]))
         if np.hypot(xv - cx, yv - cy) > guard_radius:
             return None
-    zv = (a * xv * xv + b * yv * yv + c * xv * yv
-          + d * xv + e * yv + f)
-    return xv, yv, zv
+    return xv, yv, _eval_paraboloid(coeffs, xv, yv)
 
 
 def grid_walk_search(
@@ -596,12 +610,16 @@ def grid_walk_search(
        node. If any diagonal exceeds the center, resume step 2
        from there. Otherwise the max is a local grid maximum with
        all 8 neighbors lower -- converged.
-    4. **Paraboloid fit**: fit ``z = A x**2 + B y**2 + C xy + D x
-       + E y + F`` by least squares to all cached samples within
-       ``fit_window`` grid nodes of the converged best. Return the
+    4. **Paraboloid fit**: measure any missing nodes within
+       ``fit_window`` grid nodes of the converged best (still capped
+       by ``max_evaluations``), then fit ``z = A x**2 + B y**2 + C xy
+       + D x + E y + F`` by least squares to that square. Return the
        vertex as ``(center_x, center_y)``. If the fit isn't
        concave-down or the vertex falls outside the window, fall
        back to the grid-max coordinates.
+    5. **Confirm**: measure once more at the vertex (off-grid, not
+       counted in ``evaluations``) and return it as ``confirm_rms``
+       so the caller can check it against the best grid sample.
 
     Compared to :func:`gradient_search`, this trades subsample
     refinement of individual triples for a many-sample LSQ fit,
@@ -624,9 +642,10 @@ def grid_walk_search(
         max_iter: Cap on walk iterations (independent of
             ``max_evaluations``). Default 40.
         fit_window: Radius (in grid nodes) of the neighborhood
-            around the converged best used for the paraboloid fit.
-            ``fit_window=1`` \u2192 3\u00d73 (up to 9 points),
-            ``fit_window=2`` \u2192 5\u00d75 (up to 25 points).
+            around the converged best used for the paraboloid fit;
+            missing nodes in it are measured after the walk.
+            ``fit_window=1`` \u2192 3\u00d73 (9 points),
+            ``fit_window=2`` \u2192 5\u00d75 (25 points).
             Default 1.
         on_progress: Callback fired after every new measurement
             and once at every iteration boundary. See
@@ -637,7 +656,8 @@ def grid_walk_search(
         ``best_x, best_y, best_rms`` (global-max sample),
         ``center_x, center_y, center_rms`` (paraboloid vertex),
         ``units, converged, iterations, evaluations, xs, ys,
-        rms_values``.
+        rms_values``, plus ``confirm_rms`` (measured at the vertex;
+        ``None`` if the fit was rejected or the scope timed out).
     """
     if step <= 0:
         raise ValueError("step must be > 0")
@@ -698,13 +718,15 @@ def grid_walk_search(
             iter_end=iter_end,
             centers=list(center_history),
             info_extra=info_extra,
+            fit_window=fit_window,
         )
 
-    def _emit_iter_end(*, converged=False, done=False, info_extra=""):
+    def _emit_iter_end(*, converged=False, done=False, info_extra="",
+                       meas=None, **extra):
         if on_progress is None:
             return
         on_progress(
-            meas=None,
+            meas=meas,
             x=(center_history[-1][0] if center_history else x0),
             y=(center_history[-1][1] if center_history else y0),
             r=(grid_rms[best_ij] if best_ij in grid_rms else 0.0),
@@ -717,6 +739,8 @@ def grid_walk_search(
             iter_end=True,
             centers=list(center_history),
             info_extra=info_extra,
+            fit_window=fit_window,
+            **extra,
         )
 
     iteration = 0
@@ -774,13 +798,19 @@ def grid_walk_search(
         break
 
     # ---- Paraboloid fit over fit_window window around best_ij -----
+    # The walk only brackets the 3x3 around the best node; measure the
+    # rest of the fit window so a larger fit_window actually fits more.
+    window = [(best_ij[0] + di, best_ij[1] + dj)
+              for di in range(-fit_window, fit_window + 1)
+              for dj in range(-fit_window, fit_window + 1)]
+    for n in window:
+        if n not in grid_rms and len(grid_rms) < max_evaluations:
+            _measure(*n)
     fit_pts = []
-    for di in range(-fit_window, fit_window + 1):
-        for dj in range(-fit_window, fit_window + 1):
-            n = (best_ij[0] + di, best_ij[1] + dj)
-            if n in grid_rms:
-                fx, fy = gcoord(*n)
-                fit_pts.append((fx, fy, grid_rms[n]))
+    for n in window:
+        if n in grid_rms:
+            fx, fy = gcoord(*n)
+            fit_pts.append((fx, fy, grid_rms[n]))
 
     grid_max_x, grid_max_y = gcoord(*best_ij)
     grid_max_r = grid_rms[best_ij]
@@ -799,7 +829,17 @@ def grid_walk_search(
         info_fit = (f"paraboloid fit rejected -- fell back to "
                     f"grid-max ({grid_max_x:.4f}, {grid_max_y:.4f}) mm")
     center_history.append((center_x, center_y))
-    _emit_iter_end(converged=converged, done=True, info_extra=info_fit)
+
+    # ---- Confirm: steer to the vertex and measure it --------------
+    confirm_meas = confirm = None
+    if fit_result is not None:
+        confirm_meas = measure_fn(center_x, center_y)
+        if confirm_meas is not None:
+            confirm = (center_x, center_y, float(confirm_meas["rms"]))
+            info_fit += (f"  |  measured there: {confirm[2]:.4g} {units} "
+                         f"(best sample {peak_rms:.4g})")
+    _emit_iter_end(converged=converged, done=True, info_extra=info_fit,
+                   meas=confirm_meas, confirm=confirm)
 
     return {
         "best_x": peak_x,
@@ -808,6 +848,7 @@ def grid_walk_search(
         "center_x": center_x,
         "center_y": center_y,
         "center_rms": center_rms,
+        "confirm_rms": None if confirm is None else confirm[2],
         "units": units,
         "converged": converged,
         "iterations": iteration,
@@ -834,8 +875,10 @@ def make_live_figure():
     """Set up an interactive multi-panel figure. Returns a handles dict.
 
     Layout (left column top->bottom): latest hydrophone trace, P vs
-    u' (along-gradient probe axis), P vs v' (perpendicular probe
-    axis). Right column: scatter of visited (x, y) colored by RMS.
+    u' / P vs v' (probe axes for ``gradient_search``; x / y sections
+    through the best node for ``grid_walk_search``). Right column:
+    visited (x, y) colored by RMS over the field implied by them
+    (see ``_interpolate_field``).
     """
     import matplotlib.pyplot as plt
 
@@ -876,9 +919,15 @@ def make_live_figure():
     ax_pv.set_title("P vs v' (perp. to gradient)")
     ax_pv.grid(True)
 
+    # Field implied by the samples (see ``_interpolate_field``), drawn
+    # under the sample markers.
+    field = ax_scatter.imshow(
+        np.ma.masked_all((2, 2)), origin="lower", extent=(0, 1, 0, 1),
+        cmap="viridis", interpolation="bilinear", zorder=0,
+    )
     scatter = ax_scatter.scatter(
         [np.nan], [np.nan], c=[np.nan], cmap="viridis",
-        s=40, edgecolors="k", linewidths=0.3,
+        s=40, edgecolors="k", linewidths=0.3, zorder=1,
     )
     ax_scatter.set_xlabel("x (mm)")
     ax_scatter.set_ylabel("y (mm)")
@@ -895,6 +944,10 @@ def make_live_figure():
     )
     best_marker, = ax_scatter.plot(
         [], [], "rx", markersize=12, markeredgewidth=2, label="best",
+    )
+    confirm_marker, = ax_scatter.plot(
+        [], [], "*", color="white", markeredgecolor="k", markersize=14,
+        label="measured at fit peak",
     )
     ax_scatter.legend(loc="upper right", fontsize=8)
     cbar = fig.colorbar(scatter, ax=ax_scatter, shrink=0.8)
@@ -922,14 +975,18 @@ def make_live_figure():
         "pu_samples": pu_samples,
         "pu_fit": pu_fit,
         "pu_peak": pu_peak,
+        "pu_extra": [],
         "ax_pv": ax_pv,
         "pv_samples": pv_samples,
         "pv_fit": pv_fit,
         "pv_peak": pv_peak,
+        "pv_extra": [],
         "ax_scatter": ax_scatter,
+        "field": field,
         "scatter": scatter,
         "cbar": cbar,
         "best_marker": best_marker,
+        "confirm_marker": confirm_marker,
         "trajectory": trajectory,
         "info_text": info_text,
     }
@@ -960,14 +1017,124 @@ def _update_probe_axis(ax, samples_line, fit_line, peak_marker,
     ax.autoscale_view()
 
 
+def _update_section_axis(ax, handles, ax_key, *, along_x, pts, coeffs,
+                         vertex, slice_at, half, step, confirm, units):
+    """Slice the fitted paraboloid along x (``along_x``) or y through
+    ``slice_at`` (the vertex, else the best node).
+
+    Each grid row of the fit window ``pts`` (``(n, 3)`` x, y, value)
+    is drawn as its samples plus the paraboloid along that row,
+    coloured by its out-of-slice offset, so the bold slice sits
+    between its neighbouring rows. ``confirm=(x, y, value)`` is the
+    measurement at the vertex.
+    """
+    import matplotlib
+    from matplotlib.colors import Normalize
+
+    artists = handles[f"{ax_key}_extra"]
+    for a in artists:
+        a.remove()
+    artists.clear()
+    for name in ("samples", "fit", "peak"):
+        handles[f"{ax_key}_{name}"].set_data([], [])
+
+    a_idx, p_idx = (0, 1) if along_x else (1, 0)
+    axis, perp_axis = ("x", "y") if along_x else ("y", "x")
+    lo, hi = pts[:, a_idx].min(), pts[:, a_idx].max()
+    u = np.linspace(lo - 0.2 * step, hi + 0.2 * step, 61)
+
+    def section(perp):
+        xy = (u, np.full_like(u, perp))
+        return _eval_paraboloid(coeffs, *(xy if along_x else xy[::-1]))
+
+    cmap = matplotlib.colormaps["coolwarm"]
+    norm = Normalize(-half, half)
+    rows = np.unique(np.round(pts[:, p_idx] / step)) * step
+    for row in rows:
+        on_row = np.abs(pts[:, p_idx] - row) < step / 2.0
+        d = float(np.mean(pts[on_row, p_idx])) - slice_at[p_idx]
+        color = cmap(norm(d))
+        order = np.argsort(pts[on_row, a_idx])
+        artists += ax.plot(pts[on_row, a_idx][order], pts[on_row, 2][order],
+                           "o", color=color, markeredgecolor="k",
+                           markeredgewidth=0.4,
+                           label=f"{perp_axis}{d:+.2f}")
+        if coeffs is not None:
+            artists += ax.plot(u, section(slice_at[p_idx] + d), "--",
+                               color=color, lw=0.8)
+    if coeffs is not None:
+        artists += ax.plot(u, section(slice_at[p_idx]), "-", color="k",
+                           lw=1.5, label="slice")
+    if vertex is not None:
+        artists += ax.plot([vertex[a_idx]], [vertex[2]], "rx",
+                           markersize=10, markeredgewidth=2,
+                           label="fit peak")
+    if confirm is not None:
+        artists += ax.plot([confirm[a_idx]], [confirm[2]], "*",
+                           color="white", markeredgecolor="k",
+                           markersize=12, label="measured")
+    ax.legend(handles=[a for a in artists
+                       if not a.get_label().startswith("_")],
+              loc="best", fontsize=6, ncol=4)
+    ax.relim()
+    ax.autoscale_view()
+    where = "vertex" if vertex is not None else "best"
+    ax.set_title(f"P along {axis} through {where} "
+                 f"({perp_axis}={slice_at[p_idx]:.3f} mm); "
+                 f"rows coloured by {perp_axis} offset", fontsize=9)
+    ax.set_xlabel(f"{axis} (mm)")
+    ax.set_ylabel(f"RMS ({units})")
+
+
+def _interpolate_field(xs, ys, values, step, *, paraboloid=None):
+    """Image of the field implied by the samples.
+
+    Linear interpolation between samples (never exceeds them). With
+    ``paraboloid=(coeffs, (x_best, y_best), half_width)`` (grid
+    search), that square instead shows the LSQ paraboloid
+    :func:`grid_walk_search` fits to locate the peak, so the map can
+    rise above the highest sample there.
+
+    Returns ``(masked_image, extent)`` -- masked outside the samples'
+    convex hull -- or ``None`` until the samples span an area.
+    """
+    from scipy.interpolate import griddata
+    from scipy.spatial import QhullError
+
+    x = np.asarray(xs, dtype=float)
+    y = np.asarray(ys, dtype=float)
+    v = np.asarray(values, dtype=float)
+    if np.ptp(x) <= 0 or np.ptp(y) <= 0:
+        return None
+    res = step / 10.0
+    nx = min(int(round(np.ptp(x) / res)) + 1, 400)
+    ny = min(int(round(np.ptp(y) / res)) + 1, 400)
+    gx = np.linspace(x.min(), x.max(), nx)
+    gy = np.linspace(y.min(), y.max(), ny)
+    GX, GY = np.meshgrid(gx, gy)
+    try:
+        img = griddata(np.column_stack((x, y)), v, (GX, GY), method="linear")
+    except (QhullError, ValueError):
+        return None
+    if paraboloid is not None:
+        coeffs, (bx, by), half = paraboloid
+        inside = ((np.abs(GX - bx) <= half) & (np.abs(GY - by) <= half)
+                  & np.isfinite(img))
+        img[inside] = _eval_paraboloid(coeffs, GX[inside], GY[inside])
+    dx = (gx[1] - gx[0]) / 2.0
+    dy = (gy[1] - gy[0]) / 2.0
+    extent = (gx[0] - dx, gx[-1] + dx, gy[0] - dy, gy[-1] + dy)
+    return np.ma.masked_invalid(img), extent
+
+
 def update_live_figure(handles, *, meas, xs, ys, rms_values, units,
                        best_x, best_y, best_rms,
                        iteration, step, evaluations,
                        converged, done, info_extra="",
                        probe_h=None, probe_u_rms=None, probe_v_rms=None,
                        quad_frac_u=None, quad_frac_v=None,
-                       centers=None, iter_end=False,
-                       **_ignored):
+                       centers=None, iter_end=False, fit_window=None,
+                       confirm=None, **_ignored):
     """Refresh the live figure with the latest measurement and state.
 
     ``probe_h``, ``probe_u_rms``, ``probe_v_rms``: when the caller
@@ -984,6 +1151,16 @@ def update_live_figure(handles, *, meas, xs, ys, rms_values, units,
     ``centers``: optional list of ``(x, y)`` search-center positions
     across iterations. Drawn as a connected red-dotted line.
 
+    ``fit_window``: passed by :func:`grid_walk_search`. The right
+    panel then shows its paraboloid fit over the ``fit_window``
+    square around the best node, and the two lower-left panels show
+    x and y slices of that paraboloid through its vertex, with the
+    fit window's sample rows (and the paraboloid along each row)
+    coloured by their offset from the slice.
+
+    ``confirm``: ``(x, y, value)`` measured at the fitted vertex by
+    :func:`grid_walk_search`; drawn as a star on all three panels.
+
     ``iter_end`` is accepted (for symmetry with the ``on_progress``
     signature) but not used here; ``find_peak`` uses it to know when
     to pause.
@@ -997,21 +1174,59 @@ def update_live_figure(handles, *, meas, xs, ys, rms_values, units,
         handles["ax_trace"].autoscale_view()
         handles["ax_trace"].set_ylabel(f"hydrophone ({units})")
 
+    x_arr = np.asarray(xs, dtype=float)
+    y_arr = np.asarray(ys, dtype=float)
+    r_arr = np.asarray(rms_values, dtype=float)
+    # Grid search: the same paraboloid fit grid_walk_search uses.
+    coeffs = vertex = fit_arr = None
+    if fit_window is not None and xs:
+        half = fit_window * step * (1 + 1e-6)
+        near = (np.abs(x_arr - best_x) <= half) & (np.abs(y_arr - best_y) <= half)
+        fit_arr = np.column_stack((x_arr[near], y_arr[near], r_arr[near]))
+        coeffs = _fit_paraboloid(fit_arr)
+        vertex = _fit_paraboloid_vertex(fit_arr, guard_radius=fit_window * step)
+
     if xs and ys and rms_values:
         pts = np.column_stack((xs, ys))
+        clim = [np.min(rms_values), np.max(rms_values)]
+        field = _interpolate_field(
+            xs, ys, rms_values, step,
+            paraboloid=(None if coeffs is None
+                        else (coeffs, (best_x, best_y), half)),
+        )
+        if field is not None:
+            img, extent = field
+            # Let the fitted peak (above the highest sample) show.
+            if img.count():
+                clim = [min(clim[0], img.min()), max(clim[1], img.max())]
+            handles["field"].set_data(img)
+            handles["field"].set_extent(extent)
+            handles["field"].set_clim(*clim)
         handles["scatter"].set_offsets(pts)
         handles["scatter"].set_array(np.asarray(rms_values, dtype=float))
-        handles["scatter"].set_clim(np.min(rms_values), np.max(rms_values))
+        handles["scatter"].set_clim(*clim)
         pad = max(step * 2.0, 0.1)
         handles["ax_scatter"].set_xlim(min(xs) - pad, max(xs) + pad)
         handles["ax_scatter"].set_ylim(min(ys) - pad, max(ys) + pad)
         handles["best_marker"].set_data([best_x], [best_y])
         handles["cbar"].update_normal(handles["scatter"])
+    if confirm is not None:
+        handles["confirm_marker"].set_data([confirm[0]], [confirm[1]])
 
     if centers is not None and len(centers) > 0:
         cx = [c[0] for c in centers]
         cy = [c[1] for c in centers]
         handles["trajectory"].set_data(cx, cy)
+
+    if fit_window is not None and xs:
+        slice_at = (vertex[0], vertex[1]) if vertex is not None else (best_x, best_y)
+        for ax_key, along_x in (("pu", True), ("pv", False)):
+            _update_section_axis(
+                handles[f"ax_{ax_key}"], handles, ax_key, along_x=along_x,
+                pts=fit_arr, coeffs=coeffs, vertex=vertex,
+                slice_at=slice_at, half=half, step=step,
+                confirm=confirm, units=units,
+            )
 
     if probe_h is not None and probe_u_rms is not None:
         _update_probe_axis(

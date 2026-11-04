@@ -414,6 +414,40 @@ def test_grid_walk_invalid_fit_window_raises():
                          x0=0.0, y0=0.0, step=0.2, fit_window=0)
 
 
+def test_grid_walk_measures_full_fit_window():
+    """fit_window=2 must measure the whole 5x5 around the converged
+    grid max, not just the 3x3 the walk brackets."""
+    step = 0.2
+    res = grid_walk_search(
+        _gaussian_source(peak_xy=(0.4, -0.2)),
+        x0=0.0, y0=0.0, step=step, max_evaluations=60, fit_window=2,
+    )
+    assert res["converged"]
+    measured = {(round(x / step), round(y / step))
+                for x, y in zip(res["xs"], res["ys"])}
+    window = {(2 + di, -1 + dj) for di in range(-2, 3) for dj in range(-2, 3)}
+    assert window <= measured
+
+
+def test_grid_walk_confirms_at_vertex():
+    """After the fit, the vertex itself is measured once (not counted
+    as a grid evaluation) and returned as ``confirm_rms``."""
+    calls: list[tuple[float, float]] = []
+    source = _gaussian_source(peak_xy=(0.33, -0.27))
+
+    def measure(x, y):
+        calls.append((x, y))
+        return source(x, y)
+
+    res = grid_walk_search(measure, x0=0.0, y0=0.0, step=0.2,
+                           max_evaluations=40)
+    assert calls[-1] == (res["center_x"], res["center_y"])
+    assert res["evaluations"] == len(calls) - 1
+    assert res["confirm_rms"] == pytest.approx(
+        source(res["center_x"], res["center_y"])["rms"])
+    assert res["confirm_rms"] >= res["best_rms"]
+
+
 # ---- _fit_paraboloid_vertex ---------------------------------------
 def test_fit_paraboloid_recovers_analytic_vertex():
     """Given exact samples from a known concave-down paraboloid,

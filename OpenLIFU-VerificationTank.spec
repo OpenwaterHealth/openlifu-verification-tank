@@ -19,11 +19,9 @@ APP_NAME = "VerificationTank"
 ROOT = SPECPATH
 
 datas = [
-    # Resolved relative to the openlifu_verification package's parent
-    # folder (paths.REPO_ROOT, VerificationTank transducer JSON), which is
-    # the bundle root (_internal/) when frozen.
-    (os.path.join(ROOT, "setup_data"), "setup_data"),
-    (os.path.join(ROOT, "transducers"), "transducers"),
+    # Setup data template (package data, located via paths.py).
+    (os.path.join(ROOT, "openlifu_verification", "setup_data_template"),
+     os.path.join("openlifu_verification", "setup_data_template")),
 ]
 # The app version shown in the GUI / reports comes from package metadata.
 datas += copy_metadata("openlifu-verification")
@@ -53,7 +51,7 @@ a = Analysis(
     # build environment; netCDF4 alone adds ~50 MB). xarray itself is
     # required by openlifu_sdk.
     excludes=[
-        "PySide6", "shiboken6", "PySide2", "PyQt5",
+        "PyQt6", "PyQt5", "PySide2",
         "netCDF4", "cftime", "h5py", "zarr", "numcodecs",
         "IPython", "ipykernel", "jedi", "notebook", "torch",
     ],

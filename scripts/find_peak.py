@@ -103,18 +103,18 @@ def main():
     parser.add_argument("--time-stop-us", type=float, default=200.0)
     parser.add_argument("--sampling-interval-ns", type=float, default=100.0)
     parser.add_argument("-n", "--n-averages", type=int, default=1,
-                        help="Number of pulses to fire and coherently "
-                             "average at every probe point (default: 1). "
-                             "Larger values reduce noise at the cost of "
-                             "proportionally more wall-time per iteration.")
+                        help="Pulses averaged (median) at every probe point "
+                             "(default: 1). Fired as one pulse train per "
+                             "probe and captured in rapid block.")
     parser.add_argument("--align", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Cross-correlate repeats before averaging "
                              "(only meaningful when --n-averages > 1).")
-    parser.add_argument("--metric", choices=("pnp", "rms"), default="pnp",
-                        help="Quantity to maximise: 'pnp' (default) is the "
-                             "mean negative peak in the window after transmit "
-                             "RF pickup ends; 'rms' is the whole-capture RMS.")
+    parser.add_argument("--metric", choices=("prms", "pnp", "rms"), default="prms",
+                        help="Quantity to maximise, all but 'rms' inside the "
+                             "window after transmit RF pickup ends: 'prms' "
+                             "(default) is the RMS there, 'pnp' the mean "
+                             "negative peak; 'rms' is the whole-capture RMS.")
     parser.add_argument("--pause", action="store_true",
                         help="Pause for a keypress at the end of every "
                              "iteration (after each set of 5 samples: 4 "

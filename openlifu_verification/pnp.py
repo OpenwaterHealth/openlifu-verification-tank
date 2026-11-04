@@ -23,7 +23,7 @@ def clean_pnp_window_us(*, duration_us: float, arrival_us: float,
                         max_delay_us: float = 0.0,
                         last_arrival_us: Optional[float] = None,
                         start_margin_us: float = 3.0,
-                        end_margin_us: float = 3.0) -> tuple[float, float]:
+                        end_margin_us: float = 0.0) -> tuple[float, float]:
     """Window (us, emission-referenced) free of transmit RF pickup.
 
     The last element stops driving at ``max_delay_us + duration_us``.
@@ -94,7 +94,7 @@ def windowed_pnp(t_us: np.ndarray, trace: np.ndarray,
 
 def scan_window_pnp(scan, focus_timing_us: Callable, *, duration_us: float,
                     frequency_kHz: float, start_margin_us: float = 3.0,
-                    end_margin_us: float = 3.0) -> np.ndarray:
+                    end_margin_us: float = 0.0) -> np.ndarray:
     """Per-point clean-window mean PNP of a focus scan, in the trace units.
 
     The hydrophone stays at ``metadata["hydrophone_position_mm"]`` while

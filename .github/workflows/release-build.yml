@@ -67,7 +67,7 @@ jobs:
           # Install project + GUI + build tooling. Runtime deps come from
           # PyPI; openlifu-sdk is then replaced with the resolved GitHub
           # release wheel below.
-          pip install ".[gui,dev]"
+          pip install ".[dev]"
           python -c "from importlib.metadata import version; print('openlifu-verification', version('openlifu-verification'))"
 
       # ── openlifu-sdk from GitHub releases ────────────────────────

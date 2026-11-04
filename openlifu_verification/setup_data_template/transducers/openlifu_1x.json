@@ -1,6 +1,6 @@
 {
-    "id": "openlifu_1x_evt1",
-    "name": "OpenLIFU 1x EVT1",
+    "id": "openlifu_1x",
+    "name": "OpenLIFU 1x",
     "elements": [
         {
             "index": 1,

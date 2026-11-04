@@ -158,3 +158,44 @@ def test_threshold_gates_early_low_amplitude_wobble():
     # Real onset at 60 us; picker should land within a small fraction
     # of a period.
     assert abs(res.arrival_us - 60.0) < 0.05
+
+
+def _plane_wave_tank(amp_mv, freq_kHz=155.0):
+    """Stand-in ``self`` for :meth:`VerificationTank.calibrate_hydrophone_depth`
+    whose 32-pulse capture is a plane-wave burst of ``amp_mv`` at 34 us."""
+    from types import SimpleNamespace
+
+    from openlifu_verification.verificationtank import VerificationTank
+
+    t_us = np.arange(0.0, 100.0, 0.1)
+    burst = _boxcar_burst(t_us=t_us, onset_us=34.0, freq_kHz=freq_kHz,
+                          amp=amp_mv, n_cycles=3)
+    return SimpleNamespace(
+        arr=object(), frequency=freq_kHz, hydrophone_channel="B",
+        hydrophone_position=[0.0, 0.0, 0.0], system_transmit_delay_us=0.0,
+        MIN_PLANE_WAVE_PEAK_MV_PER_V_BY_FREQ_KHZ=(
+            VerificationTank.MIN_PLANE_WAVE_PEAK_MV_PER_V_BY_FREQ_KHZ),
+        apply_pulse=lambda **kw: {"interval_msec": 20.0},
+        set_focus=lambda *a: None,
+        enable_hv_output=lambda **kw: None,
+        capture_pulse_train=lambda **kw: {"time": t_us,
+                                          "B": np.tile(burst, (32, 1))},
+    )
+
+
+@pytest.mark.parametrize("amp_mv, ok", [(8.0, True), (2.0, False)])
+def test_plane_wave_depth_rejects_low_signal(amp_mv, ok):
+    """At 155 kHz / 40 V the passing reports peak at ~8-9 mV; a bubble
+    that drops the signal below 4 mV must stop the calibration with an
+    operator-actionable message instead of picking noise."""
+    from openlifu_verification.verificationtank import VerificationTank
+
+    tank = _plane_wave_tank(amp_mv)
+    if ok:
+        res = VerificationTank.calibrate_hydrophone_depth(tank, voltage_V=40.0)
+        assert res["peak_mv"] == pytest.approx(amp_mv, rel=0.05)
+        assert abs(res["arrival_us"] - 34.0) < 0.1
+    else:
+        with pytest.raises(RuntimeError, match="plane wave signal is too low"
+                           ".*Check for bubbles"):
+            VerificationTank.calibrate_hydrophone_depth(tank, voltage_V=40.0)

@@ -162,6 +162,8 @@ class DryRunTank:
         # Flat-top tone burst with one-cycle cosine ramps, so the
         # envelope onset is sharp like a real burst (a full-length
         # raised cosine delays the 15% arrival threshold by ~6 us).
+        # The ramp-down is ring-down after the drive stops, as measured:
+        # full amplitude lasts until arrival + duration.
         ramp_us = 1e6 / f_Hz
         rel = t_us - arrival_us
         env = np.zeros_like(t_us)
@@ -169,8 +171,8 @@ class DryRunTank:
         env[mask] = 1.0
         up = (rel >= 0.0) & (rel < ramp_us)
         env[up] = 0.5 * (1 - np.cos(np.pi * rel[up] / ramp_us))
-        down = (rel > burst_dur_us - ramp_us) & (rel <= burst_dur_us)
-        env[down] = 0.5 * (1 - np.cos(np.pi * (burst_dur_us - rel[down]) / ramp_us))
+        down = (rel > burst_dur_us) & (rel < burst_dur_us + ramp_us)
+        env[down] = 0.5 * (1 + np.cos(np.pi * (rel[down] - burst_dur_us) / ramp_us))
         carrier = np.sin(2 * np.pi * f_Hz * (t_us - arrival_us) * 1e-6)
         trace = amp_Pa * env * carrier
         trace += self._rng.normal(0.0, self._noise_Pa, size=trace.shape)

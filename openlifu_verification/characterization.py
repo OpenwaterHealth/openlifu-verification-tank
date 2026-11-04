@@ -523,10 +523,14 @@ class Characterization:
         """
         for k, v in self._burst_scope_kwargs().items():
             kw.setdefault(k, v)
+        step = self.PEAK_GRID_STEP_MM_AT_400KHZ * 400.0 / self.frequency_kHz
+        kw.setdefault("grid_step", round(step / 0.05) * 0.05)
+        kw.setdefault("fit_window", self.PEAK_FIT_WINDOW)
+        kw.setdefault("n_averages", self.PEAK_N_AVERAGES)
         if "pnp_window_us" not in kw:
             try:
                 kw["pnp_window_us"] = self._pnp_window_us()
-                kw.setdefault("metric", "pnp")
+                kw.setdefault("metric", "prms")
             except (ValueError, RuntimeError) as e:
                 logger.warning("Peak search falling back to RMS: %s", e)
         x, y = self.ver.find_peak(x0=x0, y0=y0,
@@ -1014,7 +1018,13 @@ class Characterization:
     PULSE_DURATION_US = 60.0
     #: Margins (us) for :func:`clean_pnp_window_us` on every PNP measurement.
     PNP_WINDOW_START_MARGIN_US = 3.0
-    PNP_WINDOW_END_MARGIN_US = 3.0
+    PNP_WINDOW_END_MARGIN_US = 0.0
+    #: Peak-search grid step (mm) at 400 kHz; scaled with wavelength so
+    #: the fit window spans the same fraction of the beam (0.5 mm at 155 kHz).
+    PEAK_GRID_STEP_MM_AT_400KHZ = 0.2
+    #: Peak-search fit window half-width (grid steps) and averages per point.
+    PEAK_FIT_WINDOW = 2
+    PEAK_N_AVERAGES = 5
 
     def _pulse_duration_us(self) -> float:
         """Acceptance pulse duration (us) requested from the LIFU."""

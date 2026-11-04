@@ -106,7 +106,7 @@ def main():
                         help="Settle time after transmit ends (or the pulse "
                              "arrives, whichever is later) before the PNP "
                              "window opens (us).")
-    parser.add_argument("--pnp-end-margin-us", type=float, default=3.0,
+    parser.add_argument("--pnp-end-margin-us", type=float, default=0.0,
                         help="Margin before the end of the acoustic pulse "
                              "where the PNP window closes (us).")
     parser.add_argument("--pnp-window-us", type=float, nargs=2, default=None,
