@@ -73,7 +73,8 @@ class Registry:
 TESTERS = Registry("tester", "testers", "testers.json", "Name",
                    IdFormat(re.compile(r".+"), "any text"))
 CONSOLES = Registry("console", "consoles", "consoles.json", "HWID",
-                    IdFormat(re.compile(r"WL134Q\d{5}"), "WL134Q#####"))
+                    IdFormat(re.compile(r"WL1(1|3)4Q\d{5}"),
+                             "WL114Q/WL134Q#####"))
 HYDROPHONES = Registry("hydrophone", "hydrophone_calibrations",
                        "hydrophones.json", "Calibration",
                        IdFormat(re.compile(r"HYDRO\d{4}"), "HYDRO####"))

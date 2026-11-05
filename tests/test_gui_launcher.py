@@ -99,7 +99,7 @@ def test_txm_sn_sets_frequency(setup, tmp_path):
 @pytest.mark.parametrize("field, value, reason", [
     ("txm_edit", "WLM34Q00012", "Expected WLM24Q/WLM44Q#####"),
     ("console_edit", "WL134Q00008", "Not in setup data"),
-    ("console_edit", "WL134W00007", "Expected WL134Q#####"),
+    ("console_edit", "WL134W00007", "Expected WL114Q/WL134Q#####"),
     ("hydrophone_edit", "HYDRO22", "Expected HYDRO####"),
     ("tester_edit", "T2", "Not in setup data"),
 ])

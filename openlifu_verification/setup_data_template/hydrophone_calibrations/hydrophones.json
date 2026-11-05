@@ -2,10 +2,19 @@
   "HYDRO2246": {
     "Calibration": "HNR0500-2246_xxxxxx-xxxx-xx_xx_20221219.txt"
   },
+  "HYDRO2538": {
+    "Calibration": "HNR0500-2538_xxxxxx-xxxx-xx_xx_20250508.txt"
+  },
+  "HYDRO2580": {
+    "Calibration": "HNR0500-2580_xxxxxx-xxxx-xx_xx_20250924.txt"
+  },
   "HYDRO2581": {
     "Calibration": "HNR0500-2581_xxxxxx-xxxx-xx_xx_20250924.txt"
   },
   "HYDRO2585": {
     "Calibration": "HNR0500-2585_xxxxxx-xxxx-xx_xx_20251028.txt"
+  },
+  "HYDRO2586": {
+    "Calibration": "HNR0500-2586_xxxxxx-xxxx-xx_xx_20251028.txt"
   }
 }

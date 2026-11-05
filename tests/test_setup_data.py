@@ -30,7 +30,8 @@ def setup(tmp_path) -> SetupData:
                               "WLM34Q00012"]),
     (TXM_SN, "WLM24Q00012", ["WLM24W00012"]),
     (CONSOLES.id_format, "WL134Q00007", ["WL134Q0007", "XWL134Q00007",
-                                        "WL134W00007"]),
+                                        "WL134W00007", "WL124Q00007"]),
+    (CONSOLES.id_format, "WL114Q00007", ["WL114Q0007", "WL114W00007"]),
     (HYDROPHONES.id_format, "HYDRO2246", ["HYDRO224", "HYDRO22460", "2246"]),
     (TESTERS.id_format, "Jane Doe 7", [""]),
 ])
@@ -121,7 +122,7 @@ def test_bundled_template_matches_calibrations():
 
 
 def test_add_rejects_bad_format(setup):
-    with pytest.raises(ValueError, match="WL134Q#####"):
+    with pytest.raises(ValueError, match="WL114Q/WL134Q#####"):
         setup.add(CONSOLES, "WL134Q1", "abc")
     assert setup.load(CONSOLES) == {}
 

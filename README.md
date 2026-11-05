@@ -149,7 +149,7 @@ The GUI and `VerificationTank` also copy in any missing template files on first 
 
 ```
 testers/testers.json                       {"<tester ID>": {"Name": "<name>"}}
-consoles/consoles.json                     {"WL134Q#####": {"HWID": "<hardware ID>"}}
+consoles/consoles.json                     {"WL114Q#####" or "WL134Q#####": {"HWID": "<hardware ID>"}}
 hydrophone_calibrations/hydrophones.json   {"HYDRO####": {"Calibration": "<file in this folder>"}}
 hydrophone_calibrations/<calibration files>
 transducers/openlifu_1x.json, openlifu_2x.json   transducer pinmaps
