@@ -40,9 +40,64 @@ ZERO_WINDOW_US = 4.0
 SYSTEM_TRANSMIT_DELAY_US_BY_FREQ_KHZ = {155.0: 113.5, 400.0: 114.3}
 HYDROPHONE_CHANNEL = 'A'
 TRIGGER_CHANNEL = 'B'
+# Pre-emission hydrophone baseline. The channel is DC-coupled, so any DC
+# level on the hydrophone (e.g. leakage into a wet hydrophone or
+# connector) adds straight onto the converted pressure and biases PNP.
+# Samples earlier than -PRE_EMISSION_GUARD_US are averaged per capture
+# and subtracted; at least PRE_EMISSION_MIN_SAMPLES are required.
+PRE_EMISSION_GUARD_US = 0.5
+PRE_EMISSION_MIN_SAMPLES = 16
+# Healthy hydrophones sit well under 1 mV; warn above this.
+HYDROPHONE_BASELINE_WARN_MV = 2.0
 #: ``calibration_path`` default: ``hydrophone.json`` in the setup data
 #: folder.
 SETUP_DATA_CALIBRATION = object()
+
+
+def remove_pre_emission_baseline(result, channel):
+    """Subtract each capture's pre-emission mean from ``result[channel]``.
+
+    ``result`` is a capture dict with an emission-frame ``time`` axis in
+    µs and ``result[channel]`` either one trace or an ``(n_captures,
+    samples)`` block. The channel is modified in place.
+
+    Returns the subtracted baseline (scalar or per-capture array, in the
+    channel's units), or ``None`` when the channel is missing or the
+    window has fewer than :data:`PRE_EMISSION_MIN_SAMPLES` samples
+    before emission (the trace is then left unchanged).
+    """
+    if result is None or channel is None or channel not in result:
+        return None
+    t = np.asarray(result["time"], dtype=float)
+    pre = t < -PRE_EMISSION_GUARD_US
+    if np.count_nonzero(pre) < PRE_EMISSION_MIN_SAMPLES:
+        return None
+    data = np.asarray(result[channel], dtype=float)
+    baseline = data[..., pre].mean(axis=-1)
+    result[channel] = data - baseline[..., None]
+    return baseline
+
+
+def _warn_hydrophone_baseline(owner, baseline_mV):
+    """Warn about a large pre-emission hydrophone baseline.
+
+    Logs when the worst ``|baseline|`` first exceeds
+    :data:`HYDROPHONE_BASELINE_WARN_MV`, then only when it grows by
+    another 1 mV, so repeated captures don't flood the log.
+    """
+    if baseline_mV is None:
+        return
+    worst = float(np.max(np.abs(baseline_mV)))
+    warned = getattr(owner, "_baseline_warned_mV", 0.0)
+    if worst <= max(HYDROPHONE_BASELINE_WARN_MV, warned + 1.0 if warned else 0.0):
+        return
+    owner._baseline_warned_mV = worst
+    logger.warning(
+        "Hydrophone DC baseline up to %.1f mV before emission (removed "
+        "from the traces; healthy hydrophones read < %.0f mV). A large or "
+        "drifting offset usually means a leaky hydrophone or connector.",
+        worst, HYDROPHONE_BASELINE_WARN_MV,
+    )
 
 
 class HardwareNotConnectedError(ConnectionError):
@@ -928,6 +983,8 @@ class VerificationTank:
             result["sampling_interval_ns"] = interval_ns
             result["time_start_s"] = plan["time_start_s"] - delay_s
             result["time_stop_s"] = plan["time_stop_s"] - delay_s
+            _warn_hydrophone_baseline(self, remove_pre_emission_baseline(
+                result, getattr(self, "hydrophone_channel", None)))
         return result
 
     def capture_pulse_train(self,
@@ -1139,6 +1196,8 @@ class VerificationTank:
         result["sampling_interval_ns"] = interval_ns
         result["time_start_s"] = plan["time_start_s"] - delay_s
         result["time_stop_s"] = plan["time_stop_s"] - delay_s
+        _warn_hydrophone_baseline(self, remove_pre_emission_baseline(
+            result, getattr(self, "hydrophone_channel", None)))
         return result
 
     def run_averaged_sweep(self,
