@@ -290,6 +290,27 @@ def build_figures(report: TestReport) -> dict:
         std = np.ravel(np.asarray(std, dtype=float)) / 1e3
         return std if std.size == n and np.isfinite(std).any() else None
 
+    def _1d_errorbar(ax, xs, pnp_kPa, scan, color):
+        """Plot a 1-D PNP profile with its across-repeat ±1σ bars.
+
+        The spread is usually well under 1 % of the peak, smaller than
+        the markers, so the legend also states its size. Returns the
+        y-axis label.
+        """
+        err = _1d_err_kPa(scan, pnp_kPa.size)
+        label = None
+        if err is not None:
+            reps = np.shape(scan.metadata.get("window_pnp_repeats", ()))
+            n_rep = f"{reps[-1]} " if reps else ""
+            peak = float(np.nanmax(pnp_kPa))
+            worst = float(np.nanmax(err))
+            label = f"±1σ over {n_rep}repeats: max {worst:.1f} kPa"
+            if peak > 0:
+                label += f" ({worst / peak * 100:.1f}% of peak)"
+        ax.errorbar(xs, pnp_kPa, yerr=err, fmt="o-", ms=3.5, lw=1.2,
+                    elinewidth=1.0, capsize=2, color=color, label=label)
+        return "Median PNP ± 1σ (kPa)" if err is not None else "PNP (kPa)"
+
     # Figures 2 / 3: 1-D lateral (x) / elevation (y) sweeps.
     def _1d_offset_fig(scan, axis: str, axis_index: int, color: str,
                        title: str, row_key: str):
@@ -306,15 +327,14 @@ def build_figures(report: TestReport) -> dict:
                        label=f"pass |\u0394{axis}| \u2264 {lim:g} mm")
             detail = (f"offset {cs[ipk]:+.2f} mm, "
                       f"margin {lim - abs(cs[ipk]):+.2f} mm")
-        ax.errorbar(cs, pnp_kPa, yerr=_1d_err_kPa(scan, pnp_kPa.size),
-                    fmt="o-", lw=1.5, capsize=2, color=color)
+        ylabel = _1d_errorbar(ax, cs, pnp_kPa, scan, color)
         ax.plot(cs[ipk], pnp_kPa[ipk], "r*", ms=12,
                 label=f"peak \u0394{axis} = {cs[ipk]:+.2f} mm")
-        ax.legend(loc="upper right", fontsize=8)
+        # Bottom centre sits under the main lobe, clear of the peak.
+        ax.legend(loc="lower center", fontsize=7)
         ax.axvline(0.0, color="0.7", lw=0.7)
         ax.set_xlabel(f"\u0394{axis} ({axis}\u2080 = {c0:.2f} mm, 2-D peak)")
-        ax.set_ylabel("Median PNP ± 1σ (kPa)"
-                      if _1d_err_kPa(scan, pnp_kPa.size) is not None else "PNP (kPa)")
+        ax.set_ylabel(ylabel)
         _title(ax, f"{title} @ {report.frequency_kHz:.0f} kHz, "
                    f"{report.voltage_V:.0f} V", _status(row_key), detail)
         ax.grid(True, alpha=0.3)
@@ -349,14 +369,12 @@ def build_figures(report: TestReport) -> dict:
             detail = (f"offset {zs[ipk]:+.2f} mm, "
                       f"margin {min(zs[ipk] - lo, hi - zs[ipk]):+.2f} mm")
         ax.axvline(0.0, color="0.7", lw=0.7)
-        ax.errorbar(zs, pnp_kPa, yerr=_1d_err_kPa(axi, pnp_kPa.size),
-                    fmt="o-", lw=1.5, capsize=2, color="tab:green")
+        ylabel = _1d_errorbar(ax, zs, pnp_kPa, axi, "tab:green")
         ax.plot(zs[ipk], pnp_kPa[ipk], "r*", ms=12,
                 label=f"axial peak \u0394z = {zs[ipk]:+.2f} mm")
         ax.legend(loc="lower right", fontsize=7)
         ax.set_xlabel(f"\u0394z commanded focus (z\u2080 = {z0:.2f} mm, hydrophone depth)")
-        ax.set_ylabel("Median PNP \u00b1 1\u03c3 (kPa)"
-                      if _1d_err_kPa(axi, pnp_kPa.size) is not None else "PNP (kPa)")
+        ax.set_ylabel(ylabel)
         _title(ax, f"Figure 4: 1-D Axial scan @ {report.frequency_kHz:.0f} kHz, "
                    f"{report.voltage_V:.0f} V", _status("axial_peak_offset_mm"), detail)
         ax.grid(True, alpha=0.3)
