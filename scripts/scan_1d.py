@@ -51,10 +51,9 @@ def main():
     parser.add_argument("--voltage", type=float, default=None,
                         help="HV rail in V "
                              "(default: VerificationTank.DEFAULT_VOLTAGE_BY_FREQ_KHZ).")
-    parser.add_argument("--duration-usec", type=float,
-                        default=Characterization.PULSE_DURATION_US,
+    parser.add_argument("--duration-usec", type=float, default=None,
                         help="Pulse duration in µs (default: the report's "
-                             "%(default)g µs).")
+                             "pulse for --frequency-khz).")
     parser.add_argument("--interval-msec", type=float, default=None,
                         help="Pulse interval in ms "
                              "(default: VerificationTank.DEFAULT_INTERVAL_MSEC).")
@@ -149,6 +148,8 @@ def main():
     tank_frequency = int(args.frequency_khz
                          if args.frequency_khz is not None
                          else VerificationTank.DEFAULT_FREQUENCY_KHZ)
+    if args.duration_usec is None:
+        args.duration_usec = Characterization.pulse_duration_us_for(tank_frequency)
     if args.scan_range is None or args.num is None:
         plan = cfg.plan_for(tank_frequency)
         axis = {"x": plan.lateral_1d, "y": plan.elevation_1d, "z": plan.axial_1d}[args.dim]
