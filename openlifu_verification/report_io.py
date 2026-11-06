@@ -435,7 +435,7 @@ def build_figures(report: TestReport) -> dict:
             ax.plot(freqs[inom], nom, "s", mfc="none", mec="k", ms=10,
                     label=f"nominal {freqs[inom]:.0f} kHz")
             if crit is not None and peak > 0:
-                max_dev = float(crit.freq_response.max_deviation_pct)
+                max_dev = crit.freq_response.max_deviation_pct_for(freq_kHz)
                 ax.axhline(peak * (1 - max_dev / 100.0), color="firebrick",
                            ls="--", lw=0.9,
                            label=f"pass: nominal \u2265 {100 - max_dev:g}% of peak")
