@@ -4,8 +4,11 @@
 #
 # Produces one folder (dist/VerificationTank/) with two executables that
 # share the same bundled libraries:
-#   VerificationTank.exe          - GUI, no console window
-#   VerificationTank_console.exe  - same app with a console (log output)
+#   OpenLIFU Verification Tank.exe            - GUI, no console window
+#   OpenLIFU Verification Tank (console).exe  - same app with a console
+#                                               (log output)
+# Both use the app icon (openlifu_verification/assets/app_icon.ico; edit
+# app_icon.svg and run freeze/make_icon.py to regenerate it).
 #
 # Build:  python -m PyInstaller -y OpenLIFU-VerificationTank.spec
 #
@@ -15,13 +18,19 @@ import os
 
 from PyInstaller.utils.hooks import collect_all, copy_metadata
 
-APP_NAME = "VerificationTank"
+APP_NAME = "OpenLIFU Verification Tank"
+# Output folder under dist/; kept so the install layout doesn't change.
+DIST_DIR = "VerificationTank"
 ROOT = SPECPATH
+ICON = os.path.join(ROOT, "openlifu_verification", "assets", "app_icon.ico")
 
 datas = [
     # Setup data template (package data, located via paths.py).
     (os.path.join(ROOT, "openlifu_verification", "setup_data_template"),
      os.path.join("openlifu_verification", "setup_data_template")),
+    # Window / taskbar icon (located via paths.APP_ICON).
+    (os.path.join(ROOT, "openlifu_verification", "assets"),
+     os.path.join("openlifu_verification", "assets")),
 ]
 # The app version shown in the GUI / reports comes from package metadata.
 datas += copy_metadata("openlifu-verification")
@@ -65,6 +74,7 @@ exe_gui = EXE(
     [],
     exclude_binaries=True,
     name=APP_NAME,
+    icon=ICON,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -77,7 +87,8 @@ exe_console = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name=f"{APP_NAME}_console",
+    name=f"{APP_NAME} (console)",
+    icon=ICON,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -93,5 +104,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name=APP_NAME,
+    name=DIST_DIR,
 )

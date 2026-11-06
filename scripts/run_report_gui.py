@@ -55,7 +55,7 @@ import run_report
 from PySide6.QtCore import (
     Qt, QEvent, QObject, QSettings, QThread, QTimer, QUrl, Signal,
 )
-from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QTextCursor
+from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -86,6 +86,7 @@ from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
 from openlifu_verification.characterization import ReportRow
 from openlifu_verification.device_info import read_console_hwid
 from openlifu_verification.hardware_status import probe_hardware
+from openlifu_verification.paths import APP_ICON
 from openlifu_verification.report_io import NONSTANDARD_BANNER
 from openlifu_verification.setup_data import (
     CONSOLES,
@@ -2193,6 +2194,22 @@ def _attach_qt_log_handler(bridge: _LogBridge) -> _QtLogHandler:
     return handler
 
 
+#: Windows taskbar grouping ID. Without one, a source run groups under
+#: (and shows the icon of) python.exe.
+APP_USER_MODEL_ID = "Openwater.OpenLIFU.VerificationTank"
+
+
+def _set_app_user_model_id() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            APP_USER_MODEL_ID)
+    except Exception:  # noqa: BLE001 - taskbar grouping is cosmetic only
+        pass
+
+
 def main(argv=None) -> int:
     args = build_gui_parser().parse_args(argv)
 
@@ -2208,7 +2225,10 @@ def main(argv=None) -> int:
     args.no_prompt = True
     args.no_start_prompt = True
 
+    _set_app_user_model_id()
     app = QApplication.instance() or QApplication(sys.argv)
+    if APP_ICON.is_file():
+        app.setWindowIcon(QIcon(str(APP_ICON)))
     # Fusion is Qt's platform-neutral style; it plays nicely with
     # heavy QSS overrides and looks identical on Windows / macOS /
     # Linux so the theme renders the same everywhere.

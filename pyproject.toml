@@ -36,4 +36,4 @@ packages = ["openlifu_verification"]
 
 [tool.setuptools.package-data]
 # Template copied into the setup data folder (see setup_data.py).
-openlifu_verification = ["setup_data_template/*/*"]
+openlifu_verification = ["setup_data_template/*/*", "assets/*"]
