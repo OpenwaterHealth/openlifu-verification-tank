@@ -160,6 +160,37 @@ def test_threshold_gates_early_low_amplitude_wobble():
     assert abs(res.arrival_us - 60.0) < 0.05
 
 
+@pytest.mark.parametrize("freq_kHz", [155.0, 400.0])
+@pytest.mark.parametrize("dc", [0.003, 0.01])
+def test_flat_positive_foot_is_not_walked_into(freq_kHz, dc):
+    """A small positive residual baseline under a 32-pulse median keeps
+    the sign from flipping before the burst, so the first crest's
+    same-sign run reaches back across the flat foot (seen on 155 kHz
+    focused depth calibrations as a ~2 us early arrival). The onset must
+    stay at the real start of the leading edge."""
+    t_us = np.arange(0.0, 100.0, 0.1)
+    rng = np.random.default_rng(3)
+    trace = (_boxcar_burst(t_us=t_us, onset_us=37.3, freq_kHz=freq_kHz)
+             + dc * (t_us > 22.0) + rng.normal(0.0, 0.001, t_us.size))
+    res = find_first_arrival_us(t_us, trace, frequency_kHz=freq_kHz,
+                                skip_us=25.0)
+    assert res is not None
+    assert abs(res.arrival_us - 37.3) < 0.05
+
+
+@pytest.mark.parametrize("freq_kHz", [155.0, 400.0])
+def test_flat_foot_check_keeps_ring_up_onset(freq_kHz):
+    """A slow ring-up's first lobe starts as ~t^2, not a flat foot; its
+    zero-crossing onset must still be used (no late extrapolation)."""
+    t_us = np.arange(0.0, 100.0, 0.02)
+    trace = _ramped_burst(t_us=t_us, onset_us=33.6, freq_kHz=freq_kHz,
+                          tau_cycles=4.0)
+    res = find_first_arrival_us(t_us, trace, frequency_kHz=freq_kHz,
+                                skip_us=14.0, min_prominence_frac=0.01)
+    assert res is not None
+    assert abs(res.arrival_us - 33.6) < 0.05
+
+
 def _plane_wave_tank(amp_mv, freq_kHz=155.0):
     """Stand-in ``self`` for :meth:`VerificationTank.calibrate_hydrophone_depth`
     whose 32-pulse capture is a plane-wave burst of ``amp_mv`` at 34 us."""
