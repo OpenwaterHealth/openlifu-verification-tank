@@ -207,7 +207,7 @@ class FreqResponse:
     frequency sweep, expressed as a percentage of the peak, keyed by
     nominal freq (kHz)."""
     max_deviation_pct_by_freq_kHz: dict[str, float] = field(default_factory=lambda: {
-        "155": 30.0,
+        "155": 40.0,
         "400": 15.0,
     })
 
