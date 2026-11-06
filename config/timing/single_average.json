@@ -1,6 +1,7 @@
 {
   "scope": {
     "n_averages": 1,
+    "scan_1d_n_averages": 1,
     "pnp_n_averages": 1
   }
 }

@@ -37,6 +37,7 @@ def test_standard_configuration_is_pinned():
         "hydrophone_range_mv": 200,
         "voltage_scan_headroom_pct": 30.0,
         "n_averages": 3,
+        "scan_1d_n_averages": 5,
         "pnp_n_averages": 5,
     }
     assert d["by_freq_kHz"] == {"155": _STANDARD_PLAN, "400": _STANDARD_PLAN}

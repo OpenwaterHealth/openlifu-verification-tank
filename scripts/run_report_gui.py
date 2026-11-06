@@ -555,9 +555,11 @@ def _estimate_phases(scan_config: ScanConfig, frequency_kHz: float,
     """Expected phases of one run, in log order."""
     plan = scan_config.plan_for(frequency_kHz)
     n_avg = int(scan_config.scope.n_averages)
+    n_avg_1d = int(scan_config.scope.scan_1d_n_averages)
     n_pnp = int(scan_config.scope.pnp_n_averages)
     configure = _CONFIGURE_S
     point = _SCAN_POINT_S + _CAPTURE_PER_AVG_S * n_avg
+    point_1d = _SCAN_POINT_S + _CAPTURE_PER_AVG_S * n_avg_1d
 
     phases = [
         _Phase(None, "Connecting to hardware", 1.0),
@@ -571,11 +573,11 @@ def _estimate_phases(scan_config: ScanConfig, frequency_kHz: float,
     if not skip_2d:
         phases += [
             _Phase("Running 1-D lateral", "1-D lateral scan",
-                   0.3 + plan.lateral_1d.points * point),
+                   0.3 + plan.lateral_1d.points * point_1d),
             _Phase("Running 1-D elevation", "1-D elevation scan",
-                   0.3 + plan.elevation_1d.points * point),
+                   0.3 + plan.elevation_1d.points * point_1d),
             _Phase("Running 1-D axial", "1-D axial scan",
-                   0.3 + plan.axial_1d.points * point),
+                   0.3 + plan.axial_1d.points * point_1d),
             _Phase("Running 2-D scan", "2-D scan",
                    0.3 + plan.scan_2d.points ** 2 * point),
         ]

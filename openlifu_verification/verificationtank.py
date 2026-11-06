@@ -1153,7 +1153,8 @@ class VerificationTank:
                            chunk_size=None,
                            timeout_s=None,
                            progress="bar",
-                           progress_label=None):
+                           progress_label=None,
+                           keep_repeats=False):
         """Repeat-fire each sweep point and (optionally) coherently average.
 
         Thin wrapper around :meth:`run_rapid_sweep`: expands ``points``
@@ -1181,6 +1182,9 @@ class VerificationTank:
                 against the first repeat before averaging.
             align_max_shift_samples: Optional cap on the lag search
                 (samples). ``None`` searches the full range.
+            keep_repeats: If ``True``, each ``averaging`` dict also
+                carries ``repeats``: the aligned per-repeat hydrophone
+                traces, shape ``(n_captured, samples)``.
 
         Returns:
             ``(outputs, timings, averaging)`` where ``outputs`` and
@@ -1189,7 +1193,7 @@ class VerificationTank:
             ``averaging`` is a list of per-point dicts with keys
             ``n_averages``, ``lags_s`` (shape ``(n_averages,)``),
             ``noise_rms`` (per-sample std RMS on the hydrophone
-            channel).
+            channel) and, with ``keep_repeats``, ``repeats``.
         """
         n_averages = int(n_averages)
         if n_averages < 1:
@@ -1214,6 +1218,11 @@ class VerificationTank:
             averaging = [{"n_averages": 1,
                           "lags_s": np.zeros(1),
                           "noise_rms": float("nan")} for _ in outputs]
+            if keep_repeats:
+                hydro = self.hydrophone_channel
+                for o, a in zip(outputs, averaging):
+                    if o is not None:
+                        a["repeats"] = np.asarray(o[hydro], dtype=float)[None, :]
             return outputs, timings, averaging
 
         # Expand points -> (point, repeat_idx). apply_point is only
@@ -1334,6 +1343,8 @@ class VerificationTank:
                 "lags_s": lags_s,
                 "noise_rms": noise_rms,
             })
+            if keep_repeats:
+                averaging[-1]["repeats"] = aligned_hydro
 
         return outputs, timings, averaging
 
@@ -1846,6 +1857,7 @@ class VerificationTank:
             timeout_s=timeout_s,
             progress=progress,
             progress_label=progress_label,
+            keep_repeats=True,
         )
         traces, t_axis, ok_mask = self._stack_hydrophone_traces(outputs)
         if traces is None:
@@ -1853,6 +1865,14 @@ class VerificationTank:
 
         traces, units = self._convert_to_pressure(traces, self.frequency * 1e3)
         traces = traces.reshape(num, -1)
+        # Per-repeat traces (NaN-padded where a repeat wasn't captured)
+        # so per-point PNP can be the median over repeats, with spread.
+        repeats = np.full((num, max(1, int(n_averages)), traces.shape[-1]), np.nan)
+        for i, a in enumerate(a for a, ok in zip(averaging, ok_mask) if ok):
+            rep = a.pop("repeats", None)
+            if rep is not None:
+                repeats[i, :rep.shape[0]] = rep
+        repeats, _ = self._convert_to_pressure(repeats, self.frequency * 1e3)
 
         return ScanResult(
             scan_type="1d",
@@ -1875,6 +1895,7 @@ class VerificationTank:
                 "n_averages": int(n_averages),
                 "align": bool(align),
                 "averaging": averaging,
+                "repeat_traces": repeats,
             },
         )
 

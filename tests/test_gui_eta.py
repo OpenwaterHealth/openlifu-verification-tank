@@ -43,10 +43,15 @@ _MEASURED_AXIAL = {f: {"axial_1d": {"extent_mm": 10.0, "points": 21}}
                    for f in ("155", "400")}
 
 
+# The measured runs used 3 averages per 1-D scan point.
+_MEASURED_1D_AVG = {"scan_1d_n_averages": 3}
+
+
 @pytest.mark.parametrize("overrides, measured_s", [
-    ({"by_freq_kHz": _MEASURED_AXIAL}, 222.0),
-    ({"by_freq_kHz": {"155": _HALF_POINTS, "400": _HALF_POINTS}}, 153.7),
-    ({"scope": {"n_averages": 1, "pnp_n_averages": 1},
+    ({"scope": _MEASURED_1D_AVG, "by_freq_kHz": _MEASURED_AXIAL}, 222.0),
+    ({"scope": _MEASURED_1D_AVG,
+      "by_freq_kHz": {"155": _HALF_POINTS, "400": _HALF_POINTS}}, 153.7),
+    ({"scope": {"n_averages": 1, "scan_1d_n_averages": 1, "pnp_n_averages": 1},
       "by_freq_kHz": _MEASURED_AXIAL}, 176.5),
 ])
 def test_model_matches_measured_155_runs(tmp_path, overrides, measured_s):

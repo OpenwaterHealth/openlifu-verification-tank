@@ -26,6 +26,7 @@ import datetime
 import json
 import logging
 import threading
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -562,6 +563,7 @@ class Characterization:
         plan = cfg.plan_for(self.frequency_kHz)
         scope_kw = self._burst_scope_kwargs()
         n_avg = int(cfg.scope.n_averages)
+        n_avg_1d = int(cfg.scope.scan_1d_n_averages)
         ext = plan.lateral_1d.extent_mm
         pts = plan.lateral_1d.points
 
@@ -570,7 +572,7 @@ class Characterization:
         logger.info("Running 1-D lateral (x) scan (\u00b1%.1f mm, %d pts)...", ext, pts)
         lat = self.ver.scan_1d(
             dim="x", scan_range=(-ext, ext), num=pts,
-            absolute=False, n_averages=n_avg, **scope_kw,
+            absolute=False, n_averages=n_avg_1d, **scope_kw,
         )
         self.report.scans["lateral_1d"] = lat
         self._attach_window_pnp(lat)
@@ -585,7 +587,7 @@ class Characterization:
                     ext_e, pts_e)
         elev = self.ver.scan_1d(
             dim="y", scan_range=(-ext_e, ext_e), num=pts_e,
-            absolute=False, n_averages=n_avg, **scope_kw,
+            absolute=False, n_averages=n_avg_1d, **scope_kw,
         )
         self.report.scans["elevation_1d"] = elev
         self._attach_window_pnp(elev)
@@ -600,7 +602,7 @@ class Characterization:
                     ext_a, pts_a)
         axial = self.ver.scan_1d(
             dim="z", scan_range=(-ext_a, ext_a), num=pts_a,
-            absolute=False, n_averages=n_avg, **scope_kw,
+            absolute=False, n_averages=n_avg_1d, **scope_kw,
         )
         self.report.scans["axial_1d"] = axial
         self._attach_window_pnp(axial)
@@ -1055,8 +1057,15 @@ class Characterization:
         )
 
     def _attach_window_pnp(self, scan: ScanResult) -> None:
-        """Store per-point clean-window median PNP in ``scan.metadata["window_pnp"]``
-        so the graders and figures (via ``scan.reduce("pnp")``) use it."""
+        """Store per-point clean-window PNP in ``scan.metadata["window_pnp"]``
+        so the graders and figures (via ``scan.reduce("pnp")``) use it.
+
+        When the scan kept its per-repeat traces (1-D scans), each point's
+        PNP is the median over repeats, so one noisy repeat can't spike
+        the profile, and ``metadata["window_pnp_std"]`` holds the
+        across-repeat sample std (NaN with fewer than two repeats).
+        """
+        repeats = scan.metadata.get("repeat_traces")
         try:
             pnp = scan_window_pnp(
                 scan, self.ver.focus_timing_us,
@@ -1065,10 +1074,20 @@ class Characterization:
                 frequency_kHz=self.frequency_kHz,
                 start_margin_us=self.PNP_WINDOW_START_MARGIN_US,
                 end_margin_us=self.PNP_WINDOW_END_MARGIN_US,
+                traces=repeats,
             )
         except (KeyError, ValueError, RuntimeError) as e:
             logger.warning("Scan PNP falls back to the whole-trace minimum: %s", e)
             return
+        if repeats is not None:
+            scan.metadata["window_pnp_repeats"] = pnp
+            n = np.isfinite(pnp).sum(axis=-1)
+            with np.errstate(invalid="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                med = np.nanmedian(pnp, axis=-1)
+                std = np.nanstd(pnp, axis=-1, ddof=1)
+            scan.metadata["window_pnp_std"] = np.where(n > 1, std, np.nan)
+            pnp = med
         n_bad = int(np.count_nonzero(~np.isfinite(pnp)))
         if n_bad:
             logger.warning("%d of %d scan points have no clean PNP window",

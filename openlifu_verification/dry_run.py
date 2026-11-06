@@ -346,6 +346,11 @@ class DryRunTank:
             traces[i] = self._synth_trace(amp, float(self.hydrophone_position[2]), t_us)
 
         coord_key = {"x": "xfoci", "y": "yfoci", "z": "zfoci"}[dim]
+        # Noisy per-repeat copies (local RNG, like measure_pressure) so
+        # the 1-D PNP gets a median and spread over repeats.
+        peak = float(np.max(np.abs(traces))) if traces.size else 0.0
+        repeats = traces[:, None, :] + np.random.default_rng(1).normal(
+            0.0, 0.03 * peak, size=(num, max(1, int(n_averages)), t_us.size))
         return ScanResult(
             scan_type="1d",
             t=t_us,
@@ -362,6 +367,8 @@ class DryRunTank:
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
                 "focus_points_mm": np.asarray(foci, dtype=float),
                 "absolute": bool(absolute),
+                "n_averages": int(n_averages),
+                "repeat_traces": repeats,
             },
         )
 

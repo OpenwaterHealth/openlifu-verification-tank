@@ -25,6 +25,8 @@ import argparse
 import logging
 from pathlib import Path
 
+import numpy as np
+
 from openlifu_verification import (Characterization, ScanConfig, VerificationTank,
                                    set_log_level, setup_data)
 from openlifu_verification.pnp import emitted_duration_us, scan_window_pnp
@@ -106,7 +108,7 @@ def main():
     # --- Misc ---
     parser.add_argument("--chunk-size", type=int, default=0,
                         help="Rapid-block chunk size (0 = whole sweep).")
-    parser.add_argument("--n-averages", type=int, default=cfg.scope.n_averages,
+    parser.add_argument("--n-averages", type=int, default=cfg.scope.scan_1d_n_averages,
                         help="Repeat every scan point this many times and "
                              "coherently average the traces (default: %(default)s).")
     parser.add_argument("--align", action=argparse.BooleanOptionalAction,
@@ -208,14 +210,17 @@ def main():
             if args.z is not None:
                 scan_kwargs["z"] = args.z
             result = ver.scan_1d(**scan_kwargs)
-            result.metadata["window_pnp"] = scan_window_pnp(
+            # One PNP per repeat; the point's PNP is their median.
+            pnp = scan_window_pnp(
                 result, ver.focus_timing_us,
                 duration_us=emitted_duration_us(resolved["duration_usec"],
                                                 resolved["frequency_kHz"]),
                 frequency_kHz=resolved["frequency_kHz"],
                 start_margin_us=Characterization.PNP_WINDOW_START_MARGIN_US,
                 end_margin_us=Characterization.PNP_WINDOW_END_MARGIN_US,
+                traces=result.metadata["repeat_traces"],
             )
+            result.metadata["window_pnp"] = np.nanmedian(pnp, axis=-1)
     except (ConnectionError, ValueError, Exception) as e:
         logger.error("Scan aborted: %s", e)
         raise
