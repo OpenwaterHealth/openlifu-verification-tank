@@ -3036,7 +3036,7 @@ class VerificationTank:
                 duration_us=duration_us,
                 arrival_us=first_us, last_arrival_us=last_us, max_delay_us=max_delay_us,
             )
-        metric_name = {"rms": "RMS", "pnp": "mean PNP", "prms": "windowed RMS"}[metric]
+        metric_name = {"rms": "RMS", "pnp": "median PNP", "prms": "windowed RMS"}[metric]
         if metric != "rms":
             logger.info("find_peak: metric = %s in %.1f-%.1f us", metric_name, *pnp_window_us)
 
@@ -3092,7 +3092,7 @@ class VerificationTank:
             if meas is not None and metric == "pnp":
                 # The search algorithms maximise meas["rms"].
                 m = windowed_pnp(meas["t"], meas["trace"], pnp_window_us,
-                                 frequency_kHz=freq_kHz)["mean"]
+                                 frequency_kHz=freq_kHz)["median"]
                 meas["rms"] = m if np.isfinite(m) else 0.0
             elif meas is not None and metric == "prms":
                 t = np.asarray(meas["t"])

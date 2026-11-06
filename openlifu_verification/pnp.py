@@ -23,7 +23,7 @@ def clean_pnp_window_us(*, duration_us: float, arrival_us: float,
                         max_delay_us: float = 0.0,
                         last_arrival_us: Optional[float] = None,
                         start_margin_us: float = 3.0,
-                        end_margin_us: float = 0.0) -> tuple[float, float]:
+                        end_margin_us: float = 3.0) -> tuple[float, float]:
     """Window (us, emission-referenced) free of transmit RF pickup.
 
     The last element stops driving at ``max_delay_us + duration_us``.
@@ -33,7 +33,10 @@ def clean_pnp_window_us(*, duration_us: float, arrival_us: float,
     window covers the part where transmission has stopped and every
     element is contributing, i.e. the fully rung-up, interference-free
     tail. For long pulses at the focus its length is ~ the one-way time
-    of flight (``arrival_us - max_delay_us``) minus the margins.
+    of flight (``arrival_us - max_delay_us``) minus the margins. The
+    end margin keeps the window clear of the acoustic pulse's
+    falling edge (at 400 kHz a 0 us margin admits its first falling
+    peak).
 
     Raises:
         ValueError: If the margins leave an empty window.
@@ -55,13 +58,15 @@ def windowed_pnp(t_us: np.ndarray, trace: np.ndarray,
 
     Finds every local negative peak in the window (at most one per
     acoustic cycle when ``frequency_kHz`` is given) and returns their
-    mean / sample std along with the window's absolute minimum. All
+    median / mean / sample std along with the window's absolute
+    minimum. The median is the reported PNP: a partially rung-up or
+    falling peak at either end of the window can't pull it. All
     magnitudes are positive and in the trace's units.
 
     Returns:
         Dict with ``window_us``, ``pnp`` (max negative excursion in
         the window), ``peak_t_us`` / ``peak_values`` (each local
-        negative peak), ``n_peaks``, ``mean`` and ``std``
+        negative peak), ``n_peaks``, ``median``, ``mean`` and ``std``
         (NaN when there are too few peaks).
     """
     t_us = np.asarray(t_us, dtype=float)
@@ -87,6 +92,7 @@ def windowed_pnp(t_us: np.ndarray, trace: np.ndarray,
         "peak_t_us": t_win[idx],
         "peak_values": peaks,
         "n_peaks": int(idx.size),
+        "median": float(np.median(peaks)) if idx.size else float("nan"),
         "mean": float(peaks.mean()) if idx.size else float("nan"),
         "std": float(peaks.std(ddof=1)) if idx.size > 1 else float("nan"),
     }
@@ -94,8 +100,8 @@ def windowed_pnp(t_us: np.ndarray, trace: np.ndarray,
 
 def scan_window_pnp(scan, focus_timing_us: Callable, *, duration_us: float,
                     frequency_kHz: float, start_margin_us: float = 3.0,
-                    end_margin_us: float = 0.0) -> np.ndarray:
-    """Per-point clean-window mean PNP of a focus scan, in the trace units.
+                    end_margin_us: float = 3.0) -> np.ndarray:
+    """Per-point clean-window median PNP of a focus scan, in the trace units.
 
     The hydrophone stays at ``metadata["hydrophone_position_mm"]`` while
     the focus moves through ``metadata["focus_points_mm"]``, so each point
@@ -118,7 +124,7 @@ def scan_window_pnp(scan, focus_timing_us: Callable, *, duration_us: float,
                 last_arrival_us=last_us, max_delay_us=max_delay_us,
                 start_margin_us=start_margin_us, end_margin_us=end_margin_us)
             out[i] = windowed_pnp(scan.t, trace, window,
-                                  frequency_kHz=frequency_kHz)["mean"]
+                                  frequency_kHz=frequency_kHz)["median"]
         except ValueError:
             pass
     return out.reshape(traces.shape[:-1])
