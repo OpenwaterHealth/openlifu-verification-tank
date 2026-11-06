@@ -21,6 +21,12 @@ leverages the predictable sinusoidal shape of the RF signal:
    a ~1-cycle 155 kHz burst lands well under T/4 after the onset, and
    a sub-threshold first cycle puts the first qualifying crest a
    whole period late).
+4. Guard against a flat foot: a small residual baseline offset under
+   a many-pulse median can keep the sign from flipping before the
+   burst, stretching the first lobe back over a flat, near-zero
+   stretch. When the lobe's zero crossing sits more than T/8 before
+   its leading edge extrapolated to zero (through the 10 % and 50 %
+   levels), the extrapolated edge is the onset.
 
 Combined with a plane-wave excitation (all elements fire
 simultaneously, so ``max(tof) == min(tof) == 0``), this gives a direct
@@ -91,7 +97,9 @@ def find_first_arrival_us(t_us: np.ndarray,
     extended over preceding lobes (either polarity) whose peak exceeds
     ``noise_k`` x the noise RMS. Preceding lobes wider than one carrier
     period (baseline drift, not carrier) end the walk, and it never
-    reaches more than two periods before the first peak's lobe.
+    reaches more than two periods before the first peak's lobe. A lobe
+    whose zero crossing precedes its extrapolated leading edge by more
+    than T/8 (a flat foot) uses the extrapolated edge and ends the walk.
 
     Args:
         t_us: Sample-time axis in us (monotonically increasing).
@@ -170,26 +178,65 @@ def find_first_arrival_us(t_us: np.ndarray,
             i -= 1
         return i
 
-    period_samples = 1000.0 / float(frequency_kHz) / dt_us
+    period_us = 1000.0 / float(frequency_kHz)
+    period_samples = period_us / dt_us
+
+    def level_crossing_us(k: int, lo: int, level: float) -> Optional[float]:
+        """Time where ``|x|`` last rises through ``level`` before ``k``,
+        searching back no further than ``lo``."""
+        i = k
+        while i > lo and abs(x_win[i - 1]) >= level:
+            i -= 1
+        if i == lo:
+            return None
+        a, b = abs(float(x_win[i - 1])), abs(float(x_win[i]))
+        return float(t_win[i - 1]) + dt_us * (level - a) / (b - a)
+
+    def lobe_onset(lo: int, hi: int) -> tuple[float, bool]:
+        """Onset of the lobe ``x_win[lo:hi]`` and whether it has a flat foot.
+
+        The onset is normally the zero crossing at the lobe start. A
+        small residual baseline offset (left after DC removal) keeps
+        the sign from flipping, so the same-sign run can creep back
+        across a flat, near-zero foot well before the signal really
+        starts. The leading edge is therefore also extrapolated to zero
+        through its 10 % and 50 % levels (within 0.01 rad of the true
+        zero crossing for a sinusoid, ~0.05 T late for a slow ring-up
+        lobe); when the zero crossing sits more than T/8 before that,
+        the lobe has a flat foot and the extrapolation is used.
+        """
+        if lo == 0:
+            t_zc = float(t_win[0])
+        else:
+            x0, x1 = float(x_win[lo - 1]), float(x_win[lo])
+            t_zc = float(t_win[lo - 1]) + dt_us * x0 / (x0 - x1)
+        k = lo + int(np.argmax(np.abs(x_win[lo:hi])))
+        amp = abs(float(x_win[k]))
+        t50 = level_crossing_us(k, lo, 0.5 * amp)
+        t10 = level_crossing_us(k, lo, 0.1 * amp)
+        if t50 is None or t10 is None or t50 <= t10:
+            return t_zc, False
+        t_edge = t10 - 0.1 * (t50 - t10) / 0.4
+        if t_edge - t_zc > period_us / 8.0:
+            return t_edge, True
+        return t_zc, False
+
     start = lobe_start(idx_peak)
     pre = x_win[:start]
     noise_rms = (1.4826 * float(np.median(np.abs(pre - np.median(pre))))
                  if pre.size >= 8 else 0.0)
     noise_gate = float(noise_k) * noise_rms
     earliest = start - 2.0 * period_samples
-    while start > 0 and sign[start - 1] != 0:
+    arrival_us, flat_foot = lobe_onset(start, idx_peak + 1)
+    # A flat foot means nothing signal-like precedes this lobe, so
+    # don't walk back past it.
+    while not flat_foot and start > 0 and sign[start - 1] != 0:
         prev = lobe_start(start - 1)
         if (start - prev > period_samples or prev < earliest
                 or np.max(np.abs(x_win[prev:start])) <= noise_gate):
             break
+        arrival_us, flat_foot = lobe_onset(prev, start)
         start = prev
-
-    # Linear interpolation of the zero crossing between start-1 and start.
-    if start == 0:
-        arrival_us = float(t_win[0])
-    else:
-        x0, x1 = float(x_win[start - 1]), float(x_win[start])
-        arrival_us = float(t_win[start - 1]) + dt_us * x0 / (x0 - x1)
 
     return ArrivalResult(
         first_peak_us=first_peak_us,
