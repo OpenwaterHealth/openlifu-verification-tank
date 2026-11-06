@@ -108,7 +108,7 @@ def main():
     # --- Misc ---
     parser.add_argument("--chunk-size", type=int, default=0,
                         help="Rapid-block chunk size (0 = whole sweep).")
-    parser.add_argument("--n-averages", type=int, default=cfg.scope.scan_1d_n_averages,
+    parser.add_argument("--n-averages", type=int, default=cfg.scope.n_averages,
                         help="Repeat every scan point this many times and "
                              "coherently average the traces (default: %(default)s).")
     parser.add_argument("--align", action=argparse.BooleanOptionalAction,

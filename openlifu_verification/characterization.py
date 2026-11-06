@@ -563,7 +563,6 @@ class Characterization:
         plan = cfg.plan_for(self.frequency_kHz)
         scope_kw = self._burst_scope_kwargs()
         n_avg = int(cfg.scope.n_averages)
-        n_avg_1d = int(cfg.scope.scan_1d_n_averages)
         ext = plan.lateral_1d.extent_mm
         pts = plan.lateral_1d.points
 
@@ -572,7 +571,7 @@ class Characterization:
         logger.info("Running 1-D lateral (x) scan (\u00b1%.1f mm, %d pts)...", ext, pts)
         lat = self.ver.scan_1d(
             dim="x", scan_range=(-ext, ext), num=pts,
-            absolute=False, n_averages=n_avg_1d, **scope_kw,
+            absolute=False, n_averages=n_avg, **scope_kw,
         )
         self.report.scans["lateral_1d"] = lat
         self._attach_window_pnp(lat)
@@ -587,7 +586,7 @@ class Characterization:
                     ext_e, pts_e)
         elev = self.ver.scan_1d(
             dim="y", scan_range=(-ext_e, ext_e), num=pts_e,
-            absolute=False, n_averages=n_avg_1d, **scope_kw,
+            absolute=False, n_averages=n_avg, **scope_kw,
         )
         self.report.scans["elevation_1d"] = elev
         self._attach_window_pnp(elev)
@@ -602,7 +601,7 @@ class Characterization:
                     ext_a, pts_a)
         axial = self.ver.scan_1d(
             dim="z", scan_range=(-ext_a, ext_a), num=pts_a,
-            absolute=False, n_averages=n_avg_1d, **scope_kw,
+            absolute=False, n_averages=n_avg, **scope_kw,
         )
         self.report.scans["axial_1d"] = axial
         self._attach_window_pnp(axial)
