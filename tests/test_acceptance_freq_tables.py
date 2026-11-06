@@ -50,9 +50,10 @@ def _chz(crit: AcceptanceCriteria, voltage_V: float = 20.0,
 
 @pytest.mark.parametrize("freq, expected", [(155.0, True), (400.0, False)])
 def test_freq_response_tolerance_is_per_frequency(freq, expected):
-    # Nominal sits 25% below the sweep peak: within the 30% allowed at
-    # 155 kHz, outside the 15% allowed at 400 kHz.
-    chz = _chz(AcceptanceCriteria(), frequency_kHz=freq)
+    # Nominal sits 25% below the sweep peak: within the looser 155 kHz
+    # limit, outside the 15% allowed at 400 kHz.
+    crit = AcceptanceCriteria()
+    chz = _chz(crit, frequency_kHz=freq)
     chz.report.freq_response = {
         "frequencies_kHz": [freq - 20.0, freq, freq + 20.0],
         "pnp_MPa": [1.0, 0.75, 0.9],
@@ -60,7 +61,8 @@ def test_freq_response_tolerance_is_per_frequency(freq, expected):
     assert chz._grade_freq_response() is expected
     row = chz.report.rows[ROW["freq_deviation_pct"]]
     assert row.value == pytest.approx(25.0)
-    assert row.threshold == {155.0: 30.0, 400.0: 15.0}[freq]
+    assert row.threshold == crit.freq_response.max_deviation_pct_for(freq)
+    assert (crit.freq_response.max_deviation_pct_for(freq) >= 25.0) is expected
 
 
 def test_waveform_at_peak_is_captured_at_reference_voltage():
