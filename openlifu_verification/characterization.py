@@ -1015,7 +1015,14 @@ class Characterization:
     #: Extra time (us) kept after the end of the burst's arrival.
     BURST_WINDOW_MARGIN_US = 10.0
     #: Acceptance pulse duration (us); long enough to fully ring up.
+    #: Default for frequencies not listed in
+    #: :attr:`PULSE_DURATION_US_BY_FREQ_KHZ` (see :meth:`pulse_duration_us_for`).
     PULSE_DURATION_US = 60.0
+    #: Per-frequency acceptance pulse duration (us). The 155 kHz modules
+    #: ring up more slowly (in us), so their clean PNP window - which
+    #: opens once transmission stops - needs a longer burst to land on
+    #: full-amplitude cycles.
+    PULSE_DURATION_US_BY_FREQ_KHZ = {155.0: 80.0, 400.0: 60.0}
     #: Margins (us) for :func:`clean_pnp_window_us` on every PNP measurement.
     PNP_WINDOW_START_MARGIN_US = 3.0
     PNP_WINDOW_END_MARGIN_US = 0.0
@@ -1026,9 +1033,15 @@ class Characterization:
     PEAK_FIT_WINDOW = 2
     PEAK_N_AVERAGES = 5
 
+    @classmethod
+    def pulse_duration_us_for(cls, frequency_kHz: float) -> float:
+        """Acceptance pulse duration (us) for a module frequency."""
+        return float(cls.PULSE_DURATION_US_BY_FREQ_KHZ.get(
+            float(frequency_kHz), cls.PULSE_DURATION_US))
+
     def _pulse_duration_us(self) -> float:
         """Acceptance pulse duration (us) requested from the LIFU."""
-        return float(self.PULSE_DURATION_US)
+        return self.pulse_duration_us_for(self.frequency_kHz)
 
     def _pnp_window_us(self, frequency_kHz: Optional[float] = None,
                        duration_us: Optional[float] = None) -> tuple[float, float]:
