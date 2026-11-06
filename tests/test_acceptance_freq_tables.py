@@ -17,12 +17,14 @@ def test_default_tables_cover_supported_frequencies(freq):
     crit.peak_offset.max_1d_axis_mm_for(freq)
     crit.peak_depth.nominal_for(freq)
     crit.pnp_min_MPa_for(freq)
+    crit.freq_response.max_deviation_pct_for(freq)
 
 
 @pytest.mark.parametrize("section, data", [
     ("peak_offset", {"max_1d_axis_mm_by_freq_kHz": {"155": 1.0}}),
     ("peak_depth", {"nominal_by_freq_kHz": {"400": 50.0}}),
     ("pnp_at_peak", {"min_MPa_by_freq_kHz": {"155": 0.225}}),
+    ("freq_response", {"max_deviation_pct_by_freq_kHz": {"400": 15.0}}),
 ])
 def test_missing_frequency_entry_is_rejected(section, data):
     with pytest.raises(ValueError, match="no entry for"):
@@ -37,12 +39,28 @@ def test_legacy_single_nominal_depth_applies_to_all_frequencies():
     assert crit.peak_depth.focused_tol_pct == 3.0
 
 
-def _chz(crit: AcceptanceCriteria, voltage_V: float = 20.0) -> Characterization:
+def _chz(crit: AcceptanceCriteria, voltage_V: float = 20.0,
+         frequency_kHz: float = 400.0) -> Characterization:
     prefs = OperatorPrefs(tester_name="t", test_app_version="t",
                           hydrophone_sn="t", txm_sn="t", console_sn="t")
     return Characterization(DryRunTank(rng_seed=0), prefs=prefs,
                             criteria=crit, scan_config=ScanConfig(),
-                            frequency_kHz=400.0, voltage_V=voltage_V)
+                            frequency_kHz=frequency_kHz, voltage_V=voltage_V)
+
+
+@pytest.mark.parametrize("freq, expected", [(155.0, True), (400.0, False)])
+def test_freq_response_tolerance_is_per_frequency(freq, expected):
+    # Nominal sits 25% below the sweep peak: within the 30% allowed at
+    # 155 kHz, outside the 15% allowed at 400 kHz.
+    chz = _chz(AcceptanceCriteria(), frequency_kHz=freq)
+    chz.report.freq_response = {
+        "frequencies_kHz": [freq - 20.0, freq, freq + 20.0],
+        "pnp_MPa": [1.0, 0.75, 0.9],
+    }
+    assert chz._grade_freq_response() is expected
+    row = chz.report.rows[ROW["freq_deviation_pct"]]
+    assert row.value == pytest.approx(25.0)
+    assert row.threshold == {155.0: 30.0, 400.0: 15.0}[freq]
 
 
 def test_waveform_at_peak_is_captured_at_reference_voltage():

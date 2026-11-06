@@ -1311,7 +1311,7 @@ class Characterization:
         """Grade the trailing E-section row: how far below the sweep
         peak the PNP at nominal frequency sits, as a percentage of
         the peak. Passes if the deviation is within
-        ``criteria.freq_response.max_deviation_pct``. The individual
+        ``criteria.freq_response.max_deviation_pct_for(freq)``. The individual
         per-frequency PNP rows (E.2..) are left informational
         (``status="NA"``)."""
         fr = self.report.freq_response
@@ -1326,7 +1326,8 @@ class Characterization:
         idx_nom = int(np.argmin(np.abs(freqs - self.frequency_kHz)))
         pnp_nom = float(pnp[idx_nom])
         deviation_pct = (peak - pnp_nom) / peak * 100.0
-        max_dev = float(self.criteria.freq_response.max_deviation_pct)
+        max_dev = self.criteria.freq_response.max_deviation_pct_for(
+            self.frequency_kHz)
         passed = deviation_pct <= max_dev
         note = (f"nominal={pnp_nom:.3f} MPa, peak={peak:.3f} MPa "
                 f"@ {freqs[int(np.argmax(pnp))]:.0f} kHz "

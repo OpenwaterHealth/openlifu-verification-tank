@@ -204,8 +204,22 @@ class PnpAtPeak:
 @dataclass
 class FreqResponse:
     """Deviation of the nominal-frequency PNP from the peak PNP in the
-    frequency sweep, expressed as a percentage of the peak."""
-    max_deviation_pct: float = 15.0
+    frequency sweep, expressed as a percentage of the peak, keyed by
+    nominal freq (kHz)."""
+    max_deviation_pct_by_freq_kHz: dict[str, float] = field(default_factory=lambda: {
+        "155": 30.0,
+        "400": 15.0,
+    })
+
+    def __post_init__(self):
+        self.max_deviation_pct_by_freq_kHz = _require_all_freqs(
+            self.max_deviation_pct_by_freq_kHz,
+            "freq_response.max_deviation_pct_by_freq_kHz")
+
+    def max_deviation_pct_for(self, freq_kHz: float) -> float:
+        """Max nominal-vs-peak PNP deviation (%) for ``freq_kHz``."""
+        return _lookup_freq(self.max_deviation_pct_by_freq_kHz, freq_kHz,
+                            "freq_response.max_deviation_pct_by_freq_kHz")
 
 
 @dataclass
@@ -321,7 +335,8 @@ class AcceptanceCriteria:
             "pnp_at_peak":      {"reference_voltage_V": self.pnp_at_peak.reference_voltage_V,
                                  "min_MPa_by_freq_kHz": dict(
                                      self.pnp_at_peak.min_MPa_by_freq_kHz)},
-            "freq_response":    {"max_deviation_pct": self.freq_response.max_deviation_pct},
+            "freq_response":    {"max_deviation_pct_by_freq_kHz": dict(
+                                     self.freq_response.max_deviation_pct_by_freq_kHz)},
             "voltage_linearity":{"r2_min":      self.voltage_linearity.r2_min},
             "temperature":      {"max_C":       self.temperature.max_C},
             "firmware":         {"min_txm_version":     self.firmware.min_txm_version,
