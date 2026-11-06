@@ -85,7 +85,7 @@ class ScanResult:
 
         Args:
             kind: One of ``"vpp"``, ``"vmin"``, ``"vmax"``, ``"pnp"``.
-                ``"pnp"`` is ``metadata["window_pnp"]`` (clean-window mean,
+                ``"pnp"`` is ``metadata["window_pnp"]`` (clean-window median,
                 see :func:`~openlifu_verification.pnp.scan_window_pnp`) when
                 present, otherwise ``-vmin``.
         """

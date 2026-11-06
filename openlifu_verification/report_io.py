@@ -382,7 +382,7 @@ def build_figures(report: TestReport) -> dict:
                 ax.plot(pk_t, -pk_MPa * 1e3, "rv", ms=4,
                         label=f"negative peaks (n={pk_t.size})")
                 ax.plot(win, [-pnp_MPa * 1e3] * 2, color="tab:red", lw=1.2,
-                        label=f"mean PNP {pnp_MPa:.3f} \u00b1 {std_MPa:.3f} MPa")
+                        label=f"median PNP {pnp_MPa:.3f} \u00b1 {std_MPa:.3f} MPa")
                 if np.isfinite(std_MPa):
                     ax.fill_between(win, -(pnp_MPa + std_MPa) * 1e3,
                                     -(pnp_MPa - std_MPa) * 1e3,
@@ -443,7 +443,7 @@ def build_figures(report: TestReport) -> dict:
                 detail = (f"deviation {dev:.1f}% vs \u2264 {max_dev:g}%, "
                           f"margin {max_dev - dev:+.1f} pts")
         ax.set_xlabel("Frequency (kHz)")
-        ax.set_ylabel("Mean PNP \u00b1 1\u03c3 (kPa)" if std is not None else "PNP (kPa)")
+        ax.set_ylabel("Median PNP \u00b1 1\u03c3 (kPa)" if std is not None else "PNP (kPa)")
         _title(ax, f"Figure 6: Frequency response @ {report.voltage_V:.0f} V",
                _status("freq_deviation_pct"), detail)
         ax.grid(True, alpha=0.3)
@@ -474,7 +474,7 @@ def build_figures(report: TestReport) -> dict:
             r2_min = float(crit.voltage_linearity.r2_min)
             detail = (f"R\u00b2 {r2:.4f} vs \u2265 {r2_min:g}, "
                       f"margin {r2 - r2_min:+.4f}")
-        ax.set_ylabel("Mean PNP \u00b1 1\u03c3 (kPa)" if "pnp_std_MPa" in vr else "PNP (kPa)")
+        ax.set_ylabel("Median PNP \u00b1 1\u03c3 (kPa)" if "pnp_std_MPa" in vr else "PNP (kPa)")
         _title(ax, f"Figure 7: Voltage linearity @ {report.frequency_kHz:.0f} kHz",
                _status("voltage_r2"), detail)
         ax.grid(True, alpha=0.3)

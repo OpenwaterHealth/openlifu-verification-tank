@@ -647,7 +647,7 @@ class Characterization:
         capture steps to a wider range if it still clips.
 
         The capture fires :attr:`PULSE_DURATION_US` pulses so the
-        transducer fully rings up. The graded PNP is the mean of the
+        transducer fully rings up. The graded PNP is the median of the
         local negative peaks inside :func:`clean_pnp_window_us` (after
         transmit RF pickup ends, before the acoustic pulse ends), with
         the window anchored on the focused arrival measured below.
@@ -758,7 +758,7 @@ class Characterization:
         pnp = (self._pnp_stats(meas["t"], meas["trace"])
                if meas["units"] == "Pa" else None)
         nan = float("nan")
-        pnp_MPa = pnp["mean"] / 1e6 if pnp else nan
+        pnp_MPa = pnp["median"] / 1e6 if pnp else nan
         pnp_std_MPa = pnp["std"] / 1e6 if pnp else nan
 
         sos_m_per_s = float(cfg.sos_water_m_per_s)
@@ -805,7 +805,7 @@ class Characterization:
         # D.16 is the arrival-derived depth (max-delay corrected)
         # which IS graded against ``criteria.peak_depth``.
         self.report.set_row(ROW["pnp_at_peak_MPa"],
-                            f"Focused Pulse Mean PNP ({pnp_voltage_V:g}V/"
+                            f"Focused Pulse Median PNP ({pnp_voltage_V:g}V/"
                             f"{2 * pnp_voltage_V:g}Vpp)",
                             pnp_MPa, unit="MPa")
         self.report.set_row(ROW["focused_arrival_us"],
@@ -816,7 +816,7 @@ class Characterization:
                             "Focused Pulse Hydrophone Depth",
                             axial_depth_mm, unit="mm")
         logger.info(
-            "Waveform at peak: mean PNP=%.3f \u00b1 %.3f MPa over %d negative "
+            "Waveform at peak: median PNP=%.3f \u00b1 %.3f MPa over %d negative "
             "peaks in %s us (%.0f us pulse) at %g V, arrival=%s, depth=%.2f mm "
             "(sos=%.0f m/s)",
             pnp_MPa, pnp_std_MPa, result["pnp_n_peaks"],
@@ -854,7 +854,7 @@ class Characterization:
             n_averages=int(cfg.scope.pnp_n_averages),
             **self._burst_scope_kwargs(duration_usec),
         )
-        # Per-freq clean-window mean PNP.
+        # Per-freq clean-window median PNP.
         traces = np.atleast_2d(result.traces)
         pnp, pnp_std = self._sweep_pnp_MPa(result.t, traces, freqs,
                                            duration_us=duration_usec)
@@ -869,7 +869,7 @@ class Characterization:
         # E.2.. : informational per-frequency PNP values (no grading).
         for i, (f, p) in enumerate(zip(freqs, pnp), start=2):
             row_id = f"E.{i}"
-            label = f"Mean PNP ({int(round(f))} kHz)"
+            label = f"Median PNP ({int(round(f))} kHz)"
             self.report.set_row(row_id, label, float(p), unit="MPa")
         # PNP deviation at nominal freq is the graded row and sits at
         # the end of the E section because it is only computed after
@@ -994,7 +994,7 @@ class Characterization:
         self.report.set_row("F.1", "Frequency Setting", self.frequency_kHz, unit="kHz")
         for i, (v, p) in enumerate(zip(volts, pnp), start=2):
             row_id = f"F.{i}"
-            label = f"Mean PNP ({int(round(v))}V/{int(round(2*v))}Vpp)"
+            label = f"Median PNP ({int(round(v))}V/{int(round(2*v))}Vpp)"
             self.report.set_row(row_id, label, float(p), unit="MPa")
         # F.8 carries the linearity R**2 (the metric the section's
         # PASS/FAIL is graded on). The individual F.2 - F.7 PNP rows
@@ -1018,7 +1018,7 @@ class Characterization:
     PULSE_DURATION_US = 60.0
     #: Margins (us) for :func:`clean_pnp_window_us` on every PNP measurement.
     PNP_WINDOW_START_MARGIN_US = 3.0
-    PNP_WINDOW_END_MARGIN_US = 0.0
+    PNP_WINDOW_END_MARGIN_US = 3.0
     #: Peak-search grid step (mm) at 400 kHz; scaled with wavelength so
     #: the fit window spans the same fraction of the beam (0.5 mm at 155 kHz).
     PEAK_GRID_STEP_MM_AT_400KHZ = 0.2
@@ -1055,7 +1055,7 @@ class Characterization:
         )
 
     def _attach_window_pnp(self, scan: ScanResult) -> None:
-        """Store per-point clean-window mean PNP in ``scan.metadata["window_pnp"]``
+        """Store per-point clean-window median PNP in ``scan.metadata["window_pnp"]``
         so the graders and figures (via ``scan.reduce("pnp")``) use it."""
         try:
             pnp = scan_window_pnp(
@@ -1090,13 +1090,13 @@ class Characterization:
     def _sweep_pnp_MPa(self, t_us, traces, freqs_kHz, *,
                        duration_us: Optional[float] = None,
                        ) -> tuple[np.ndarray, np.ndarray]:
-        """Per-trace clean-window ``(mean, std)`` PNP in MPa (NaN if unavailable)."""
+        """Per-trace clean-window ``(median, std)`` PNP in MPa (NaN if unavailable)."""
         stats = [self._pnp_stats(t_us, row, frequency_kHz=f, duration_us=duration_us)
                  for f, row in zip(freqs_kHz, traces)]
         nan = float("nan")
-        mean = np.array([s["mean"] / 1e6 if s else nan for s in stats])
+        median = np.array([s["median"] / 1e6 if s else nan for s in stats])
         std = np.array([s["std"] / 1e6 if s else nan for s in stats])
-        return mean, std
+        return median, std
 
     def _burst_scope_kwargs(self, duration_usec: Optional[float] = None) -> dict:
         """Scope kwargs with ``time_stop`` extended to cover the full burst.
