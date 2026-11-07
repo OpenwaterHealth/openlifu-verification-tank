@@ -1219,11 +1219,11 @@
             "units": "mm"
         }
     ],
-    "frequency": 400600.0,
+    "frequency": 400000.0,
     "units": "mm",
     "attrs": {},
-    "registration_surface_filename": "openlifu_1x_evt1.surf.obj",
-    "transducer_body_filename": "openlifu_1x_evt1.body.obj",
+    "registration_surface_filename": "",
+    "transducer_body_filename": "",
     "standoff_transform": [
         [
             1.0,
@@ -1250,8 +1250,7 @@
             1.0
         ]
     ],
-    "sensitivity": 1000.0,
-    "module_invert": [
-        false
-    ]
+    "sensitivity": 3100.0,
+    "crosstalk_frac": 0.12,
+    "crosstalk_dist": 0.0051
 }
