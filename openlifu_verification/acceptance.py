@@ -192,8 +192,8 @@ class PnpAtPeak:
     ``voltage / reference_voltage_V``."""
     reference_voltage_V: float = 50.0
     min_MPa_by_freq_kHz: dict[str, float] = field(default_factory=lambda: {
-        "155": 0.225,
-        "400": 0.400,
+        "155": 0.41,
+        "400": 0.66,
     })
 
     def __post_init__(self):
