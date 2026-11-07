@@ -171,6 +171,29 @@ def test_averaging_produces_folded_shape_and_metadata():
         assert entry["lags_s"].shape == (4,)
     # Traces should still be 1-D per channel (averaged).
     assert outputs[0]["A"].shape == ref.shape
+    assert all("repeats" not in entry for entry in averaging)
+
+
+@pytest.mark.parametrize("n_averages", [1, 4])
+def test_keep_repeats_returns_per_repeat_traces(n_averages):
+    dt_s = 1e-7
+    t_axis, ref = _burst(dt_s=dt_s)
+    t_ns = t_axis * 1e9
+
+    def gen(point, r):
+        return _output(t_ns, dt_s, ref.copy())
+
+    tank = _StubTank(gen, channels=("A",))
+    _, _, averaging = tank.run_averaged_sweep(
+        points=[0.0, 1.0],
+        apply_point=lambda p: None,
+        time_start_s=0.0, time_stop_s=1e-4,
+        sampling_interval_ns=100,
+        n_averages=n_averages,
+        keep_repeats=True,
+    )
+    for entry in averaging:
+        assert entry["repeats"].shape == (n_averages, ref.size)
 
 
 def test_alignment_reduces_smearing_from_subsample_jitter():

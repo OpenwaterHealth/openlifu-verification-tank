@@ -26,6 +26,7 @@ import datetime
 import json
 import logging
 import threading
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -1068,8 +1069,15 @@ class Characterization:
         )
 
     def _attach_window_pnp(self, scan: ScanResult) -> None:
-        """Store per-point clean-window median PNP in ``scan.metadata["window_pnp"]``
-        so the graders and figures (via ``scan.reduce("pnp")``) use it."""
+        """Store per-point clean-window PNP in ``scan.metadata["window_pnp"]``
+        so the graders and figures (via ``scan.reduce("pnp")``) use it.
+
+        When the scan kept its per-repeat traces (1-D scans), each point's
+        PNP is the median over repeats, so one noisy repeat can't spike
+        the profile, and ``metadata["window_pnp_std"]`` holds the
+        across-repeat sample std (NaN with fewer than two repeats).
+        """
+        repeats = scan.metadata.get("repeat_traces")
         try:
             pnp = scan_window_pnp(
                 scan, self.ver.focus_timing_us,
@@ -1078,10 +1086,20 @@ class Characterization:
                 frequency_kHz=self.frequency_kHz,
                 start_margin_us=self.PNP_WINDOW_START_MARGIN_US,
                 end_margin_us=self.PNP_WINDOW_END_MARGIN_US,
+                traces=repeats,
             )
         except (KeyError, ValueError, RuntimeError) as e:
             logger.warning("Scan PNP falls back to the whole-trace minimum: %s", e)
             return
+        if repeats is not None:
+            scan.metadata["window_pnp_repeats"] = pnp
+            n = np.isfinite(pnp).sum(axis=-1)
+            with np.errstate(invalid="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                med = np.nanmedian(pnp, axis=-1)
+                std = np.nanstd(pnp, axis=-1, ddof=1)
+            scan.metadata["window_pnp_std"] = np.where(n > 1, std, np.nan)
+            pnp = med
         n_bad = int(np.count_nonzero(~np.isfinite(pnp)))
         if n_bad:
             logger.warning("%d of %d scan points have no clean PNP window",

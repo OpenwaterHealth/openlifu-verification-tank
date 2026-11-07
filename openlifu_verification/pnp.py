@@ -100,31 +100,42 @@ def windowed_pnp(t_us: np.ndarray, trace: np.ndarray,
 
 def scan_window_pnp(scan, focus_timing_us: Callable, *, duration_us: float,
                     frequency_kHz: float, start_margin_us: float = 3.0,
-                    end_margin_us: float = 3.0) -> np.ndarray:
+                    end_margin_us: float = 3.0,
+                    traces: Optional[np.ndarray] = None) -> np.ndarray:
     """Per-point clean-window median PNP of a focus scan, in the trace units.
 
     The hydrophone stays at ``metadata["hydrophone_position_mm"]`` while
     the focus moves through ``metadata["focus_points_mm"]``, so each point
     gets its own window from ``focus_timing_us(x, y, z, hydrophone_mm=...)``.
-    Returns an array shaped like the coord grid; NaN where no window or
-    negative peaks could be found.
+    ``traces`` defaults to ``scan.traces``; pass e.g.
+    ``metadata["repeat_traces"]`` (shape ``(n_points, n_repeats,
+    samples)``) for one PNP per repeat. Returns an array shaped like
+    ``traces`` without the time axis; NaN where a trace is missing or
+    no window or negative peaks could be found.
     """
-    traces = np.asarray(scan.traces, dtype=float)
-    flat = traces.reshape(-1, traces.shape[-1])
+    traces = np.asarray(scan.traces if traces is None else traces, dtype=float)
     foci = np.asarray(scan.metadata["focus_points_mm"], dtype=float).reshape(-1, 3)
-    if foci.shape[0] != flat.shape[0]:
-        raise ValueError(f"{foci.shape[0]} focus points for {flat.shape[0]} traces")
+    n_traces = traces.size // traces.shape[-1]
+    if n_traces % foci.shape[0]:
+        raise ValueError(f"{foci.shape[0]} focus points for {n_traces} traces")
+    flat = traces.reshape(foci.shape[0], -1, traces.shape[-1])
     hydrophone = np.asarray(scan.metadata["hydrophone_position_mm"], dtype=float)
-    out = np.full(flat.shape[0], np.nan)
-    for i, (focus, trace) in enumerate(zip(foci, flat)):
+    out = np.full(flat.shape[:2], np.nan)
+    for i, (focus, point_traces) in enumerate(zip(foci, flat)):
         first_us, last_us, max_delay_us = focus_timing_us(*focus, hydrophone_mm=hydrophone)
         try:
             window = clean_pnp_window_us(
                 duration_us=duration_us, arrival_us=first_us,
                 last_arrival_us=last_us, max_delay_us=max_delay_us,
                 start_margin_us=start_margin_us, end_margin_us=end_margin_us)
-            out[i] = windowed_pnp(scan.t, trace, window,
-                                  frequency_kHz=frequency_kHz)["median"]
         except ValueError:
-            pass
+            continue
+        for j, trace in enumerate(point_traces):
+            if not np.isfinite(trace).all():
+                continue
+            try:
+                out[i, j] = windowed_pnp(scan.t, trace, window,
+                                         frequency_kHz=frequency_kHz)["median"]
+            except ValueError:
+                pass
     return out.reshape(traces.shape[:-1])
