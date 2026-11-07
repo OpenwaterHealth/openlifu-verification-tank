@@ -21,6 +21,10 @@ BUNDLED_SETUP_DATA_DIR = Path(__file__).resolve().parent / "setup_data_template"
 #: hydrophone IDs.
 BUNDLED_CALIBRATIONS_DIR = BUNDLED_SETUP_DATA_DIR / "hydrophone_calibrations"
 
+#: App window / taskbar icon (rendered from ``assets/app_icon.svg`` by
+#: ``freeze/make_icon.py``).
+APP_ICON = Path(__file__).resolve().parent / "assets" / "app_icon.ico"
+
 #: Per-user folder for app state.
 USER_DIR = Path.home() / ".openlifu_verification"
 

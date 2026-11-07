@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- OpenLIFU Verification Tank app icon: the tank, with the ultrasound
+       beam drawn as Openwater-red wavefronts focusing on the hydrophone. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2e475c"/>
+      <stop offset="1" stop-color="#132230"/>
+    </linearGradient>
+    <linearGradient id="water" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7fd3f5"/>
+      <stop offset="1" stop-color="#2386c8"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="0.18" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="0.82" stop-color="#ffffff" stop-opacity="0.0"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.22"/>
+    </linearGradient>
+    <linearGradient id="base" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d9dee3"/>
+    </linearGradient>
+    <clipPath id="tankClip">
+      <path d="M62 50 H194 V180 A66 9 0 0 1 62 180 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- tile -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#tile)"/>
+
+  <!-- water and everything inside the glass -->
+  <g clip-path="url(#tankClip)">
+    <rect x="62" y="66" width="132" height="130" fill="url(#water)"/>
+    <ellipse cx="128" cy="66" rx="66" ry="8" fill="#a9e3fa"/>
+
+    <!-- transducer plate under the lid -->
+    <rect x="80" y="58" width="96" height="18" rx="3" fill="#1b1b1b"/>
+    <rect x="84" y="74" width="88" height="3" fill="#3a3a3a"/>
+
+    <!-- focused beam: cone from the transducer face to the focus -->
+    <path d="M84 77 H172 L128 137 Z" fill="#ED1C24" fill-opacity="0.35"/>
+
+    <!-- focused wavefronts (Openwater red), converging on the hydrophone tip -->
+    <g fill="none" stroke="#ED1C24" stroke-linecap="round">
+      <path d="M97.2 95.1 A52 52 0 0 1 158.8 95.1" stroke-width="8"/>
+      <path d="M107.9 109.6 A34 34 0 0 1 148.1 109.6" stroke-width="7"/>
+      <path d="M118.5 124.1 A16 16 0 0 1 137.5 124.1" stroke-width="6"/>
+    </g>
+    <circle cx="128" cy="137" r="5.5" fill="#ED1C24"/>
+
+    <!-- hydrophone: gold needle on a dark holder -->
+    <rect x="125" y="141" width="6" height="18" rx="1.5" fill="#e0b54a"/>
+    <rect x="124" y="157" width="8" height="40" fill="#9aa3ab"/>
+
+    <!-- glass sheen -->
+    <rect x="62" y="40" width="132" height="160" fill="url(#glass)"/>
+  </g>
+
+  <!-- glass walls and rims -->
+  <path d="M62 50 V180 A66 9 0 0 0 194 180 V50" fill="none" stroke="#d8eef9" stroke-width="5"/>
+
+  <!-- lid, handles and centre rail -->
+  <g stroke="#8ea3b4" stroke-width="2.5">
+    <path d="M70 46 V30 A12 12 0 0 1 94 30 V46" fill="none" stroke-width="12"/>
+    <path d="M162 46 V30 A12 12 0 0 1 186 30 V46" fill="none" stroke-width="12"/>
+    <rect x="120" y="16" width="16" height="34" rx="2" fill="#111"/>
+    <rect x="54" y="42" width="148" height="14" rx="4" fill="#111"/>
+  </g>
+  <path d="M70 46 V30 A12 12 0 0 1 94 30 V46" fill="none" stroke="#111" stroke-width="7"/>
+  <path d="M162 46 V30 A12 12 0 0 1 186 30 V46" fill="none" stroke="#111" stroke-width="7"/>
+  <rect x="121.25" y="17.25" width="13.5" height="31.5" rx="1.5" fill="#111"/>
+  <rect x="55.25" y="43.25" width="145.5" height="11.5" rx="3.5" fill="#111"/>
+
+  <!-- white stand with the arch cut-out -->
+  <path d="M58 180 A70 10 0 0 0 198 180 L206 230 H50 Z" fill="url(#base)"/>
+  <path d="M110 230 V210 A18 18 0 0 1 146 210 V230 Z" fill="#162029"/>
+</svg>
