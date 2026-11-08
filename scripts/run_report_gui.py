@@ -17,9 +17,10 @@ dialog's Abort button stops the run after the step in progress and
 returns to the launcher.
 
 When the run completes, the result dialog offers "Write Data to
-Device" (PASS only), "Scan Another" (back to the launcher), and
-"Exit". The hardware connection stays open until one of the latter
-two is chosen so the write can happen from the result dialog.
+Device" (PASS only), "Scan Another" (back to the launcher, keeping
+the tester, console and hydrophone), and "Exit". The hardware
+connection stays open until one of the latter two is chosen so the
+write can happen from the result dialog.
 
 The launcher deliberately reuses ``run_report.run()`` in-process so
 the two entry points share every behavior (arg parsing, artifact
@@ -2307,6 +2308,9 @@ def main(argv=None) -> int:
         choice, exit_code = _run_once(args, scan_config, prefs)
         if choice == "exit":
             return exit_code
+        # "Scan Another": the next launcher keeps the tester, console
+        # and hydrophone this one just saved; only the TXM is new.
+        args.use_last_setup = True
 
 
 def _run_once(args: argparse.Namespace, scan_config: ScanConfig,

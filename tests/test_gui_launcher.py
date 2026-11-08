@@ -289,3 +289,50 @@ def test_no_hardware_leds_in_dry_run(setup, tmp_path, monkeypatch):
     assert dlg.hw_leds == {}
     assert dlg._hw_poller is None
     dlg.reject()
+
+
+def test_scan_another_keeps_tester_console_hydrophone(setup, tmp_path,
+                                                      monkeypatch):
+    """After "Scan Another" the next launcher opens with the tester,
+    console and hydrophone filled in and validated; the TXM is blank."""
+    seen = []
+
+    class _Launcher(gui.LauncherDialog):
+        def exec(self):
+            seen.append({"txm": self.txm_edit.text(),
+                         "ids": [(f.edit.text(), f.valid) for f in
+                                 (self._tester, self._console,
+                                  self._hydrophone)]})
+            if len(seen) > 1:
+                return QDialog.DialogCode.Rejected
+            _scan(self, self.txm_edit, "WLM44Q00012")
+            _scan(self, self.tester_edit, "T1")
+            _scan(self, self.console_edit, "WL134Q00007")
+            _scan(self, self.hydrophone_edit, "HYDRO2246")
+            self.accept()
+            return QDialog.DialogCode.Accepted
+
+    class _Settings:
+        def __init__(self, *a):
+            pass
+
+        def value(self, *a, **k):
+            return ""
+
+        def setValue(self, *a):
+            pass
+
+    monkeypatch.setattr(gui, "LauncherDialog", _Launcher)
+    monkeypatch.setattr(gui, "QSettings", _Settings)
+    monkeypatch.setattr(gui, "_set_app_user_model_id", lambda: None)
+    monkeypatch.setattr(gui.SetupData, "make_active", lambda self: None)
+    monkeypatch.setattr(gui, "_run_once",
+                        lambda args, cfg, prefs: ("another", 0))
+
+    gui.main(["--reports-root", str(tmp_path / "reports"),
+              "--setup-data", str(setup.root)])
+
+    assert seen[0] == {"txm": "", "ids": [("", False)] * 3}
+    assert seen[1] == {"txm": "", "ids": [("T1", True),
+                                          ("WL134Q00007", True),
+                                          ("HYDRO2246", True)]}
