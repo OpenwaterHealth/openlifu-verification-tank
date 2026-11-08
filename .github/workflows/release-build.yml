@@ -72,10 +72,12 @@ jobs:
 
       # ── openlifu-sdk from GitHub releases ────────────────────────
       # SDK pre-releases are not published to PyPI, so resolve the tag
-      # from the SDK repo's GitHub releases: rc tags take the latest
-      # pre-release (when it is at least as new as the latest stable);
-      # everything else -- and rc builds with no usable pre-release --
-      # takes the latest stable release.
+      # from the SDK repo's GitHub releases. A tag pinned in
+      # pyproject.toml ("openlifu-sdk @ git+...@<tag>") always wins, so
+      # the build ships the SDK the code was written against. Unpinned:
+      # rc tags take the latest pre-release (when it is at least as new
+      # as the latest stable); everything else -- and rc builds with no
+      # usable pre-release -- takes the latest stable release.
       - name: Resolve openlifu-sdk release
         id: sdk
         shell: bash
@@ -83,6 +85,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          PIN=$(sed -n 's/.*"openlifu-sdk @ git+[^"]*\.git@\([^"]*\)".*/\1/p' pyproject.toml | head -n1)
+          if [ -n "$PIN" ]; then
+            if ! gh release view "$PIN" --repo OpenwaterHealth/openlifu-sdk >/dev/null; then
+              echo "::error::openlifu-sdk is pinned to '$PIN' in pyproject.toml, but that release does not exist." >&2
+              exit 1
+            fi
+            echo "tag=$PIN" >> "$GITHUB_OUTPUT"
+            echo "::notice ::openlifu-sdk resolved to pyproject pin @ $PIN (ref ${GITHUB_REF_NAME})"
+            exit 0
+          fi
           REL=$(gh release list --repo OpenwaterHealth/openlifu-sdk \
                 --json tagName,isPrerelease \
                 --jq 'map(select(.isPrerelease | not)) | .[0].tagName // empty')
