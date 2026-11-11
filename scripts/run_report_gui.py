@@ -17,8 +17,8 @@ dialog's Abort button stops the run after the step in progress and
 returns to the launcher.
 
 When the run completes, the result dialog offers "Write Data to
-Device" (PASS only), "Scan Another" (back to the launcher), and
-"Exit". The hardware connection stays open until one of the latter
+Device" (PASS only), "Scan Another" (back to the launcher, with the
+tester and hydrophone kept), and "Exit". The hardware connection stays open until one of the latter
 two is chosen so the write can happen from the result dialog.
 
 The launcher deliberately reuses ``run_report.run()`` in-process so
@@ -909,13 +909,19 @@ class LauncherDialog(QDialog):
     hand; the hydrophone must still be registered. Start is enabled
     only when every field is accepted, a frequency is set and every
     hardware status LED is green.
+
+    ``prefill`` maps a registry kind (``"tester"``, ``"console"``,
+    ``"hydrophone"``) to an ID to fill in and validate, e.g. the
+    previous run's tester and hydrophone after "Scan Another"; it
+    takes precedence over ``--use-last-setup``.
     """
 
     def __init__(self, args: argparse.Namespace,
                  parent: Optional[QWidget] = None, *,
                  app_version: str,
                  setup_root: Path,
-                 nonstandard_reasons: tuple[str, ...] | list[str] = ()):
+                 nonstandard_reasons: tuple[str, ...] | list[str] = (),
+                 prefill: Optional[dict[str, str]] = None):
         super().__init__(parent)
         title = "OpenLIFU Calibration Tool"
         if getattr(args, "dry_run", False):
@@ -1095,12 +1101,13 @@ class LauncherDialog(QDialog):
             self.txm_edit.textChanged.connect(
                 lambda _text: self.freq_combo.setCurrentIndex(0))
 
-        if getattr(args, "use_last_setup", False):
-            last = self._setup.load_last_setup()
-            for f in (self._tester, self._console, self._hydrophone):
-                f.edit.setText(last.get(f.registry.kind, ""))
-                if f.edit.text():
-                    self._validate(f)
+        ids = (self._setup.load_last_setup()
+               if getattr(args, "use_last_setup", False) else {})
+        ids.update(prefill or {})
+        for f in (self._tester, self._console, self._hydrophone):
+            f.edit.setText(ids.get(f.registry.kind, ""))
+            if f.edit.text():
+                self._validate(f)
         self._show_hardware_status({})  # LEDs "checking" until the first probe
         self.txm_edit.setFocus()
 
@@ -1410,6 +1417,13 @@ class LauncherDialog(QDialog):
             txm_sn=self.txm_edit.text().strip(),
             console_sn=self.console_edit.text().strip(),
         )
+
+    @property
+    def carried_ids(self) -> dict[str, str]:
+        """Tester and hydrophone IDs to pre-fill after "Scan Another"
+        (the console S/N is left to the operator / auto-detection)."""
+        return {f.registry.kind: f.edit.text().strip()
+                for f in (self._tester, self._hydrophone)}
 
     @property
     def selected_hydrophone_calibration(self) -> Path:
@@ -2284,15 +2298,18 @@ def main(argv=None) -> int:
     calibration_path_arg = args.calibration_path
 
     exit_code = 130
+    prefill: dict[str, str] = {}  # tester / hydrophone from the last run
     while True:
         launcher = LauncherDialog(args, app_version=app_version,
                                   setup_root=setup_root,
-                                  nonstandard_reasons=nonstandard)
+                                  nonstandard_reasons=nonstandard,
+                                  prefill=prefill)
         if launcher.exec() != QDialog.DialogCode.Accepted:
             logger.info("Launcher closed.")
             return exit_code
 
         prefs = launcher.collected_prefs
+        prefill = launcher.carried_ids
         args.frequency_khz = launcher.selected_frequency_kHz
         args.reports_root = launcher.selected_reports_root
         settings.setValue("reports_root", str(args.reports_root))

@@ -289,3 +289,72 @@ def test_no_hardware_leds_in_dry_run(setup, tmp_path, monkeypatch):
     assert dlg.hw_leds == {}
     assert dlg._hw_poller is None
     dlg.reject()
+
+
+# ----------------------------------------------------------------------
+# "Scan Another" keeps the tester and hydrophone
+# ----------------------------------------------------------------------
+def test_prefill_fills_and_validates(setup, tmp_path):
+    args = gui.build_gui_parser().parse_args(
+        ["--reports-root", str(tmp_path / "reports")])
+    dlg = gui.LauncherDialog(args, app_version="9.9", setup_root=setup.root,
+                             prefill={"tester": "T1",
+                                      "hydrophone": "HYDRO2246"})
+    assert dlg.tester_edit.text() == "T1"
+    assert dlg.hydrophone_edit.text() == "HYDRO2246"
+    assert dlg._tester.valid and dlg._hydrophone.valid
+    assert dlg.console_edit.text() == ""
+    assert dlg.txm_edit.text() == ""
+    assert dlg.carried_ids == {"tester": "T1", "hydrophone": "HYDRO2246"}
+
+
+def test_prefill_overrides_last_setup(setup, tmp_path):
+    setup.add(TESTERS, "T2", "John Roe")
+    setup.save_last_setup({"tester": "T1", "console": "WL134Q00007",
+                           "hydrophone": "HYDRO2246"})
+    args = gui.build_gui_parser().parse_args(
+        ["--reports-root", str(tmp_path / "reports"), "--use-last-setup"])
+    dlg = gui.LauncherDialog(args, app_version="9.9", setup_root=setup.root,
+                             prefill={"tester": "T2",
+                                      "hydrophone": "HYDRO2538"})
+    assert dlg.tester_edit.text() == "T2"
+    assert dlg.console_edit.text() == "WL134Q00007"
+    assert dlg.hydrophone_edit.text() == "HYDRO2538"
+
+
+def test_scan_another_prefills_previous_tester_and_hydrophone(
+        setup, tmp_path, monkeypatch):
+    prefills = []
+
+    class _FakeLauncher:
+        def __init__(self, args, *, prefill, **_kw):
+            prefills.append(dict(prefill))
+            self._first = len(prefills) == 1
+
+        def exec(self):
+            return (QDialog.DialogCode.Accepted if self._first
+                    else QDialog.DialogCode.Rejected)
+
+        collected_prefs = None
+        carried_ids = {"tester": "T1", "hydrophone": "HYDRO2246"}
+        selected_frequency_kHz = 400.0
+        selected_reports_root = tmp_path / "reports"
+        selected_setup_root = setup.root
+        selected_hydrophone_calibration = tmp_path / "cal.txt"
+        selected_console_hwid = "4ZGd1kX"
+
+    monkeypatch.setattr(gui, "LauncherDialog", _FakeLauncher)
+    monkeypatch.setattr(gui, "_run_once", lambda *a: ("another", 0))
+    monkeypatch.setattr(gui, "apply_theme", lambda *a: None)
+    monkeypatch.setattr(gui, "QSettings", lambda *a: _FakeSettings())
+    gui.main(["--reports-root", str(tmp_path / "reports"),
+              "--setup-data", str(setup.root)])
+    assert prefills == [{}, {"tester": "T1", "hydrophone": "HYDRO2246"}]
+
+
+class _FakeSettings:
+    def value(self, *_a, **_k):
+        return ""
+
+    def setValue(self, *_a):
+        pass
