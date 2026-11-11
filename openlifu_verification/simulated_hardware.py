@@ -55,21 +55,28 @@ class SimulatedLifu(SimulatedLIFUInterface):
     ``LIFUInterface``.
 
     ``tx_connected`` / ``console_connected`` set what
-    :meth:`is_device_connected` reports. ``fw_version``, if given,
-    replaces the SDK's placeholder version on both devices (the
-    firmware acceptance gate needs a real version number)."""
+    :meth:`is_device_connected` reports. ``txm_fw_version`` /
+    ``console_fw_version``, if given, replace the SDK's placeholder
+    version on that device (``fw_version`` sets both); the firmware
+    acceptance gate needs a real version number."""
 
     def __init__(self, *, tx_connected: bool = True,
                  console_connected: bool = True,
-                 fw_version: Optional[str] = None, **kwargs):
+                 fw_version: Optional[str] = None,
+                 txm_fw_version: Optional[str] = None,
+                 console_fw_version: Optional[str] = None, **kwargs):
         super().__init__(**kwargs)
         if tx_connected:
             self.txdevice.emit_connected()
         if console_connected:
             self.hvcontroller.emit_connected()
-        if fw_version is not None:
-            self.txdevice.set_version(fw_version)
-            self.hvcontroller.set_version(fw_version)
+        txm_fw_version = txm_fw_version if txm_fw_version is not None else fw_version
+        console_fw_version = (console_fw_version if console_fw_version is not None
+                              else fw_version)
+        if txm_fw_version is not None:
+            self.txdevice.set_version(txm_fw_version)
+        if console_fw_version is not None:
+            self.hvcontroller.set_version(console_fw_version)
 
     def _create_devices(self, num_modules, preset_flash):
         return (SimulatedLIFUTxDevice(num_modules=num_modules,

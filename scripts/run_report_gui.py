@@ -703,9 +703,10 @@ class _RunSignals(QObject):
     failed = Signal(str)       # emits traceback string
     #: Emitted when the run stopped because the operator pressed Abort.
     aborted = Signal()
-    #: Emitted when the run stopped because depth calibration or the
-    #: peak search failed. Payload is the operator-facing reason.
-    halted = Signal(str)
+    #: Emitted when the run stopped before the report: depth
+    #: calibration / peak search failed, or the firmware is too old.
+    #: Payload is (operator-facing reason, RunResult.halted_kind).
+    halted = Signal(str, str)
     #: Emitted after a device write requested from the result dialog.
     write_done = Signal(bool)
     #: Emitted when the run aborted because a required piece of
@@ -771,7 +772,8 @@ class _WorkerThread(QThread):
             if result.aborted:
                 self._signals.aborted.emit()
             elif result.halted_reason:
-                self._signals.halted.emit(result.halted_reason)
+                self._signals.halted.emit(result.halted_reason,
+                                          result.halted_kind or "setup")
             elif not self._completed:
                 self._signals.finished.emit(result, False)
         except HardwareNotConnectedError as e:
@@ -2867,6 +2869,21 @@ def main(argv=None) -> int:
             return exit_code
 
 
+def _show_firmware_out_of_date(reason: str) -> None:
+    """Explain that the device firmware must be updated before the
+    test can run. ``reason`` is :class:`FirmwareOutOfDate`'s message:
+    a first line, then one line per out-of-date device."""
+    _headline, _sep, devices = reason.partition("\n")
+    box = QMessageBox(QMessageBox.Icon.Critical, "Firmware update required",
+                      "This device's firmware is too old for the "
+                      "characterization test, so the test was not run.")
+    box.setInformativeText(
+        devices + "\n\nUpdate the firmware on the device(s) listed, then "
+        "start the test again. No measurements were taken and no report "
+        "was written.")
+    box.exec()
+
+
 def _run_once(args: argparse.Namespace, scan_config: ScanConfig,
               prefs: OperatorPrefs) -> tuple[str, int]:
     """Run one characterization with the Running + Result dialogs.
@@ -2899,7 +2916,8 @@ def _run_once(args: argparse.Namespace, scan_config: ScanConfig,
 
     signals = _RunSignals()
     outcome: dict = {"kind": None, "result": None, "can_write": False,
-                     "tb": None, "hw": None, "reason": None}
+                     "tb": None, "hw": None, "reason": None,
+                     "halted_kind": None}
     done = QDialog.DialogCode.Accepted
 
     def _on_finished(res, can_write):
@@ -2910,8 +2928,8 @@ def _run_once(args: argparse.Namespace, scan_config: ScanConfig,
         outcome["kind"] = "aborted"
         running.done(done)
 
-    def _on_halted(reason):
-        outcome.update(kind="halted", reason=reason)
+    def _on_halted(reason, halted_kind):
+        outcome.update(kind="halted", reason=reason, halted_kind=halted_kind)
         running.done(done)
 
     def _on_failed(tb):
@@ -2956,6 +2974,10 @@ def _run_once(args: argparse.Namespace, scan_config: ScanConfig,
                 "Returning to the start screen.",
             )
             return "another", 130
+
+        if outcome["kind"] == "halted" and outcome["halted_kind"] == "firmware":
+            _show_firmware_out_of_date(outcome["reason"])
+            return "another", 1
 
         if outcome["kind"] == "halted":
             QMessageBox.critical(

@@ -58,6 +58,22 @@ class RunHalted(Exception):
     message is operator-facing."""
 
 
+class FirmwareOutOfDate(RunHalted):
+    """Raised by :meth:`Characterization.run`, before anything is
+    measured, when the TXM or console firmware is older than the
+    acceptance minimum (or can't be read). ``devices`` holds
+    ``(label, reported, minimum)`` for each device that failed."""
+
+    def __init__(self, devices: list[tuple[str, str, str]]):
+        self.devices = list(devices)
+        lines = [f"{label}: "
+                 + (f"version {reported}" if reported
+                    else "version could not be read")
+                 + f" (required: {minimum} or newer)"
+                 for label, reported, minimum in self.devices]
+        super().__init__("Firmware update required.\n" + "\n".join(lines))
+
+
 # ----------------------------------------------------------------------
 # Report row IDs (match the XLSX template).
 # ----------------------------------------------------------------------
@@ -1494,6 +1510,7 @@ class Characterization:
             return None
         crit = self.criteria.firmware
         results: list[bool] = []
+        self._outdated_firmware: list[tuple[str, str, str]] = []
         for row_key, reported, minimum, label in (
             (ROW["txm_fw_version"],     info.txm_fw_version,
              crit.min_txm_version,     "TXM firmware"),
@@ -1512,6 +1529,8 @@ class Characterization:
                                       threshold=threshold, note=note)
             logger.info("[grade] %s \u2192 %s (%s)",
                         label, "PASS" if ok else "FAIL", note)
+            if not ok:
+                self._outdated_firmware.append((label, reported, minimum))
             results.append(ok)
         return all(results) if results else None
 
@@ -1708,14 +1727,21 @@ class Characterization:
         between the individual beam scans); once set, the current
         phase finishes and :class:`RunAborted` is raised.
 
-        Raises :class:`RunHalted` if the connected console's hardware
-        ID doesn't match ``expected_console_hwid``, or if the
+        Raises :class:`FirmwareOutOfDate` (before any measurement) if
+        the TXM or console firmware is older than the acceptance
+        minimum. Raises :class:`RunHalted` if the connected console's
+        hardware ID doesn't match ``expected_console_hwid``, or if the
         plane-wave depth calibration or the peak search fails or is
         out of tolerance, since every later measurement depends on them.
         """
         self._abort_event = abort_event
         self._check_abort()
         info = self.collect_test_info()
+        # Older firmware can't run the test: stop before measuring.
+        if self._grade_firmware() is False:
+            err = FirmwareOutOfDate(self._outdated_firmware)
+            logger.error("%s Stopping the run.", str(err).replace("\n", " "))
+            raise err
         expected = self.expected_console_hwid
         if expected and expected not in (info.console_hwid,
                                          info.console_hwid_hex):

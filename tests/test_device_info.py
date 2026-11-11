@@ -67,7 +67,18 @@ def test_dry_run_device_info_comes_from_the_sdk_simulation():
         "a0a1a2a3a4a5a6a7b0b1b2b3", "42p8mJivqN6tpZqe2")
     assert (info.console_hwid_hex, info.console_hwid) == (
         "c0c1c2c3c4c5c6c7d0d1d2d3", "4dyWcpSyLJHurUomU")
-    assert info.txm_fw_version == info.console_fw_version == "1.2.4"
+    assert (info.txm_fw_version, info.console_fw_version) == ("2.0.8", "1.2.7")
+
+
+def test_simulated_lifu_firmware_versions():
+    from openlifu_verification.simulated_hardware import SimulatedLifu
+    with SimulatedLifu(txm_fw_version="2.0.8",
+                       console_fw_version="1.2.7") as lifu:
+        assert lifu.txdevice.get_version() == "2.0.8"
+        assert lifu.hvcontroller.get_version() == "1.2.7"
+    with SimulatedLifu(fw_version="3.0.0", console_fw_version="") as lifu:
+        assert lifu.txdevice.get_version() == "3.0.0"
+        assert lifu.hvcontroller.get_version() == ""
 
 
 def test_read_console_identity_from_simulated_console():

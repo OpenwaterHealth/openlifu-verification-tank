@@ -244,8 +244,8 @@ class Firmware:
     stripping a leading ``"v"`` and ignoring build/pre-release
     suffixes.
     """
-    min_txm_version: str = "1.2.4"
-    min_console_version: str = "1.2.4"
+    min_txm_version: str = "2.0.8"
+    min_console_version: str = "1.2.7"
 
 
 @dataclass

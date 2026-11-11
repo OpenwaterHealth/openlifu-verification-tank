@@ -49,7 +49,8 @@ class DryRunTank:
         system_transmit_delay_us: float = 114.0,
         rng_seed: Optional[int] = 0,
         use_calibration: bool = True,
-        fw_version: str = "1.2.4",                       # >= acceptance default
+        txm_fw_version: str = "2.0.8",                   # >= acceptance minimum
+        console_fw_version: str = "1.2.7",               # >= acceptance minimum
     ):
         self.frequency = float(frequency)
         self.hydrophone_position = np.array(hydrophone_position, dtype=float).reshape(3)
@@ -61,7 +62,8 @@ class DryRunTank:
         # would fail the firmware acceptance gate). Imported here so
         # importing the package loads no Qt binding.
         from .simulated_hardware import SimulatedLifu
-        self.lifu = SimulatedLifu(fw_version=fw_version)
+        self.lifu = SimulatedLifu(txm_fw_version=txm_fw_version,
+                                  console_fw_version=console_fw_version)
         # Ground truth used for signal synthesis.
         self._peak_xy = tuple(peak_xy)
         self._peak_sigma = tuple(peak_sigma)
