@@ -23,6 +23,14 @@ Device" (PASS only), "Scan Another" (back to the launcher, with the
 tester and hydrophone kept), and "Exit". The hardware connection stays open until one of the latter
 two is chosen so the write can happen from the result dialog.
 
+``--dry-run`` simulates all hardware and touches no real device:
+measurements come from :class:`DryRunTank`; the status LEDs show
+simulated instruments (click one to unplug or plug it in, to test
+Start blocking and console re-detection); and the console S/N is read
+through the usual code from the SDK's simulated console
+(:mod:`openlifu_verification.simulated_hardware`), which is also the
+console the run's device info reports.
+
 The launcher deliberately reuses ``run_report.run()`` in-process so
 the two entry points share every behavior (arg parsing, artifact
 layout, device-write pass-gate, etc.).
@@ -30,7 +38,7 @@ layout, device-write pass-gate, etc.).
 Example::
 
     python scripts/run_report_gui.py               # real hardware
-    python scripts/run_report_gui.py --dry-run     # smoke test
+    python scripts/run_report_gui.py --dry-run     # simulated hardware
     python scripts/run_report_gui.py --use-last-setup --add-items
     python scripts/run_report_gui.py --theme Dark  # dark mode
 """
@@ -49,7 +57,7 @@ import traceback
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 # Vendored subset of the CLI arg parser. Import first so a --help
 # invocation on a machine without PySide6 still works.
@@ -94,11 +102,13 @@ from openlifu_verification.device_info import (
     read_console_hwid,
     read_console_identity,
 )
-from openlifu_verification.dry_run import dry_run_console_identity
 from openlifu_verification.hardware_status import probe_hardware
 from openlifu_verification.hydrophone import Hydrophone
 from openlifu_verification.paths import APP_ICON
 from openlifu_verification.report_io import NONSTANDARD_BANNER
+# After PySide6: the SDK simulation builds its Qt objects on the
+# binding already imported.
+from openlifu_verification.simulated_hardware import SimulatedHardware
 from openlifu_verification.setup_data import (
     CONSOLES,
     HYDROPHONES,
@@ -765,17 +775,19 @@ _DETAIL_WIDTH = 230  # px, status text to the right of each ID field
 
 
 class _HardwarePoller(QThread):
-    """Runs :func:`probe_hardware` every ``interval_s`` and emits
-    ``{name: present}``, or ``None`` if the probe failed. Must be
-    stopped before a run opens the scope."""
+    """Runs ``probe`` (default :func:`probe_hardware`) every
+    ``interval_s`` and emits ``{name: present}``, or ``None`` if the
+    probe failed. Must be stopped before a run opens the scope."""
 
     status = Signal(object)
 
     def __init__(self, ext_power_supply: bool, interval_s: float = 1.0,
-                 parent: Optional[QObject] = None):
+                 parent: Optional[QObject] = None, *,
+                 probe: Optional[Callable[..., dict]] = None):
         super().__init__(parent)
         self._ext_power_supply = ext_power_supply
         self._interval_s = interval_s
+        self._probe = probe
         self._wake = threading.Event()
         self._stopping = False
 
@@ -784,11 +796,15 @@ class _HardwarePoller(QThread):
         self._wake.set()
         self.wait()
 
+    def poll_now(self) -> None:
+        """Probe again without waiting for the interval."""
+        self._wake.set()
+
     def run(self) -> None:
         last_error = None
         while not self._stopping:
             try:
-                result = probe_hardware(
+                result = (self._probe or probe_hardware)(
                     ext_power_supply=self._ext_power_supply)
                 last_error = None
             except Exception as e:  # noqa: BLE001 - shown as unknown
@@ -805,14 +821,20 @@ class _HardwarePoller(QThread):
 
 class _ConsoleDetector(QThread):
     """Reads the connected console's serial number (user config
-    ``"sn"``) and hardware ID once, off the GUI thread. Emits
+    ``"sn"``) and hardware ID once, off the GUI thread, with ``read``
+    (:func:`read_console_identity`'s signature). Emits
     ``detected(sn, hwid, error)``; ``error`` is ``""`` on success."""
 
     detected = Signal(str, str, str)
 
+    def __init__(self, read: Callable[[], tuple[str, str]],
+                 parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._read = read
+
     def run(self) -> None:
         try:
-            sn, hwid = read_console_identity()
+            sn, hwid = self._read()
         except Exception as e:  # noqa: BLE001 - shown to the operator
             logger.warning("Could not detect the console S/N: %s", e)
             self.detected.emit("", "", str(e))
@@ -848,9 +870,12 @@ class _AddItemDialog(QDialog):
     (copied into the setup data)."""
 
     def __init__(self, registry: Registry, key: str,
-                 parent: Optional[QWidget] = None, *, value: str = ""):
+                 parent: Optional[QWidget] = None, *, value: str = "",
+                 read_console_hwid: Optional[Callable[[], str]] = None):
         super().__init__(parent)
         self.setWindowTitle(f"Add {registry.kind}")
+        # "Read from console"; default: the connected console.
+        self._read_hwid = read_console_hwid
         self.value_edit = QLineEdit()
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -913,7 +938,7 @@ class _AddItemDialog(QDialog):
     def _read_console_hwid(self) -> None:
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            hwid = read_console_hwid()
+            hwid = (self._read_hwid or read_console_hwid)()
         except Exception as e:  # noqa: BLE001 - shown to the operator
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Read from console",
@@ -1167,8 +1192,12 @@ class LauncherDialog(QDialog):
     only when every field is accepted, a frequency is set and every
     hardware status LED is green. When the console is plugged in, its
     S/N is read from its user config (or found by its hardware ID in
-    the setup data) and filled in, unless the operator typed one. In
-    ``--dry-run`` the simulated console's S/N is filled in instead.
+    the setup data) and filled in, unless the operator typed one.
+
+    In ``--dry-run`` the LEDs and the console read use
+    ``simulated_hardware`` (a new :class:`SimulatedHardware` if not
+    given) instead of real hardware, and clicking a light plugs that
+    simulated instrument in or out.
 
     ``prefill`` maps a registry kind (``"tester"``, ``"console"``,
     ``"hydrophone"``) to an ID to fill in and validate, e.g. the
@@ -1181,8 +1210,13 @@ class LauncherDialog(QDialog):
                  app_version: str,
                  setup_root: Path,
                  nonstandard_reasons: tuple[str, ...] | list[str] = (),
-                 prefill: Optional[dict[str, str]] = None):
+                 prefill: Optional[dict[str, str]] = None,
+                 simulated_hardware: Optional[SimulatedHardware] = None):
         super().__init__(parent)
+        # Dry run: every instrument is simulated; nothing real is touched.
+        self._sim: Optional[SimulatedHardware] = None
+        if getattr(args, "dry_run", False):
+            self._sim = simulated_hardware or SimulatedHardware()
         title = "OpenLIFU Calibration Tool"
         if getattr(args, "dry_run", False):
             title += "  [DRY RUN]"
@@ -1305,11 +1339,12 @@ class LauncherDialog(QDialog):
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
 
-        # --- Hardware status LEDs (not shown in --dry-run) ---
+        # --- Hardware status LEDs ---
         # Polled while the launcher is open; the run opens the
         # hardware only after the launcher closes. Start is blocked
         # until every LED is green.
         bottom_row = QHBoxLayout()
+        self._sim_toggles: dict[QWidget, str] = {}  # dry run: click to toggle
         self.hw_leds: dict[str, QLabel] = {}
         self._hw_blocker = ""  # why Start is blocked, "" if it isn't
         self._hw_poller: Optional[_HardwarePoller] = None
@@ -1319,18 +1354,32 @@ class LauncherDialog(QDialog):
         self._console_autofill = ""     # S/N last filled in by detection
         self._detected_console_sn = ""
         self._detected_console_hwid = ""
-        if not getattr(args, "dry_run", False):
-            ext_power = bool(getattr(args, "ext_power", False))
-            for name in ("Scope", "Transducer",
-                         "HV supply" if ext_power else "Console"):
-                led = QLabel("\u25cf")
-                led.setObjectName("hwLed")
-                bottom_row.addWidget(led)
-                bottom_row.addWidget(QLabel(name))
-                bottom_row.addSpacing(10)
-                self.hw_leds[name] = led
-            self._hw_poller = _HardwarePoller(ext_power, parent=self)
-            self._hw_poller.status.connect(self._show_hardware_status)
+        ext_power = bool(getattr(args, "ext_power", False))
+        if self._sim is not None:
+            sim_label = QLabel("Simulated:")
+            sim_label.setObjectName("fieldDetail")  # subtle text
+            sim_label.setToolTip("Dry run: no real hardware is used. "
+                                 "Click a light to unplug or plug in "
+                                 "that simulated instrument.")
+            bottom_row.addWidget(sim_label)
+        for name in ("Scope", "Transducer",
+                     "HV supply" if ext_power else "Console"):
+            led = QLabel("\u25cf")
+            led.setObjectName("hwLed")
+            label = QLabel(name)
+            bottom_row.addWidget(led)
+            bottom_row.addWidget(label)
+            bottom_row.addSpacing(10)
+            self.hw_leds[name] = led
+            if self._sim is not None:
+                for widget in (led, label):
+                    widget.setCursor(Qt.CursorShape.PointingHandCursor)
+                    widget.installEventFilter(self)
+                    self._sim_toggles[widget] = name
+        self._hw_poller = _HardwarePoller(
+            ext_power, parent=self,
+            probe=self._sim.probe if self._sim is not None else None)
+        self._hw_poller.status.connect(self._show_hardware_status)
         bottom_row.addStretch(1)
         bottom_row.addWidget(button_box)
 
@@ -1380,9 +1429,6 @@ class LauncherDialog(QDialog):
                 self._validate(f)
         # The connected console's S/N replaces a pre-filled one.
         self._console_autofill = self.console_edit.text().strip()
-        if getattr(args, "dry_run", False):
-            # No hardware is polled; "detect" the simulated console.
-            self._on_console_detected(*dry_run_console_identity(), "")
         self._show_hardware_status({})  # LEDs "checking" until the first probe
         self.txm_edit.setFocus()
 
@@ -1515,6 +1561,11 @@ class LauncherDialog(QDialog):
         self.start_button.setToolTip(self._hw_blocker)
 
     def eventFilter(self, obj, event) -> bool:
+        if (event.type() == QEvent.Type.MouseButtonRelease
+                and obj in self._sim_toggles
+                and event.button() == Qt.MouseButton.LeftButton):
+            self._toggle_simulated(self._sim_toggles[obj])
+            return True
         if (event.type() == QEvent.Type.KeyPress
                 and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
                 and obj in self._chain):
@@ -1558,7 +1609,8 @@ class LauncherDialog(QDialog):
         value = (self._detected_console_hwid
                  if f is self._console and key == self._detected_console_sn
                  else "")
-        dialog = _AddItemDialog(f.registry, key, self, value=value)
+        dialog = _AddItemDialog(f.registry, key, self, value=value,
+                                read_console_hwid=self._read_console_hwid)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return False
         try:
@@ -1602,17 +1654,28 @@ class LauncherDialog(QDialog):
     # ------------------------------------------------------------------
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        if self._hw_poller is not None and not self._hw_poller.isRunning():
+        if not self._hw_poller.isRunning():
             self._hw_poller.start()
 
     def done(self, result: int) -> None:
         # Stop polling before the run opens the scope.
-        if self._hw_poller is not None:
-            self._hw_poller.stop()
+        self._hw_poller.stop()
         # ... and let a console read finish before the run opens it.
         if self._console_detector is not None:
             self._console_detector.wait()
         super().done(result)
+
+    def _toggle_simulated(self, name: str) -> None:
+        """Dry run: plug the simulated ``name`` in or out (clicking its
+        light) and show the result."""
+        present = self._sim.toggle(name)
+        logger.info("DRY RUN: simulated %s %s.", name,
+                    "plugged in" if present else "unplugged")
+        if self._hw_poller.isRunning():
+            self._hw_poller.poll_now()
+        else:
+            self._show_hardware_status(self._sim.probe(
+                ext_power_supply="HV supply" in self.hw_leds))
 
     def _show_hardware_status(self, status: Optional[dict]) -> None:
         """Color each LED and block Start until all are green.
@@ -1632,6 +1695,9 @@ class LauncherDialog(QDialog):
             else:
                 state, tip = "missing", "not detected \u2013 check power and USB"
                 missing.append(name)
+            if self._sim is not None and state in ("ok", "missing"):
+                tip = (f"simulated, {tip}; click to "
+                       f"{'unplug' if state == 'ok' else 'plug in'}")
             led.setProperty("state", state)
             led.setToolTip(f"{name}: {tip}")
             _refresh_polish(led)
@@ -1660,11 +1726,22 @@ class LauncherDialog(QDialog):
         if (self._console_detector is not None
                 and self._console_detector.isRunning()):
             return
-        self._console_detector = _ConsoleDetector(self)
+        self._console_detector = _ConsoleDetector(
+            self._read_console_identity, self)
         self._console_detector.detected.connect(self._on_console_detected)
         if not self.console_edit.text().strip():
             self._show(self._console, None, "Reading console\u2026")
         self._console_detector.start()
+
+    def _read_console_identity(self) -> tuple[str, str]:
+        """``(sn, hwid)`` of the connected console, or of the simulated
+        one in a dry run (see :func:`read_console_identity`)."""
+        if self._sim is not None:
+            return read_console_identity(self._sim.open_lifu)
+        return read_console_identity()
+
+    def _read_console_hwid(self) -> str:
+        return self._read_console_identity()[1]
 
     def _console_overwritable(self) -> bool:
         """Whether the console field is empty or still holds the S/N
@@ -2668,6 +2745,8 @@ def main(argv=None) -> int:
     calibration_path_arg = args.calibration_path
     add_items_arg = args.add_items  # None: use the setup data's default
 
+    # Dry run: what's plugged in survives "Scan Another".
+    simulated_hardware = SimulatedHardware() if args.dry_run else None
     exit_code = 130
     prefill: dict[str, str] = {}  # tester / hydrophone from the last run
     while True:
@@ -2677,7 +2756,8 @@ def main(argv=None) -> int:
         launcher = LauncherDialog(args, app_version=app_version,
                                   setup_root=setup_root,
                                   nonstandard_reasons=nonstandard,
-                                  prefill=prefill)
+                                  prefill=prefill,
+                                  simulated_hardware=simulated_hardware)
         if launcher.exec() != QDialog.DialogCode.Accepted:
             logger.info("Launcher closed.")
             return exit_code

@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -136,17 +136,24 @@ def _read_hwid(dev, module: int, label: str) -> tuple[str, str]:
     return hex_hwid, b58
 
 
-def read_console_identity() -> tuple[str, str]:
+def read_console_identity(open_interface: Optional[Callable] = None
+                          ) -> tuple[str, str]:
     """Briefly connect to the console and return ``(sn, hwid)``.
 
     ``sn`` is the serial number stored in the console's user config
     (``"sn"``; ``""`` if the config has none or can't be read) and
     ``hwid`` its base58 hardware ID (the form shown in the report).
     Raises ``RuntimeError`` if the console isn't connected or the
-    hardware ID can't be read."""
-    from openlifu_sdk.io import LIFUInterface
+    hardware ID can't be read.
 
-    with LIFUInterface() as lifu:
+    ``open_interface`` returns the interface to read, as a context
+    manager; default: a new ``LIFUInterface`` (the dry run passes
+    :meth:`SimulatedHardware.open_lifu
+    <openlifu_verification.simulated_hardware.SimulatedHardware.open_lifu>`)."""
+    if open_interface is None:
+        from openlifu_sdk.io import LIFUInterface as open_interface
+
+    with open_interface() as lifu:
         if not lifu.is_device_connected()[1]:
             raise RuntimeError("Console is not connected.")
         hv = lifu.hvcontroller
@@ -157,11 +164,12 @@ def read_console_identity() -> tuple[str, str]:
     return sn, b58
 
 
-def read_console_hwid() -> str:
+def read_console_hwid(open_interface: Optional[Callable] = None) -> str:
     """Briefly connect to the console and return its base58 hardware ID
     (the form shown in the report). Raises ``RuntimeError`` if the
-    console isn't connected or the ID can't be read."""
-    return read_console_identity()[1]
+    console isn't connected or the ID can't be read. ``open_interface``
+    as in :func:`read_console_identity`."""
+    return read_console_identity(open_interface)[1]
 
 
 def _read_config_sn(dev, label: str) -> str:

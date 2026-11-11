@@ -13,6 +13,7 @@ from openlifu_verification.device_info import (
     DeviceInfo,
     _read_config_sn,
     _read_hwid,
+    read_console_identity,
 )
 from openlifu_verification.dry_run import DryRunTank
 
@@ -59,12 +60,26 @@ def test_read_hwid_unreadable_device_gives_empty_strings():
     assert _read_hwid(_Broken(), 0, "TXM") == ("", "")
 
 
-def test_dry_run_device_info_carries_full_form():
+def test_dry_run_device_info_comes_from_the_sdk_simulation():
     info = DeviceInfo.collect(DryRunTank(rng_seed=0))
+    # The SDK simulation's MCU UIDs; FW versions the acceptance gate takes.
     assert (info.txm_hwid_hex, info.txm_hwid) == (
-        "d00000000000000000000001", "4vfAkNk3axRSP1x4Q")
+        "a0a1a2a3a4a5a6a7b0b1b2b3", "42p8mJivqN6tpZqe2")
     assert (info.console_hwid_hex, info.console_hwid) == (
-        "d00000000000000000000002", "4vfAkNk3axRSP1x4R")
+        "c0c1c2c3c4c5c6c7d0d1d2d3", "4dyWcpSyLJHurUomU")
+    assert info.txm_fw_version == info.console_fw_version == "1.2.4"
+
+
+def test_read_console_identity_from_simulated_console():
+    from openlifu_verification.simulated_hardware import (
+        SIMULATED_CONSOLE_SN,
+        SimulatedLifu,
+    )
+    assert read_console_identity(SimulatedLifu) == (
+        SIMULATED_CONSOLE_SN, "4dyWcpSyLJHurUomU")
+    with pytest.raises(RuntimeError, match="not connected"):
+        read_console_identity(
+            lambda: SimulatedLifu(console_connected=False))
 
 
 class _ConfigDevice:

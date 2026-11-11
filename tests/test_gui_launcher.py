@@ -285,15 +285,6 @@ def test_start_blocked_until_hardware_detected(setup, tmp_path):
     assert dlg.start_button.isEnabled()
 
 
-def test_no_hardware_leds_in_dry_run(setup, tmp_path, monkeypatch):
-    monkeypatch.setattr(gui, "probe_hardware", pytest.fail)
-    dlg = _launcher(setup, tmp_path, "--dry-run")
-    dlg.show()
-    assert dlg.hw_leds == {}
-    assert dlg._hw_poller is None
-    dlg.reject()
-
-
 # ----------------------------------------------------------------------
 # Console S/N auto-detection
 # ----------------------------------------------------------------------
@@ -403,7 +394,7 @@ def test_add_items_prefills_detected_console_hwid(setup, tmp_path,
     seen = {}
 
     class _FakeAdd:
-        def __init__(self, registry, key, parent=None, *, value=""):
+        def __init__(self, registry, key, parent=None, *, value="", **_):
             seen.update(key=key, value=value)
             self.value = value
 
@@ -420,26 +411,142 @@ def test_add_items_prefills_detected_console_hwid(setup, tmp_path,
     assert dlg._console.valid
 
 
-def test_dry_run_fills_simulated_console(setup, tmp_path, monkeypatch):
-    from openlifu_verification.dry_run import (
-        DRY_RUN_CONSOLE_SN, dry_run_console_identity)
-    monkeypatch.setattr(gui, "read_console_identity", pytest.fail)
-    dlg = _launcher(setup, tmp_path, "--dry-run")
-    assert dlg.console_edit.text() == DRY_RUN_CONSOLE_SN
-    assert dlg._console.missing  # not registered: Enter offers to add it
-    assert dlg._detected_console_hwid == dry_run_console_identity()[1]
+# ----------------------------------------------------------------------
+# --dry-run: simulated hardware
+# ----------------------------------------------------------------------
+@pytest.fixture
+def real_hardware_calls(monkeypatch) -> list:
+    """Records any attempt to reach real hardware: the hardware probe
+    (PicoSDK enumeration, serial ports) or a real ``LIFUInterface``.
+    Console reads go through the real :func:`read_console_identity`,
+    as the launcher makes them."""
+    import openlifu_sdk.io
+    import serial.tools.list_ports
 
-    setup.add(CONSOLES, DRY_RUN_CONSOLE_SN, dry_run_console_identity()[1])
+    from openlifu_verification import device_info, hardware_status
+
+    calls = []
+
+    def _recorder(name):
+        def _call(*_a, **_k):
+            calls.append(name)
+            raise RuntimeError(f"{name} called in a dry run")
+        return _call
+
+    monkeypatch.setattr(gui, "probe_hardware", _recorder("probe_hardware"))
+    monkeypatch.setattr(hardware_status, "picoscope_present",
+                        _recorder("picoscope_present"))
+    monkeypatch.setattr(serial.tools.list_ports, "comports",
+                        _recorder("comports"))
+    monkeypatch.setattr(openlifu_sdk.io, "LIFUInterface",
+                        _recorder("LIFUInterface"))
+    monkeypatch.setattr(gui, "read_console_identity",
+                        device_info.read_console_identity)
+    return calls
+
+
+def _sim_console_hwid() -> str:
+    from openlifu_verification.simulated_hardware import (
+        simulated_console_identity)
+    return simulated_console_identity()[1]
+
+
+def _click(widget) -> None:
+    QTest.mouseClick(widget, Qt.MouseButton.LeftButton)
+
+
+@pytest.mark.parametrize("flags, hv", [((), "Console"),
+                                       (("--ext-power",), "HV supply")])
+def test_dry_run_shows_simulated_lights(setup, tmp_path, real_hardware_calls,
+                                        flags, hv):
+    dlg = _launcher(setup, tmp_path, "--dry-run", *flags, hardware_ok=False)
+    assert list(dlg.hw_leds) == ["Scope", "Transducer", hv]
+    assert set(_states(dlg).values()) == {"checking"}
+    dlg.show()
+    assert _wait_until(lambda: set(_states(dlg).values()) == {"ok"})
+    assert dlg.hw_leds["Scope"].toolTip().startswith("Scope: simulated")
+    dlg.reject()
+    assert not dlg._hw_poller.isRunning()
+    assert real_hardware_calls == []
+
+
+def test_dry_run_detects_simulated_console(setup, tmp_path,
+                                           real_hardware_calls):
+    from openlifu_verification.simulated_hardware import SIMULATED_CONSOLE_SN
+
+    dlg = _launcher(setup, tmp_path, "--dry-run", hardware_ok=False)
+    dlg.show()
+    assert _wait_until(
+        lambda: dlg.console_edit.text() == SIMULATED_CONSOLE_SN)
+    assert dlg._console.missing  # not registered: Enter offers to add it
+    assert dlg._detected_console_hwid == _sim_console_hwid()
+    dlg.reject()
+
+    setup.add(CONSOLES, SIMULATED_CONSOLE_SN, _sim_console_hwid())
     dlg = _launcher(setup, tmp_path, "--dry-run")
+    assert dlg.console_edit.text() == SIMULATED_CONSOLE_SN
     assert dlg._console.valid
+    assert dlg._console.detail.toolTip() == _sim_console_hwid()
+    assert real_hardware_calls == []
+
+
+def test_dry_run_add_console_reads_simulated_hwid(setup, tmp_path,
+                                                  real_hardware_calls):
+    dlg = _launcher(setup, tmp_path, "--dry-run", "--add-items")
+    add = gui._AddItemDialog(CONSOLES, "WL134Q00001", dlg,
+                             read_console_hwid=dlg._read_console_hwid)
+    add._read_console_hwid()  # the "Read from console" button
+    assert add.value == _sim_console_hwid()
+    assert real_hardware_calls == []
+
+
+def test_dry_run_unplugging_blocks_start(setup, tmp_path,
+                                         real_hardware_calls):
+    from openlifu_verification.simulated_hardware import (
+        SIMULATED_CONSOLE_SN, SimulatedHardware)
+
+    setup.add(CONSOLES, SIMULATED_CONSOLE_SN, _sim_console_hwid())
+    sim = SimulatedHardware()
+    args = gui.build_gui_parser().parse_args(
+        ["--reports-root", str(tmp_path / "reports"), "--dry-run"])
+    dlg = gui.LauncherDialog(args, app_version="9.9", setup_root=setup.root,
+                             simulated_hardware=sim)
+    reads = []
+    real_read = dlg._read_console_identity
+    dlg._read_console_identity = lambda: reads.append(1) or real_read()
+    dlg.show()
+    assert _wait_until(lambda: dlg._console.valid)
+    _scan(dlg, dlg.txm_edit, "WLM44Q00012")
+    _scan(dlg, dlg.tester_edit, "T1")
+    _scan(dlg, dlg.hydrophone_edit, "HYDRO2246")
+    assert dlg.start_button.isEnabled()
+    assert reads == [1]
+
+    _click(dlg.hw_leds["Transducer"])
+    assert _wait_until(lambda: _states(dlg)["Transducer"] == "missing")
+    assert not sim.is_present("Transducer")
+    assert not dlg.start_button.isEnabled()
+    assert dlg.start_button.toolTip().startswith("Not detected: Transducer.")
+    _click(dlg.hw_leds["Transducer"])
+    assert _wait_until(lambda: dlg.start_button.isEnabled())
+
+    # Unplugging and replugging the console reads it again.
+    _click(dlg.hw_leds["Console"])
+    assert _wait_until(lambda: _states(dlg)["Console"] == "missing")
+    assert not dlg.start_button.isEnabled()
+    _click(dlg.hw_leds["Console"])
+    assert _wait_until(lambda: len(reads) == 2)
+    assert _wait_until(lambda: dlg.start_button.isEnabled())
+    assert dlg.console_edit.text() == SIMULATED_CONSOLE_SN
+    dlg.reject()
+    assert real_hardware_calls == []
 
 
 def test_dry_run_console_matches_dry_run_device_info():
     from openlifu_verification.device_info import DeviceInfo
-    from openlifu_verification.dry_run import (
-        DryRunTank, dry_run_console_identity)
+    from openlifu_verification.dry_run import DryRunTank
     info = DeviceInfo.collect(DryRunTank(rng_seed=0))
-    assert info.console_hwid == dry_run_console_identity()[1]
+    assert info.console_hwid == _sim_console_hwid()
 
 
 # ----------------------------------------------------------------------
