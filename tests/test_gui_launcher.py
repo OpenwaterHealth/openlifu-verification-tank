@@ -418,3 +418,25 @@ def test_add_items_prefills_detected_console_hwid(setup, tmp_path,
     assert seen == {"key": "WL134Q00042", "value": "NewHwid"}
     assert setup.lookup(CONSOLES, "WL134Q00042") == (True, {"HWID": "NewHwid"})
     assert dlg._console.valid
+
+
+def test_dry_run_fills_simulated_console(setup, tmp_path, monkeypatch):
+    from openlifu_verification.dry_run import (
+        DRY_RUN_CONSOLE_SN, dry_run_console_identity)
+    monkeypatch.setattr(gui, "read_console_identity", pytest.fail)
+    dlg = _launcher(setup, tmp_path, "--dry-run")
+    assert dlg.console_edit.text() == DRY_RUN_CONSOLE_SN
+    assert dlg._console.missing  # not registered: Enter offers to add it
+    assert dlg._detected_console_hwid == dry_run_console_identity()[1]
+
+    setup.add(CONSOLES, DRY_RUN_CONSOLE_SN, dry_run_console_identity()[1])
+    dlg = _launcher(setup, tmp_path, "--dry-run")
+    assert dlg._console.valid
+
+
+def test_dry_run_console_matches_dry_run_device_info():
+    from openlifu_verification.device_info import DeviceInfo
+    from openlifu_verification.dry_run import (
+        DryRunTank, dry_run_console_identity)
+    info = DeviceInfo.collect(DryRunTank(rng_seed=0))
+    assert info.console_hwid == dry_run_console_identity()[1]

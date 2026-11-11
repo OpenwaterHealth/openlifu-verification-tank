@@ -90,6 +90,7 @@ from openlifu_verification.device_info import (
     read_console_hwid,
     read_console_identity,
 )
+from openlifu_verification.dry_run import dry_run_console_identity
 from openlifu_verification.hardware_status import probe_hardware
 from openlifu_verification.paths import APP_ICON
 from openlifu_verification.report_io import NONSTANDARD_BANNER
@@ -933,7 +934,8 @@ class LauncherDialog(QDialog):
     only when every field is accepted, a frequency is set and every
     hardware status LED is green. When the console is plugged in, its
     S/N is read from its user config (or found by its hardware ID in
-    the setup data) and filled in, unless the operator typed one.
+    the setup data) and filled in, unless the operator typed one. In
+    ``--dry-run`` the simulated console's S/N is filled in instead.
     """
 
     def __init__(self, args: argparse.Namespace,
@@ -1134,6 +1136,9 @@ class LauncherDialog(QDialog):
                     self._validate(f)
             # The connected console's S/N replaces the last one.
             self._console_autofill = self.console_edit.text().strip()
+        if getattr(args, "dry_run", False):
+            # No hardware is polled; "detect" the simulated console.
+            self._on_console_detected(*dry_run_console_identity(), "")
         self._show_hardware_status({})  # LEDs "checking" until the first probe
         self.txm_edit.setFocus()
 

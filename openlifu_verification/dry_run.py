@@ -498,6 +498,21 @@ class DryRunTank:
         )
 
 
+#: Identity of the dry run's simulated console: the S/N its user config
+#: would hold and its hardware ID (hex). The launcher "detects" it in
+#: --dry-run in place of reading a real console.
+DRY_RUN_CONSOLE_SN = "WL134Q00000"
+_DRY_RUN_CONSOLE_HWID_HEX = "d00000000000000000000002"
+
+
+def dry_run_console_identity() -> tuple[str, str]:
+    """``(sn, base58 hwid)`` of the simulated console, the same shape
+    as :func:`device_info.read_console_identity`."""
+    from openlifu_sdk.util.hwid import encode_hwid
+    return DRY_RUN_CONSOLE_SN, encode_hwid(
+        bytes.fromhex(_DRY_RUN_CONSOLE_HWID_HEX), base58=True)
+
+
 class _DryDevice:
     """Stub TXM / HV controller exposing what :class:`DeviceInfo` reads."""
 
@@ -520,7 +535,7 @@ class _DryLifu:
 
     def __init__(self, fw_version: str):
         self.txdevice = _DryDevice(fw_version, "d00000000000000000000001")
-        self.hvcontroller = _DryDevice(fw_version, "d00000000000000000000002")
+        self.hvcontroller = _DryDevice(fw_version, _DRY_RUN_CONSOLE_HWID_HEX)
 
 
 class _DryHydrophone:
