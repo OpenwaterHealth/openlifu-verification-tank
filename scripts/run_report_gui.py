@@ -30,6 +30,7 @@ Example::
     python scripts/run_report_gui.py               # real hardware
     python scripts/run_report_gui.py --dry-run     # smoke test
     python scripts/run_report_gui.py --use-last-setup --add-items
+    python scripts/run_report_gui.py --scan-config config/gui/add_items.json
     python scripts/run_report_gui.py --theme Dark  # dark mode
 """
 from __future__ import annotations
@@ -499,10 +500,11 @@ def build_gui_parser() -> argparse.ArgumentParser:
         help="Pre-fill tester, console and hydrophone from the last run.",
     )
     parser.add_argument(
-        "--add-items", action="store_true",
+        "--add-items", action=argparse.BooleanOptionalAction, default=None,
         help=("Offer to add a well-formed tester / console / hydrophone ID "
               "that is missing from the setup data, and allow changing the "
-              "setup data and reports folders."),
+              "setup data and reports folders. Default: the --scan-config "
+              "file's gui.add_items, else off."),
     )
     parser.add_argument(
         "--no-validate", action="store_true",
@@ -2251,6 +2253,8 @@ def main(argv=None) -> int:
                              f"Could not load --scan-config:\n{e}")
         return 2
     nonstandard = run_report.nonstandard_reasons(args, scan_config)
+    if args.add_items is None:
+        args.add_items = scan_config.gui.add_items
 
     # Prefs come from the launcher form; only the app version is
     # filled in here.

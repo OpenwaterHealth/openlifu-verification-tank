@@ -114,3 +114,32 @@ def test_scope_kwargs_shape():
     assert set(kw) >= {"time_start_s", "time_stop_s", "sampling_interval_ns"}
     # Nothing weird slipped in that the scan_* methods wouldn't take.
     assert all(isinstance(v, (int, float)) for v in kw.values())
+
+
+def test_gui_section_is_not_a_measurement_override(tmp_path):
+    cfg = ScanConfig.with_overrides(
+        _write(tmp_path, {"gui": {"add_items": True}}))
+    assert cfg.gui.add_items is True
+    assert not cfg.overrides_measurement
+    assert cfg.differences_from_standard() == []
+    assert ScanConfig().gui.add_items is False
+
+
+def test_any_measurement_key_is_an_override(tmp_path):
+    """Even a measurement setting restated at its standard value counts."""
+    cfg = ScanConfig.with_overrides(_write(tmp_path, {
+        "gui": {"add_items": True}, "scope": {"n_averages": 3}}))
+    assert cfg.overrides_measurement
+    assert not ScanConfig().overrides_measurement
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_gui_add_items_must_be_boolean(tmp_path, value):
+    with pytest.raises(ValueError, match="must be true or false"):
+        ScanConfig.with_overrides(
+            _write(tmp_path, {"gui": {"add_items": value}}))
+
+
+def test_bundled_gui_config_enables_add_items(repo_root):
+    cfg = ScanConfig.with_overrides(repo_root / "config/gui/add_items.json")
+    assert cfg.gui.add_items and not cfg.overrides_measurement

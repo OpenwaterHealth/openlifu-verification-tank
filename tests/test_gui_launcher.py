@@ -289,3 +289,38 @@ def test_no_hardware_leds_in_dry_run(setup, tmp_path, monkeypatch):
     assert dlg.hw_leds == {}
     assert dlg._hw_poller is None
     dlg.reject()
+
+
+# ----------------------------------------------------------------------
+# --add-items default from the scan config
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize("config, flags, expected", [
+    (None, [], False),
+    ({"gui": {"add_items": True}}, [], True),
+    ({"gui": {"add_items": True}}, ["--no-add-items"], False),
+    ({"gui": {"add_items": False}}, ["--add-items"], True),
+    (None, ["--add-items"], True),
+])
+def test_add_items_default_from_scan_config(setup, tmp_path, monkeypatch,
+                                            config, flags, expected):
+    import json
+    seen = {}
+
+    class _FakeLauncher:
+        def __init__(self, args, *, nonstandard_reasons, **_kw):
+            seen.update(add_items=args.add_items,
+                        nonstandard=list(nonstandard_reasons))
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    argv = ["--reports-root", str(tmp_path / "reports"),
+            "--setup-data", str(setup.root), *flags]
+    if config is not None:
+        path = tmp_path / "scan_config.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        argv += ["--scan-config", str(path)]
+    monkeypatch.setattr(gui, "LauncherDialog", _FakeLauncher)
+    monkeypatch.setattr(gui, "apply_theme", lambda *a: None)
+    gui.main(argv)
+    assert seen == {"add_items": expected, "nonstandard": []}

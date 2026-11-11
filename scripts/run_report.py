@@ -186,7 +186,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Diagnostics only: partial JSON of scan/scope settings "
                         "applied on top of the built-in standard configuration. "
                         "Marks the report NON-STANDARD and disables writing to "
-                        "the device. Acceptance criteria cannot be overridden.")
+                        "the device, unless it only holds a \"gui\" section "
+                        "(report GUI defaults, e.g. {\"gui\": {\"add_items\": "
+                        "true}}). Acceptance criteria cannot be overridden.")
     p.add_argument("--prefs", type=Path, default=None,
                    help="Path to operator prefs JSON (defaults to ~/.openlifu_verification/operator_prefs.json).")
     p.add_argument("--reports-root", type=Path, default=None,
@@ -267,10 +269,12 @@ def nonstandard_reasons(args: argparse.Namespace,
     """Every way ``args`` / ``scan_config`` deviate from a standard run.
 
     Any override option counts, even if its value happens to match
-    the standard one. An empty list means a standard run.
+    the standard one, except a ``--scan-config`` that only sets report
+    GUI defaults (its ``gui`` section). An empty list means a standard
+    run.
     """
     reasons: list[str] = []
-    if args.scan_config is not None:
+    if args.scan_config is not None and scan_config.overrides_measurement:
         reasons.append(f"--scan-config {args.scan_config}")
         reasons.extend(scan_config.differences_from_standard())
     if args.voltage is not None:
