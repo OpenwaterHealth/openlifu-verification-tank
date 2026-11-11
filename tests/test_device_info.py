@@ -9,7 +9,11 @@ from openlifu_sdk.io.LIFUHVController import HVController
 from openlifu_sdk.io.LIFUTXDevice import TxDevice
 from openlifu_sdk.util.hwid import encode_hwid
 
-from openlifu_verification.device_info import DeviceInfo, _read_hwid
+from openlifu_verification.device_info import (
+    DeviceInfo,
+    _read_config_sn,
+    _read_hwid,
+)
 from openlifu_verification.dry_run import DryRunTank
 
 UID = bytes(range(12))
@@ -61,3 +65,24 @@ def test_dry_run_device_info_carries_full_form():
         "d00000000000000000000001", "4vfAkNk3axRSP1x4Q")
     assert (info.console_hwid_hex, info.console_hwid) == (
         "d00000000000000000000002", "4vfAkNk3axRSP1x4R")
+
+
+class _ConfigDevice:
+    def __init__(self, config):
+        self._config = config
+
+    def read_config(self):
+        if isinstance(self._config, Exception):
+            raise self._config
+        from openlifu_sdk.io.LIFUUserConfig import LifuUserConfig
+        return LifuUserConfig(json_data=self._config)
+
+
+@pytest.mark.parametrize("config, sn", [
+    ({"sn": " WL134Q00007 "}, "WL134Q00007"),
+    ({"hwid": "abc"}, ""),
+    ({"sn": 7}, ""),
+    (RuntimeError("timeout"), ""),
+])
+def test_read_config_sn(config, sn):
+    assert _read_config_sn(_ConfigDevice(config), "console") == sn

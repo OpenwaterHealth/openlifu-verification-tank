@@ -46,6 +46,9 @@ def _launcher(setup: SetupData, tmp_path, *flags: str,
                              setup_root=setup.root)
     if hardware_ok:
         dlg._show_hardware_status(dict.fromkeys(dlg.hw_leds, True))
+        if dlg._console_detector is not None:
+            dlg._console_detector.wait()  # finish the console read
+            QApplication.processEvents()
     return dlg
 
 
@@ -172,7 +175,7 @@ def test_add_items_registers_missing_tester(setup, tmp_path, monkeypatch):
     class _FakeAdd:
         value = "New Tester"
 
-        def __init__(self, registry, key, parent):
+        def __init__(self, registry, key, parent, **_kw):
             assert (registry, key) == (TESTERS, "T2")
 
         def exec(self):
@@ -289,6 +292,154 @@ def test_no_hardware_leds_in_dry_run(setup, tmp_path, monkeypatch):
     assert dlg.hw_leds == {}
     assert dlg._hw_poller is None
     dlg.reject()
+
+
+# ----------------------------------------------------------------------
+# Console S/N auto-detection
+# ----------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _no_console(monkeypatch):
+    """No test talks to a real console; tests that need one patch
+    ``read_console_identity`` themselves."""
+    def _read():
+        raise RuntimeError("Console is not connected.")
+    monkeypatch.setattr(gui, "read_console_identity", _read)
+
+
+def _console_reads(monkeypatch, sn: str, hwid: str = "4ZGd1kX") -> list:
+    calls = []
+
+    def _read():
+        calls.append(1)
+        return sn, hwid
+    monkeypatch.setattr(gui, "read_console_identity", _read)
+    return calls
+
+
+def _plug_console(dlg: gui.LauncherDialog, present: bool = True) -> None:
+    dlg._show_hardware_status(
+        {"Scope": True, "Transducer": True, "Console": present})
+    if dlg._console_detector is not None:
+        dlg._console_detector.wait()
+    QApplication.processEvents()
+
+
+def test_console_sn_read_from_user_config(setup, tmp_path, monkeypatch):
+    _console_reads(monkeypatch, "WL134Q00007")
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    _plug_console(dlg)
+    assert dlg.console_edit.text() == "WL134Q00007"
+    assert dlg._console.valid
+    assert dlg._console.detail.toolTip() == "4ZGd1kX"
+
+
+def test_console_sn_found_by_hwid_when_config_has_none(setup, tmp_path,
+                                                      monkeypatch):
+    _console_reads(monkeypatch, "", hwid="4ZGd1kX")
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    _plug_console(dlg)
+    assert dlg.console_edit.text() == "WL134Q00007"
+    assert dlg._console.valid
+
+
+def test_console_sn_unknown_leaves_field_for_operator(setup, tmp_path,
+                                                     monkeypatch):
+    _console_reads(monkeypatch, "", hwid="unregistered")
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    _plug_console(dlg)
+    assert dlg.console_edit.text() == ""
+    assert not dlg._console.valid
+    assert "not set" in dlg._console.detail.toolTip()
+
+
+def test_console_read_error_is_shown(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    _plug_console(dlg)
+    assert dlg.console_edit.text() == ""
+    assert dlg._console.detail.text() == "Could not read console"
+    assert dlg._console.detail.toolTip() == "Console is not connected."
+
+
+def test_typed_console_sn_is_not_overwritten(setup, tmp_path, monkeypatch):
+    calls = _console_reads(monkeypatch, "WL134Q00099")
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    dlg.console_edit.setText("WL134Q00007")
+    _plug_console(dlg)
+    assert calls == []
+    assert dlg.console_edit.text() == "WL134Q00007"
+
+
+def test_console_detected_replaces_last_setup(setup, tmp_path, monkeypatch):
+    setup.add(CONSOLES, "WL134Q00008", "other")
+    setup.save_last_setup({"console": "WL134Q00008"})
+    _console_reads(monkeypatch, "WL134Q00007")
+    dlg = _launcher(setup, tmp_path, "--use-last-setup", hardware_ok=False)
+    assert dlg.console_edit.text() == "WL134Q00008"
+    _plug_console(dlg)
+    assert dlg.console_edit.text() == "WL134Q00007"
+
+
+def test_console_read_once_per_connection(setup, tmp_path, monkeypatch):
+    calls = _console_reads(monkeypatch, "WL134Q00007")
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    _plug_console(dlg)
+    _plug_console(dlg)
+    assert len(calls) == 1
+    _plug_console(dlg, present=False)
+    _plug_console(dlg)
+    assert len(calls) == 2
+
+
+def test_no_console_read_with_external_supply(setup, tmp_path, monkeypatch):
+    calls = _console_reads(monkeypatch, "WL134Q00007")
+    dlg = _launcher(setup, tmp_path, "--ext-power", hardware_ok=False)
+    _plug_console(dlg)
+    assert calls == []
+
+
+def test_add_items_prefills_detected_console_hwid(setup, tmp_path,
+                                                  monkeypatch):
+    _console_reads(monkeypatch, "WL134Q00042", hwid="NewHwid")
+    seen = {}
+
+    class _FakeAdd:
+        def __init__(self, registry, key, parent=None, *, value=""):
+            seen.update(key=key, value=value)
+            self.value = value
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(gui, "_AddItemDialog", _FakeAdd)
+    dlg = _launcher(setup, tmp_path, "--add-items", hardware_ok=False)
+    _plug_console(dlg)
+    assert dlg._console.missing
+    _scan(dlg, dlg.console_edit, "WL134Q00042")
+    assert seen == {"key": "WL134Q00042", "value": "NewHwid"}
+    assert setup.lookup(CONSOLES, "WL134Q00042") == (True, {"HWID": "NewHwid"})
+    assert dlg._console.valid
+
+
+def test_dry_run_fills_simulated_console(setup, tmp_path, monkeypatch):
+    from openlifu_verification.dry_run import (
+        DRY_RUN_CONSOLE_SN, dry_run_console_identity)
+    monkeypatch.setattr(gui, "read_console_identity", pytest.fail)
+    dlg = _launcher(setup, tmp_path, "--dry-run")
+    assert dlg.console_edit.text() == DRY_RUN_CONSOLE_SN
+    assert dlg._console.missing  # not registered: Enter offers to add it
+    assert dlg._detected_console_hwid == dry_run_console_identity()[1]
+
+    setup.add(CONSOLES, DRY_RUN_CONSOLE_SN, dry_run_console_identity()[1])
+    dlg = _launcher(setup, tmp_path, "--dry-run")
+    assert dlg._console.valid
+
+
+def test_dry_run_console_matches_dry_run_device_info():
+    from openlifu_verification.device_info import DeviceInfo
+    from openlifu_verification.dry_run import (
+        DryRunTank, dry_run_console_identity)
+    info = DeviceInfo.collect(DryRunTank(rng_seed=0))
+    assert info.console_hwid == dry_run_console_identity()[1]
 
 
 # ----------------------------------------------------------------------
