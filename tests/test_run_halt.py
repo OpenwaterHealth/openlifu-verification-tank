@@ -195,7 +195,7 @@ def test_peak_error_continue_runs_at_center_and_fails_peak():
     assert report.waveform_at_peak  # the rest of the run went ahead
 
 
-def test_off_center_peak_continue_keeps_measured_peak():
+def test_off_center_peak_continue_stays_at_found_peak():
     from openlifu_verification.characterization import ROW
     tank = DryRunTank(rng_seed=0, peak_xy=(2.5, 0.0))
     ask = _Ask(True)
@@ -204,10 +204,16 @@ def test_off_center_peak_continue_keeps_measured_peak():
     (failure,) = ask.calls
     assert failure.problem.startswith(
         "Hydrophone is not centered on the focus: |x| = ")
+    assert failure.continue_label == "Continue at found peak"
+    x, y = report.peak_xy_mm
+    assert failure.fallback == (
+        f"the peak it found (x = {x:.2f} mm, y = {y:.2f} mm)")
     x_row = report.rows[ROW["peak_x_mm"]]
     assert x_row.status == "FAIL" and abs(x_row.value - 2.5) < 0.5
-    assert x_row.note.endswith("; continued at (0, 0)")
-    assert tuple(tank.hydrophone_position[:2]) == (0.0, 0.0)
+    assert x_row.note.endswith("; continued at the found peak")
+    # The rest of the run is measured around the found peak.
+    assert abs(tank.hydrophone_position[0] - x) < 1e-9
+    assert abs(tank.hydrophone_position[1] - y) < 1e-9
     assert report.overall_pass is False
 
 

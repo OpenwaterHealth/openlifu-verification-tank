@@ -1465,7 +1465,7 @@ class Characterization:
         x, y = float(self.report.peak_xy_mm[0]), float(self.report.peak_xy_mm[1])
         x_pass = abs(x) <= max_axis
         y_pass = abs(y) <= max_axis
-        suffix = "; continued at (0, 0)" if fallback is not None else ""
+        suffix = "; continued at the found peak" if fallback is not None else ""
         if ROW["peak_x_mm"] in self.report.rows:
             self.report.grade_row(ROW["peak_x_mm"], passed=x_pass,
                                   threshold=threshold,
@@ -1799,21 +1799,31 @@ class Characterization:
                                      ask: SetupFailureHandler, *,
                                      measured: bool) -> None:
         """Ask whether to go on after a failed / off-center peak
-        search; if so, put the hydrophone at the nominal focus
-        (x = y = 0) and grade the peak position FAIL, else raise
-        :class:`OperatorStoppedRun`. ``measured``: the search returned
-        a peak (off center) rather than raising."""
+        search, and if so grade the peak position FAIL, else raise
+        :class:`OperatorStoppedRun`.
+
+        ``measured``: the search found a peak, just out of bounds. The
+        run then continues at that peak (``find_peak_xy`` already moved
+        the hydrophone there), so the beam scans show the real beam.
+        Otherwise it continues at the nominal focus (x = y = 0)."""
+        if measured:
+            x, y = (float(v) for v in self.report.peak_xy_mm)
+            fallback = f"the peak it found (x = {x:.2f} mm, y = {y:.2f} mm)"
+            label = "Continue at found peak"
+        else:
+            fallback = "the nominal focus (x = 0, y = 0)"
+            label = "Continue at center"
         self._ask_to_continue(SetupFailure(
             step="peak", title="Peak search failed", problem=problem,
-            fallback="the nominal focus (x = 0, y = 0)",
-            continue_label="Continue at center", graded="peak position"),
+            fallback=fallback, continue_label=label, graded="peak position"),
             ask)
         self._peak_fallback = (problem, measured)
-        self.ver.hydrophone_position[0] = 0.0
-        self.ver.hydrophone_position[1] = 0.0
+        if not measured:
+            self.ver.hydrophone_position[0] = 0.0
+            self.ver.hydrophone_position[1] = 0.0
         self._grade_peak_offset()
         self._grade_peak_xy()
-        self._apply_baseline_pulse()  # re-steer to the nominal focus
+        self._apply_baseline_pulse()  # re-steer to where the run continues
 
     def run(self, *,
             skip_2d: bool = False,
