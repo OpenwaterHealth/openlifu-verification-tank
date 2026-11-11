@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import io
 import logging
 import queue
 import re
@@ -55,7 +56,9 @@ import run_report
 from PySide6.QtCore import (
     Qt, QEvent, QObject, QSettings, QThread, QTimer, QUrl, Signal,
 )
-from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QIcon, QTextCursor
+from PySide6.QtGui import (
+    QDesktopServices, QFont, QFontMetrics, QIcon, QPixmap, QTextCursor,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -64,6 +67,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -83,9 +87,10 @@ from openlifu_verification import (
     VerificationTank,
 )
 from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
-from openlifu_verification.characterization import ReportRow
+from openlifu_verification.characterization import ReportRow, _parse_cal_date
 from openlifu_verification.device_info import read_console_hwid
 from openlifu_verification.hardware_status import probe_hardware
+from openlifu_verification.hydrophone import Hydrophone
 from openlifu_verification.paths import APP_ICON
 from openlifu_verification.report_io import NONSTANDARD_BANNER
 from openlifu_verification.setup_data import (
@@ -499,10 +504,11 @@ def build_gui_parser() -> argparse.ArgumentParser:
         help="Pre-fill tester, console and hydrophone from the last run.",
     )
     parser.add_argument(
-        "--add-items", action="store_true",
+        "--add-items", action=argparse.BooleanOptionalAction, default=None,
         help=("Offer to add a well-formed tester / console / hydrophone ID "
               "that is missing from the setup data, and allow changing the "
-              "setup data and reports folders."),
+              "setup data and reports folders. Default: \"add_items\" in "
+              "gui_settings.json in the setup data folder (off if unset)."),
     )
     parser.add_argument(
         "--no-validate", action="store_true",
@@ -892,6 +898,230 @@ class _AddItemDialog(QDialog):
         QApplication.restoreOverrideCursor()
         self.value_edit.setText(hwid)
 
+# ----------------------------------------------------------------------
+# Hydrophone calibration preview / replace
+# ----------------------------------------------------------------------
+#: Frequency range plotted in the calibration preview (Hz).
+_CAL_PLOT_RANGE_HZ = (100e3, 500e3)
+
+
+def _sensitivity_pixmap(curves: list[tuple[str, Hydrophone, str]], *,
+                        width_px: int = 520, height_px: int = 260,
+                        dpr: float = 1.0) -> QPixmap:
+    """Plot each ``(label, hydrophone, color)`` curve's V/Pa
+    sensitivity over :data:`_CAL_PLOT_RANGE_HZ` (Agg, so no Qt
+    matplotlib backend is needed), marking the nominal drive
+    frequencies."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    pal = current_palette()
+    dpi = 100.0 * dpr
+    fig = Figure(figsize=(width_px / 100.0, height_px / 100.0), dpi=dpi,
+                 facecolor=pal.panel_bg)
+    canvas = FigureCanvasAgg(fig)
+    ax = fig.add_subplot(1, 1, 1)
+    ax.set_facecolor(pal.panel_bg)
+    lo, hi = _CAL_PLOT_RANGE_HZ
+    for f_kHz in _ALLOWED_FREQUENCIES_KHZ:
+        ax.axvline(f_kHz, color=pal.muted, linestyle=":", linewidth=1)
+    for label, hyd, color in curves:
+        freq, sens = hyd.sensitivity_v_per_pa(lo, hi)
+        ax.plot(freq / 1e3, sens * 1e9, marker="o", markersize=3,
+                linewidth=1.5, color=color, label=label)
+    ax.set_xlim(lo / 1e3, hi / 1e3)
+    ax.set_xlabel("Frequency (kHz)", color=pal.text)
+    ax.set_ylabel("Sensitivity (nV/Pa)", color=pal.text)
+    ax.grid(True, color=pal.border, linewidth=0.6)
+    ax.tick_params(colors=pal.subtle_text)
+    for spine in ax.spines.values():
+        spine.set_color(pal.border)
+    if len(curves) > 1:
+        legend = ax.legend(loc="lower right", frameon=False)
+        for text in legend.get_texts():
+            text.set_color(pal.text)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    canvas.print_png(buf)
+    pixmap = QPixmap()
+    pixmap.loadFromData(buf.getvalue(), "PNG")
+    pixmap.setDevicePixelRatio(dpr)
+    return pixmap
+
+
+def _sensitivity_text(hyd: Hydrophone, freq_kHz: float) -> str:
+    try:
+        return f"{1e9 / hyd.get_sensitivity_pa_per_v(freq_kHz * 1e3):.1f} nV/Pa"
+    except (ValueError, ZeroDivisionError):
+        return "–"
+
+
+class _CalibrationDialog(QDialog):
+    """Preview of a registered hydrophone's calibration (metadata and
+    the V/Pa sensitivity over 100 - 500 kHz). With ``can_replace``
+    (``--add-items``), a new calibration file can be picked, previewed
+    against the current one and saved to the setup data."""
+
+    _ROWS = (
+        ("Serial number", lambda h: h.serial_number),
+        ("Model", lambda h: h.model_name),
+        ("Calibration date", lambda h: h.calibration_date),
+        ("File", lambda h: Path(h.calibration_file_path).name),
+        *((f"Sensitivity @ {f:g} kHz",
+           (lambda h, f=f: _sensitivity_text(h, f)))
+          for f in _ALLOWED_FREQUENCIES_KHZ),
+    )
+
+    def __init__(self, setup: SetupData, hydrophone_id: str, *,
+                 can_replace: bool = False,
+                 parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Hydrophone {hydrophone_id} calibration")
+        self._setup = setup
+        self._id = hydrophone_id
+        self.current = Hydrophone(setup.calibration_path(hydrophone_id))
+        self.new: Optional[Hydrophone] = None
+
+        self._grid = QGridLayout()
+        self._grid.setHorizontalSpacing(16)
+        self._grid.setVerticalSpacing(4)
+        self.plot_label = QLabel()
+        self.plot_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.warning_label = QLabel()
+        self.warning_label.setProperty("role", "alert")
+        self.warning_label.setWordWrap(True)
+        self.warning_label.hide()
+
+        buttons = QDialogButtonBox()
+        self.replace_button = QPushButton("Replace Calibration File…")
+        self.replace_button.setAutoDefault(False)
+        self.replace_button.clicked.connect(self._pick_replacement)
+        self.save_button = QPushButton("Save")
+        self.save_button.clicked.connect(self._save)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.reject)
+        buttons.addButton(self.replace_button,
+                          QDialogButtonBox.ButtonRole.ActionRole)
+        buttons.addButton(self.save_button,
+                          QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton(self.close_button,
+                          QDialogButtonBox.ButtonRole.RejectRole)
+        # (addButton shows each button, so hide them afterwards.)
+        self.replace_button.setVisible(can_replace)
+        self.save_button.setVisible(False)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(self._grid)
+        layout.addWidget(self.plot_label)
+        layout.addWidget(self.warning_label)
+        layout.addWidget(buttons)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        """Rebuild the metadata table and plot for the current (and
+        pending new) calibration."""
+        while self._grid.count():
+            widget = self._grid.takeAt(0).widget()
+            widget.hide()
+            widget.deleteLater()
+        columns = [("Current", self.current)]
+        if self.new is not None:
+            columns.append(("New", self.new))
+        if len(columns) > 1:
+            for c, (title, _h) in enumerate(columns, start=1):
+                head = QLabel(f"<b>{title}</b>")
+                self._grid.addWidget(head, 0, c)
+        self._grid.addWidget(QLabel("Hydrophone"), 1, 0)
+        self._grid.addWidget(QLabel(html.escape(self._id)), 1, 1)
+        for r, (name, get) in enumerate(self._ROWS, start=2):
+            label = QLabel(name)
+            label.setProperty("role", "subtle")
+            self._grid.addWidget(label, r, 0)
+            for c, (_title, hyd) in enumerate(columns, start=1):
+                value = QLabel(get(hyd) or "–")
+                value.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse)
+                self._grid.addWidget(value, r, c)
+        pal = current_palette()
+        curves = [("Current", self.current, pal.accent)]
+        if self.new is not None:
+            curves.append(("New", self.new, pal.warning))
+        self.plot_label.setPixmap(_sensitivity_pixmap(
+            curves, dpr=self.devicePixelRatioF()))
+
+    def _pick_replacement(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Calibration File", "",
+            "Calibration files (*.txt);;All files (*)",
+        )
+        if path:
+            self.load_replacement(Path(path))
+
+    def load_replacement(self, path: Path) -> bool:
+        """Preview ``path`` as the new calibration; ``False`` (with a
+        message) if it can't be parsed."""
+        try:
+            new = Hydrophone(path)
+            if new.sensitivity_interp is None:
+                raise ValueError("no FREQ_MHz / SENS_VPERPA calibration data")
+        except Exception as e:  # noqa: BLE001 - shown to the operator
+            QMessageBox.warning(self, "Replace calibration",
+                                f"Could not read {path.name}:\n{e}")
+            return False
+        self.new = new
+        warnings = self.replacement_warnings()
+        self.warning_label.setText("\n".join(warnings))
+        self.warning_label.setVisible(bool(warnings))
+        self.save_button.setVisible(True)
+        self.save_button.setDefault(True)
+        self.close_button.setText("Cancel")
+        self._refresh()
+        return True
+
+    def replacement_warnings(self) -> list[str]:
+        """Reasons the pending file may be the wrong one."""
+        if self.new is None:
+            return []
+        warnings = []
+        sn = self.new.serial_number
+        expected = re.sub(r"\D", "", self._id)
+        if sn and expected and sn.lstrip("0") != expected.lstrip("0"):
+            warnings.append(f"The new file is for hydrophone S/N {sn}, "
+                            f"not {expected}.")
+        old_date = _parse_cal_date(self.current.calibration_date)
+        new_date = _parse_cal_date(self.new.calibration_date)
+        if old_date and new_date and new_date <= old_date:
+            warnings.append(
+                f"The new calibration ({self.new.calibration_date}) is not "
+                f"newer than the current one ({self.current.calibration_date}).")
+        if (Path(self.new.calibration_file_path).name
+                == Path(self.current.calibration_file_path).name):
+            warnings.append("The new file has the same name as the current "
+                            "one.")
+        return warnings
+
+    def _save(self) -> None:
+        if self.new is None:
+            return
+        if self.replacement_warnings():
+            answer = QMessageBox.question(
+                self, "Replace calibration",
+                self.warning_label.text() + "\n\nSave it anyway?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.save_replacement()
+
+    def save_replacement(self) -> bool:
+        try:
+            self._setup.replace_hydrophone_calibration(
+                self._id, Path(self.new.calibration_file_path))
+        except Exception as e:  # noqa: BLE001 - shown to the operator
+            QMessageBox.warning(self, "Replace calibration",
+                                f"Could not save the new calibration:\n{e}")
+            return False
+        self.accept()
+        return True
+
 
 class LauncherDialog(QDialog):
     """Modal form that collects operator inputs and kicks off a run.
@@ -906,7 +1136,10 @@ class LauncherDialog(QDialog):
     well-formed unregistered ID offers to add it, and the folder "…"
     buttons are shown. With ``--no-validate``, any non-empty TXM S/N,
     tester and console are accepted and the frequency is picked by
-    hand; the hydrophone must still be registered. Start is enabled
+    hand; the hydrophone must still be registered. The accepted
+    hydrophone's calibration file name opens a preview of the
+    calibration (and, with ``--add-items``, lets it be replaced).
+    Start is enabled
     only when every field is accepted, a frequency is set and every
     hardware status LED is green.
 
@@ -1000,6 +1233,10 @@ class LauncherDialog(QDialog):
         self._hydrophone = self._add_id_row(
             info_form, "Hydrophone:", self.hydrophone_edit,
             HYDROPHONES.id_format, HYDROPHONES)
+        self._hydrophone.detail.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self._hydrophone.detail.linkActivated.connect(
+            lambda _href: self._show_calibration())
         self.setup_link = QLabel()
         if self._add_items:
             info_form.addRow("Setup data:", self._link_row(
@@ -1162,9 +1399,20 @@ class LauncherDialog(QDialog):
         for widget in (f.edit, f.detail):
             widget.setProperty("valid", state)
             _refresh_polish(widget)
-        f.detail.setText(QFontMetrics(f.detail.font()).elidedText(
-            text, Qt.TextElideMode.ElideRight, _DETAIL_WIDTH))
-        f.detail.setToolTip(text)
+        shown = QFontMetrics(f.detail.font()).elidedText(
+            text, Qt.TextElideMode.ElideRight, _DETAIL_WIDTH)
+        if f is self._hydrophone and valid:
+            # The calibration file name opens its preview.
+            f.detail.setTextFormat(Qt.TextFormat.RichText)
+            f.detail.setText(
+                f'<a href="calibration" style="color:{current_palette().accent};'
+                f' text-decoration:none;">{html.escape(shown)}</a>')
+            f.detail.setToolTip(f"{text}\nClick to view the calibration"
+                                + (" or replace it" if self._add_items else ""))
+        else:
+            f.detail.setTextFormat(Qt.TextFormat.PlainText)
+            f.detail.setText(shown)
+            f.detail.setToolTip(text)
         self._refresh_start_enabled()
 
     def _validate(self, f: _IdField) -> bool:
@@ -1282,6 +1530,21 @@ class LauncherDialog(QDialog):
                                 f"Could not add {key}:\n{e}")
             return False
         return self._validate(f)
+
+    def _show_calibration(self) -> None:
+        """Open the selected hydrophone's calibration preview; re-check
+        the field if a new calibration was saved."""
+        hydrophone_id = self.hydrophone_edit.text().strip()
+        try:
+            dialog = _CalibrationDialog(self._setup, hydrophone_id,
+                                        can_replace=self._add_items,
+                                        parent=self)
+        except Exception as e:  # noqa: BLE001 - shown to the operator
+            QMessageBox.warning(self, "Hydrophone calibration",
+                                f"Could not read the calibration:\n{e}")
+            return
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._validate(self._hydrophone)
 
     def accept(self) -> None:
         try:
@@ -2296,10 +2559,14 @@ def main(argv=None) -> int:
                              f"Could not initialize {setup_root}:\n{e}")
         return 2
     calibration_path_arg = args.calibration_path
+    add_items_arg = args.add_items  # None: use the setup data's default
 
     exit_code = 130
     prefill: dict[str, str] = {}  # tester / hydrophone from the last run
     while True:
+        # Per-station default, re-read in case the folder changed.
+        args.add_items = (add_items_arg if add_items_arg is not None
+                          else SetupData(setup_root).load_gui_settings().add_items)
         launcher = LauncherDialog(args, app_version=app_version,
                                   setup_root=setup_root,
                                   nonstandard_reasons=nonstandard,
