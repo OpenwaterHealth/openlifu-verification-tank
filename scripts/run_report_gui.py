@@ -3,7 +3,9 @@
 Presents a small dialog that collects the TXM S/N and frequency, the
 tester, console and hydrophone IDs (typed or scanned with a barcode
 reader; Enter validates a field and moves to the next), and the
-reports folder. Tester, console and hydrophone IDs must be registered
+reports folder. The console S/N is filled in from the connected
+console's user config when it is plugged in. Tester, console and
+hydrophone IDs must be registered
 in the setup data folder (see :mod:`openlifu_verification.setup_data`),
 which also holds the hydrophone calibrations. Status LEDs show whether
 the scope, transducer and console (or external HV supply) are plugged
@@ -84,7 +86,10 @@ from openlifu_verification import (
 )
 from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
 from openlifu_verification.characterization import ReportRow
-from openlifu_verification.device_info import read_console_hwid
+from openlifu_verification.device_info import (
+    read_console_hwid,
+    read_console_identity,
+)
 from openlifu_verification.hardware_status import probe_hardware
 from openlifu_verification.paths import APP_ICON
 from openlifu_verification.report_io import NONSTANDARD_BANNER
@@ -791,6 +796,23 @@ class _HardwarePoller(QThread):
             self._wake.clear()
 
 
+class _ConsoleDetector(QThread):
+    """Reads the connected console's serial number (user config
+    ``"sn"``) and hardware ID once, off the GUI thread. Emits
+    ``detected(sn, hwid, error)``; ``error`` is ``""`` on success."""
+
+    detected = Signal(str, str, str)
+
+    def run(self) -> None:
+        try:
+            sn, hwid = read_console_identity()
+        except Exception as e:  # noqa: BLE001 - shown to the operator
+            logger.warning("Could not detect the console S/N: %s", e)
+            self.detected.emit("", "", str(e))
+            return
+        self.detected.emit(sn, hwid, "")
+
+
 @dataclass(eq=False)
 class _IdField:
     """A scanned / typed ID field and its latest validation result."""
@@ -819,7 +841,7 @@ class _AddItemDialog(QDialog):
     (copied into the setup data)."""
 
     def __init__(self, registry: Registry, key: str,
-                 parent: Optional[QWidget] = None):
+                 parent: Optional[QWidget] = None, *, value: str = ""):
         super().__init__(parent)
         self.setWindowTitle(f"Add {registry.kind}")
         self.value_edit = QLineEdit()
@@ -861,6 +883,7 @@ class _AddItemDialog(QDialog):
         ok.setEnabled(False)
         self.value_edit.textChanged.connect(
             lambda text: ok.setEnabled(bool(text.strip())))
+        self.value_edit.setText(value)
 
         layout = QVBoxLayout(self)
         layout.addWidget(prompt)
@@ -908,7 +931,9 @@ class LauncherDialog(QDialog):
     tester and console are accepted and the frequency is picked by
     hand; the hydrophone must still be registered. Start is enabled
     only when every field is accepted, a frequency is set and every
-    hardware status LED is green.
+    hardware status LED is green. When the console is plugged in, its
+    S/N is read from its user config (or found by its hardware ID in
+    the setup data) and filled in, unless the operator typed one.
     """
 
     def __init__(self, args: argparse.Namespace,
@@ -1043,6 +1068,12 @@ class LauncherDialog(QDialog):
         self.hw_leds: dict[str, QLabel] = {}
         self._hw_blocker = ""  # why Start is blocked, "" if it isn't
         self._hw_poller: Optional[_HardwarePoller] = None
+        # Console S/N auto-detection (see _maybe_detect_console).
+        self._console_detector: Optional[_ConsoleDetector] = None
+        self._console_present = False
+        self._console_autofill = ""     # S/N last filled in by detection
+        self._detected_console_sn = ""
+        self._detected_console_hwid = ""
         if not getattr(args, "dry_run", False):
             ext_power = bool(getattr(args, "ext_power", False))
             for name in ("Scope", "Transducer",
@@ -1101,6 +1132,8 @@ class LauncherDialog(QDialog):
                 f.edit.setText(last.get(f.registry.kind, ""))
                 if f.edit.text():
                     self._validate(f)
+            # The connected console's S/N replaces the last one.
+            self._console_autofill = self.console_edit.text().strip()
         self._show_hardware_status({})  # LEDs "checking" until the first probe
         self.txm_edit.setFocus()
 
@@ -1262,7 +1295,10 @@ class LauncherDialog(QDialog):
     def _add_item(self, f: _IdField) -> bool:
         """Prompt for ``f``'s metadata and add it to the setup data."""
         key = f.edit.text().strip()
-        dialog = _AddItemDialog(f.registry, key, self)
+        value = (self._detected_console_hwid
+                 if f is self._console and key == self._detected_console_sn
+                 else "")
+        dialog = _AddItemDialog(f.registry, key, self, value=value)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return False
         try:
@@ -1298,6 +1334,9 @@ class LauncherDialog(QDialog):
         # Stop polling before the run opens the scope.
         if self._hw_poller is not None:
             self._hw_poller.stop()
+        # ... and let a console read finish before the run opens it.
+        if self._console_detector is not None:
+            self._console_detector.wait()
         super().done(result)
 
     def _show_hardware_status(self, status: Optional[dict]) -> None:
@@ -1329,6 +1368,69 @@ class LauncherDialog(QDialog):
         else:
             self._hw_blocker = ""
         self._refresh_start_enabled()
+        self._maybe_detect_console(
+            bool(status) and status.get("Console") is True)
+
+    # ------------------------------------------------------------------
+    # Console S/N auto-detection
+    # ------------------------------------------------------------------
+    def _maybe_detect_console(self, present: bool) -> None:
+        """Read the console's S/N each time it is plugged in (the
+        Console LED turns green), unless the operator typed one."""
+        was_present, self._console_present = self._console_present, present
+        if not present or was_present or "Console" not in self.hw_leds:
+            return
+        if not self._console_overwritable():
+            return
+        if (self._console_detector is not None
+                and self._console_detector.isRunning()):
+            return
+        self._console_detector = _ConsoleDetector(self)
+        self._console_detector.detected.connect(self._on_console_detected)
+        if not self.console_edit.text().strip():
+            self._show(self._console, None, "Reading console\u2026")
+        self._console_detector.start()
+
+    def _console_overwritable(self) -> bool:
+        """Whether the console field is empty or still holds the S/N
+        filled in by detection or ``--use-last-setup`` (i.e. the
+        operator didn't type one)."""
+        text = self.console_edit.text().strip()
+        return not text or text == self._console_autofill
+
+    def _on_console_detected(self, sn: str, hwid: str, error: str) -> None:
+        """Fill the console field from the detected S/N; if the user
+        config has none, use the S/N registered for its hardware ID."""
+        if not self._console_overwritable():
+            return
+        self._detected_console_hwid = hwid
+        if not sn and hwid:
+            sn = self._console_sn_for_hwid(hwid)
+        if not sn:
+            # Keep a pre-filled S/N; otherwise say why none was filled.
+            if self.console_edit.text().strip():
+                self._validate(self._console)
+            else:
+                self._show(self._console, None,
+                           "Could not read console" if error
+                           else "Console S/N not set; scan or type it")
+                if error:
+                    self._console.detail.setToolTip(error)
+            return
+        self._console_autofill = self._detected_console_sn = sn
+        self.console_edit.setText(sn)
+        if self._validate(self._console) and self.console_edit.hasFocus():
+            self._on_enter(self.console_edit)
+
+    def _console_sn_for_hwid(self, hwid: str) -> str:
+        """Console S/N registered with hardware ID ``hwid`` (``""`` if
+        none, or the setup data can't be read)."""
+        try:
+            consoles = self._setup.load(CONSOLES)
+        except (OSError, ValueError):
+            return ""
+        return next((sn for sn, meta in consoles.items()
+                     if meta.get(CONSOLES.field) == hwid), "")
 
     # ------------------------------------------------------------------
     # Folders
