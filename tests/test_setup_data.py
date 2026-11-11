@@ -169,3 +169,62 @@ def test_last_setup_round_trip(setup):
     ids = {"tester": "T1", "console": "WL134Q00007", "hydrophone": "HYDRO2246"}
     setup.save_last_setup(ids)
     assert setup.load_last_setup() == ids
+
+
+def test_replace_hydrophone_calibration(setup, tmp_path):
+    old = setup.calibration_path("HYDRO2246")
+    src = tmp_path / "HNR0500-2246_new_20261101.txt"
+    src.write_bytes(old.read_bytes())
+    setup.replace_hydrophone_calibration("HYDRO2246", src)
+    assert setup.calibration_path("HYDRO2246") == setup.calibrations_dir / src.name
+    assert (setup.calibrations_dir / src.name).read_bytes() == src.read_bytes()
+    assert old.is_file()  # earlier reports still name it
+
+
+def test_replace_calibration_requires_registered_hydrophone(setup, tmp_path):
+    src = next(paths.BUNDLED_CALIBRATIONS_DIR.glob("HNR0500-2246*.txt"))
+    with pytest.raises(KeyError, match="HYDRO9999"):
+        setup.replace_hydrophone_calibration("HYDRO9999", src)
+    assert setup.lookup(HYDROPHONES, "HYDRO9999") == (False, None)
+
+
+def test_gui_settings_template_defaults_off(setup):
+    assert setup.gui_settings_path.is_file()
+    assert setup.load_gui_settings() == setup_data.GuiSettings(add_items=False)
+
+
+def test_gui_settings_added_to_existing_folder(tmp_path):
+    """Folders set up before gui_settings.json existed get it on the
+    next initialize()."""
+    s = SetupData(tmp_path / "old")
+    s.initialize()
+    s.gui_settings_path.unlink()
+    assert not s.is_initialized()
+    assert s.initialize() == [s.gui_settings_path.relative_to(s.root)]
+
+
+def test_gui_settings_reads_add_items(setup):
+    setup.gui_settings_path.write_text('{"add_items": true}')
+    assert setup.load_gui_settings().add_items is True
+
+
+@pytest.mark.parametrize("text", [
+    None,                                   # file missing
+    "not json",
+    "[true]",
+    '{"add_items": "yes"}',
+    '{"add_items": 1}',
+])
+def test_gui_settings_bad_or_missing_default_off(setup, text, caplog):
+    if text is None:
+        setup.gui_settings_path.unlink()
+    else:
+        setup.gui_settings_path.write_text(text)
+    assert setup.load_gui_settings().add_items is False
+    assert bool(caplog.records) is (text is not None)
+
+
+def test_gui_settings_ignores_unknown_keys(setup, caplog):
+    setup.gui_settings_path.write_text('{"add_items": true, "theme": "Dark"}')
+    assert setup.load_gui_settings().add_items is True
+    assert "theme" in caplog.text
