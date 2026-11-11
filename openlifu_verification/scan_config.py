@@ -8,9 +8,7 @@ The built-in defaults (``ScanConfig()``) ARE the standard production
 configuration; nothing is read from disk unless an override file is
 passed explicitly (:meth:`ScanConfig.with_overrides`, used by
 ``run_report.py --scan-config``). Any run that uses overrides is
-marked non-standard in the report and cannot write to the device,
-except for the ``gui`` section (:class:`GuiOptions`): report GUI
-defaults that don't affect the measurement.
+marked non-standard in the report and cannot write to the device.
 """
 from __future__ import annotations
 
@@ -18,7 +16,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import Any, Optional
 
 from .acceptance import SUPPORTED_FREQUENCIES_KHZ, AcceptanceCriteria, _freq_key
 
@@ -114,22 +112,6 @@ class ScanPlan:
     voltage_sweep: VoltageSweep
 
 
-@dataclass
-class GuiOptions:
-    """Report GUI (``run_report_gui.py``) defaults.
-
-    Operator-interface settings only: they don't change the
-    measurement, so a scan config that sets nothing else is still a
-    standard run.
-    """
-    #: Default for ``--add-items`` (``--no-add-items`` overrides it).
-    add_items: bool = False
-
-
-#: Top-level sections that don't affect the measurement.
-NON_MEASUREMENT_SECTIONS = frozenset({"gui"})
-
-
 def _standard_plans() -> dict[str, ScanPlan]:
     """Standard per-frequency scan plans (one explicit entry each)."""
     return {
@@ -175,12 +157,6 @@ class ScanConfig:
     #: ~22 \u00b0C; tweak here if the tank is at a different temperature
     #: or the medium changes.
     sos_water_m_per_s: float = 1500.0
-    #: Report GUI defaults; not part of the measurement configuration.
-    gui: GuiOptions = field(default_factory=GuiOptions)
-
-    #: Top-level sections the override file set (see
-    #: :meth:`with_overrides`); not a dataclass field.
-    override_sections: ClassVar[frozenset[str]] = frozenset()
 
     # ------------------------------------------------------------------
     # Validation / overrides
@@ -220,26 +196,16 @@ class ScanConfig:
             _apply_overrides(cfg, data, "")
         except ValueError as e:
             raise ValueError(f"{path}: {e}") from e
-        cfg.override_sections = frozenset(data)
         return cfg
-
-    @property
-    def overrides_measurement(self) -> bool:
-        """Whether the override file (if any) set a measurement
-        setting, i.e. anything outside :data:`NON_MEASUREMENT_SECTIONS`
-        -- even to its standard value."""
-        return bool(self.override_sections - NON_MEASUREMENT_SECTIONS)
 
     def differences_from_standard(self) -> list[str]:
         """One ``"<key> = <value> (standard <value>)"`` line per
-        measurement setting that differs from ``ScanConfig()``
-        (:data:`NON_MEASUREMENT_SECTIONS` are left out)."""
+        setting that differs from ``ScanConfig()``."""
         mine = _flatten(asdict(self))
         std = _flatten(asdict(ScanConfig()))
         return [f"{k} = {mine.get(k)} (standard {std.get(k)})"
                 for k in sorted(set(mine) | set(std))
-                if mine.get(k) != std.get(k)
-                and k.split(".", 1)[0] not in NON_MEASUREMENT_SECTIONS]
+                if mine.get(k) != std.get(k)]
 
     def save(self, path: Path) -> Path:
         """Serialize to ``path`` as JSON."""
@@ -285,8 +251,7 @@ def _apply_overrides(obj: Any, data: Any, where: str) -> None:
     """Recursively apply the partial dict ``data`` onto ``obj`` in place.
 
     ``obj`` is a dataclass or the ``by_freq_kHz`` dict. Leaves must be
-    numbers (or lists of numbers) or booleans matching the type of the
-    default.
+    numbers (or lists of numbers) matching the type of the default.
     """
     if not isinstance(data, dict):
         raise ValueError(f"'{where}' must be a JSON object")
@@ -311,10 +276,6 @@ def _apply_overrides(obj: Any, data: Any, where: str) -> None:
             if not isinstance(v, list) or not v or not all(map(_is_number, v)):
                 raise ValueError(f"'{path}' must be a non-empty list of numbers")
             setattr(obj, k, [float(x) for x in v])
-        elif isinstance(cur, bool):
-            if not isinstance(v, bool):
-                raise ValueError(f"'{path}' must be true or false")
-            setattr(obj, k, v)
         elif isinstance(cur, int):
             if not _is_number(v) or v != int(v):
                 raise ValueError(f"'{path}' must be an integer")

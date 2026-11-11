@@ -78,3 +78,22 @@ def test_unresolvable_id_raises():
     """A garbage ID that doesn't match any file should error clearly."""
     with pytest.raises(Exception):
         Hydrophone("__definitely_not_a_real_hydrophone__")
+
+
+def test_calibration_metadata_properties(cal_file):
+    hyd = Hydrophone(cal_file)
+    assert hyd.serial_number == "2246"
+    assert hyd.model_name == "Onda HNR0500"
+    assert hyd.calibration_date == "19-Dec-2022"
+
+
+def test_sensitivity_v_per_pa_limits_range(cal_file):
+    hyd = Hydrophone(cal_file)
+    freq, sens = hyd.sensitivity_v_per_pa(100e3, 500e3)
+    assert len(freq) == len(sens) > 3
+    assert freq.min() >= 100e3 and freq.max() <= 500e3
+    # Same data the Pa/V interpolator is built from.
+    assert np.allclose(1.0 / sens, [hyd.get_sensitivity_pa_per_v(f)
+                                    for f in freq])
+    all_freq, _ = hyd.sensitivity_v_per_pa()
+    assert len(all_freq) == len(hyd.calibration_data)

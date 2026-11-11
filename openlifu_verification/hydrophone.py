@@ -176,6 +176,44 @@ class Hydrophone:
                     fill_value='extrapolate'
                 )
     
+    @property
+    def serial_number(self) -> str:
+        """``HYD_SN`` from the calibration header (``""`` if absent)."""
+        return str(self.metadata.get("HYD_SN", "")).strip()
+
+    @property
+    def model_name(self) -> str:
+        """Manufacturer and model, e.g. ``"Onda HNR0500"`` (``""`` if
+        the header doesn't say)."""
+        mfg = str(self.metadata.get("HYD_MFG", "")).strip()
+        model = str(self.metadata.get("HYD_MODEL", "")).strip()
+        aperture = str(self.metadata.get("HYD_APERTURE_NOM_UM", "")).strip()
+        return " ".join(p for p in (mfg, model + aperture) if p)
+
+    @property
+    def calibration_date(self) -> str:
+        """``Calibration_DATE`` verbatim (e.g. ``"19-Dec-2022"``)."""
+        return str(self.metadata.get("Calibration_DATE", "")).strip()
+
+    def sensitivity_v_per_pa(self, min_hz: float | None = None,
+                             max_hz: float | None = None
+                             ) -> Tuple[np.ndarray, np.ndarray]:
+        """Calibrated ``(frequency_hz, sensitivity_V_per_Pa)`` points,
+        optionally limited to ``[min_hz, max_hz]``. Empty arrays if the
+        file has no FREQ_MHz / SENS_VPERPA columns."""
+        data = self.calibration_data
+        if (data is None or "FREQ_MHz" not in data.columns
+                or "SENS_VPERPA" not in data.columns):
+            return np.array([]), np.array([])
+        freq = data["FREQ_MHz"].to_numpy(dtype=float) * 1e6
+        sens = data["SENS_VPERPA"].to_numpy(dtype=float)
+        keep = np.ones(freq.shape, dtype=bool)
+        if min_hz is not None:
+            keep &= freq >= min_hz
+        if max_hz is not None:
+            keep &= freq <= max_hz
+        return freq[keep], sens[keep]
+
     def get_sensitivity_pa_per_v(self, frequency_hz: float) -> float:
         """
         Get the sensitivity in Pa/V at a given frequency.

@@ -86,21 +86,3 @@ def test_nonstandard_run_is_marked_and_cannot_write(tmp_path):
     assert json.loads(snapshot.read_text(encoding="utf-8"))["scope"]["n_averages"] == 1
     assert ("Configuration", NONSTANDARD_BANNER) in rows
     assert ("Non-standard setting", "scope.n_averages = 1 (standard 3)") in rows
-
-
-def test_gui_only_scan_config_is_standard(tmp_path):
-    path = tmp_path / "gui.json"
-    path.write_text(json.dumps({"gui": {"add_items": True}}), encoding="utf-8")
-    args = _args(tmp_path, "--scan-config", str(path))
-    assert run_report.nonstandard_reasons(
-        args, ScanConfig.with_overrides(path)) == []
-
-
-def test_scan_config_with_measurement_keys_is_nonstandard(tmp_path):
-    path = tmp_path / "cfg.json"
-    path.write_text(json.dumps({"gui": {"add_items": True},
-                                "scope": {"n_averages": 3}}),
-                    encoding="utf-8")
-    args = _args(tmp_path, "--scan-config", str(path))
-    assert run_report.nonstandard_reasons(
-        args, ScanConfig.with_overrides(path)) == [f"--scan-config {path}"]
