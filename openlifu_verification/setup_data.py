@@ -12,6 +12,7 @@ Layout::
       transducers/openlifu_<n>x.json            transducer pinmaps
       hydrophone.json                           last hydrophone position + ID
       last_setup.json                           last tester / console / hydrophone
+      gui_settings.json                         report GUI defaults for this station
 
 Missing files are copied from the template shipped in the package
 (:data:`paths.BUNDLED_SETUP_DATA_DIR`); existing files are never
@@ -58,6 +59,14 @@ def txm_frequency_kHz(txm_sn: str) -> Optional[float]:
     if not TXM_SN.matches(txm_sn):
         return None
     return TXM_FREQUENCY_KHZ_BY_MODEL[txm_sn[3:5]]
+
+
+@dataclass(frozen=True)
+class GuiSettings:
+    """Report GUI defaults stored in the setup data folder
+    (``gui_settings.json``), so each station keeps its own."""
+    #: Default for ``--add-items`` (the command line overrides it).
+    add_items: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,6 +121,10 @@ class SetupData:
     def hydrophone_state_path(self) -> Path:
         """Hydrophone position file passed to ``VerificationTank``."""
         return self.root / "hydrophone.json"
+
+    @property
+    def gui_settings_path(self) -> Path:
+        return self.root / "gui_settings.json"
 
     @property
     def last_setup_path(self) -> Path:
@@ -200,6 +213,39 @@ class SetupData:
         if not found or not meta.get(HYDROPHONES.field):
             return None
         return self.calibrations_dir / meta[HYDROPHONES.field]
+
+    # ------------------------------------------------------------------
+    # GUI settings
+    # ------------------------------------------------------------------
+    def load_gui_settings(self) -> GuiSettings:
+        """Read ``gui_settings.json``. A missing file gives the
+        defaults; an unreadable file or a wrongly typed value is
+        logged and that value falls back to its default."""
+        path = self.gui_settings_path
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return GuiSettings()
+        except (OSError, ValueError) as e:
+            logger.warning("Could not read %s: %s", path, e)
+            return GuiSettings()
+        if not isinstance(data, dict):
+            logger.warning("%s must hold a JSON object", path)
+            return GuiSettings()
+        values = {}
+        for name, default in vars(GuiSettings()).items():
+            if name not in data:
+                continue
+            if isinstance(data[name], type(default)):
+                values[name] = data[name]
+            else:
+                logger.warning("%s: %r must be %s; using %r", path, name,
+                               type(default).__name__, default)
+        unknown = sorted(set(data) - set(vars(GuiSettings())))
+        if unknown:
+            logger.warning("%s: ignoring unknown setting(s) %s", path,
+                           ", ".join(unknown))
+        return GuiSettings(**values)
 
     # ------------------------------------------------------------------
     # Last setup (only applied with --use-last-setup)

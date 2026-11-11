@@ -403,3 +403,72 @@ def test_saved_calibration_updates_launcher(setup, tmp_path, monkeypatch):
     assert dlg._hydrophone.valid
     assert dlg._hydrophone.detail.toolTip().startswith(new.name)
     assert dlg.selected_hydrophone_calibration.name == new.name
+
+
+# ----------------------------------------------------------------------
+# --add-items default from the setup data's gui_settings.json
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize("setting, flags, expected", [
+    (None, [], False),                  # template default
+    (True, [], True),
+    (True, ["--no-add-items"], False),
+    (False, ["--add-items"], True),
+])
+def test_add_items_default_from_setup_data(setup, tmp_path, monkeypatch,
+                                           setting, flags, expected):
+    import json
+    if setting is not None:
+        setup.gui_settings_path.write_text(json.dumps({"add_items": setting}))
+    seen = []
+
+    class _FakeLauncher:
+        def __init__(self, args, **_kw):
+            seen.append(args.add_items)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(gui, "LauncherDialog", _FakeLauncher)
+    monkeypatch.setattr(gui, "apply_theme", lambda *a: None)
+    gui.main(["--reports-root", str(tmp_path / "reports"),
+              "--setup-data", str(setup.root), *flags])
+    assert seen == [expected]
+
+
+def test_add_items_follows_setup_folder_change(setup, tmp_path, monkeypatch):
+    """Switching setup data folders in the launcher applies the new
+    folder's default to the next launcher."""
+    other = SetupData(tmp_path / "other")
+    other.initialize()
+    other.gui_settings_path.write_text('{"add_items": true}')
+    seen = []
+
+    class _FakeLauncher:
+        def __init__(self, args, **_kw):
+            seen.append(args.add_items)
+
+        def exec(self):
+            return (QDialog.DialogCode.Accepted if len(seen) == 1
+                    else QDialog.DialogCode.Rejected)
+
+        collected_prefs = None
+        selected_frequency_kHz = 400.0
+        selected_reports_root = tmp_path / "reports"
+        selected_setup_root = other.root
+        selected_hydrophone_calibration = tmp_path / "cal.txt"
+        selected_console_hwid = None
+
+    class _Settings:
+        def value(self, *_a, **_k):
+            return ""
+
+        def setValue(self, *_a):
+            pass
+
+    monkeypatch.setattr(gui, "LauncherDialog", _FakeLauncher)
+    monkeypatch.setattr(gui, "_run_once", lambda *a: ("another", 0))
+    monkeypatch.setattr(gui, "apply_theme", lambda *a: None)
+    monkeypatch.setattr(gui, "QSettings", lambda *a: _Settings())
+    gui.main(["--reports-root", str(tmp_path / "reports"),
+              "--setup-data", str(setup.root)])
+    assert seen == [False, True]

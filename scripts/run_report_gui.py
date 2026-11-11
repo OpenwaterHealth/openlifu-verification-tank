@@ -504,10 +504,11 @@ def build_gui_parser() -> argparse.ArgumentParser:
         help="Pre-fill tester, console and hydrophone from the last run.",
     )
     parser.add_argument(
-        "--add-items", action="store_true",
+        "--add-items", action=argparse.BooleanOptionalAction, default=None,
         help=("Offer to add a well-formed tester / console / hydrophone ID "
               "that is missing from the setup data, and allow changing the "
-              "setup data and reports folders."),
+              "setup data and reports folders. Default: \"add_items\" in "
+              "gui_settings.json in the setup data folder (off if unset)."),
     )
     parser.add_argument(
         "--no-validate", action="store_true",
@@ -2544,9 +2545,13 @@ def main(argv=None) -> int:
                              f"Could not initialize {setup_root}:\n{e}")
         return 2
     calibration_path_arg = args.calibration_path
+    add_items_arg = args.add_items  # None: use the setup data's default
 
     exit_code = 130
     while True:
+        # Per-station default, re-read in case the folder changed.
+        args.add_items = (add_items_arg if add_items_arg is not None
+                          else SetupData(setup_root).load_gui_settings().add_items)
         launcher = LauncherDialog(args, app_version=app_version,
                                   setup_root=setup_root,
                                   nonstandard_reasons=nonstandard)
