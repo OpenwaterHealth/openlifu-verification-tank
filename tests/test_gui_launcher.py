@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton  # noqa
 
 from openlifu_verification.setup_data import (  # noqa: E402
     CONSOLES,
+    HYDROPHONES,
     TESTERS,
     SetupData,
 )
@@ -46,6 +47,9 @@ def _launcher(setup: SetupData, tmp_path, *flags: str,
                              setup_root=setup.root)
     if hardware_ok:
         dlg._show_hardware_status(dict.fromkeys(dlg.hw_leds, True))
+        if dlg._console_detector is not None:
+            dlg._console_detector.wait()  # finish the console read
+            QApplication.processEvents()
     return dlg
 
 
@@ -172,7 +176,7 @@ def test_add_items_registers_missing_tester(setup, tmp_path, monkeypatch):
     class _FakeAdd:
         value = "New Tester"
 
-        def __init__(self, registry, key, parent):
+        def __init__(self, registry, key, parent, **_kw):
             assert (registry, key) == (TESTERS, "T2")
 
         def exec(self):
@@ -282,13 +286,268 @@ def test_start_blocked_until_hardware_detected(setup, tmp_path):
     assert dlg.start_button.isEnabled()
 
 
-def test_no_hardware_leds_in_dry_run(setup, tmp_path, monkeypatch):
-    monkeypatch.setattr(gui, "probe_hardware", pytest.fail)
-    dlg = _launcher(setup, tmp_path, "--dry-run")
+# ----------------------------------------------------------------------
+# Console S/N auto-detection
+# ----------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _no_console(monkeypatch):
+    """No test talks to a real console; tests that need one patch
+    ``read_console_identity`` themselves."""
+    def _read():
+        raise RuntimeError("Console is not connected.")
+    monkeypatch.setattr(gui, "read_console_identity", _read)
+
+
+def _console_reads(monkeypatch, sn: str, hwid: str = "4ZGd1kX") -> list:
+    calls = []
+
+    def _read():
+        calls.append(1)
+        return sn, hwid
+    monkeypatch.setattr(gui, "read_console_identity", _read)
+    return calls
+
+
+def _plug_console(dlg: gui.LauncherDialog, present: bool = True) -> None:
+    dlg._show_hardware_status(
+        {"Scope": True, "Transducer": True, "Console": present})
+    if dlg._console_detector is not None:
+        dlg._console_detector.wait()
+    QApplication.processEvents()
+
+
+def test_console_sn_read_from_user_config(setup, tmp_path, monkeypatch):
+    _console_reads(monkeypatch, "WL134Q00007")
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    _plug_console(dlg)
+    assert dlg.console_edit.text() == "WL134Q00007"
+    assert dlg._console.valid
+    assert dlg._console.detail.toolTip() == "4ZGd1kX"
+
+
+def test_console_sn_found_by_hwid_when_config_has_none(setup, tmp_path,
+                                                      monkeypatch):
+    _console_reads(monkeypatch, "", hwid="4ZGd1kX")
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    _plug_console(dlg)
+    assert dlg.console_edit.text() == "WL134Q00007"
+    assert dlg._console.valid
+
+
+def test_console_sn_unknown_leaves_field_for_operator(setup, tmp_path,
+                                                     monkeypatch):
+    _console_reads(monkeypatch, "", hwid="unregistered")
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    _plug_console(dlg)
+    assert dlg.console_edit.text() == ""
+    assert not dlg._console.valid
+    assert "not set" in dlg._console.detail.toolTip()
+
+
+def test_console_read_error_is_shown(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    _plug_console(dlg)
+    assert dlg.console_edit.text() == ""
+    assert dlg._console.detail.text() == "Could not read console"
+    assert dlg._console.detail.toolTip() == "Console is not connected."
+
+
+def test_typed_console_sn_is_not_overwritten(setup, tmp_path, monkeypatch):
+    calls = _console_reads(monkeypatch, "WL134Q00099")
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    dlg.console_edit.setText("WL134Q00007")
+    _plug_console(dlg)
+    assert calls == []
+    assert dlg.console_edit.text() == "WL134Q00007"
+
+
+def test_console_detected_replaces_last_setup(setup, tmp_path, monkeypatch):
+    setup.add(CONSOLES, "WL134Q00008", "other")
+    setup.save_last_setup({"console": "WL134Q00008"})
+    _console_reads(monkeypatch, "WL134Q00007")
+    dlg = _launcher(setup, tmp_path, "--use-last-setup", hardware_ok=False)
+    assert dlg.console_edit.text() == "WL134Q00008"
+    _plug_console(dlg)
+    assert dlg.console_edit.text() == "WL134Q00007"
+
+
+def test_console_read_once_per_connection(setup, tmp_path, monkeypatch):
+    calls = _console_reads(monkeypatch, "WL134Q00007")
+    dlg = _launcher(setup, tmp_path, hardware_ok=False)
+    _plug_console(dlg)
+    _plug_console(dlg)
+    assert len(calls) == 1
+    _plug_console(dlg, present=False)
+    _plug_console(dlg)
+    assert len(calls) == 2
+
+
+def test_no_console_read_with_external_supply(setup, tmp_path, monkeypatch):
+    calls = _console_reads(monkeypatch, "WL134Q00007")
+    dlg = _launcher(setup, tmp_path, "--ext-power", hardware_ok=False)
+    _plug_console(dlg)
+    assert calls == []
+
+
+def test_add_items_prefills_detected_console_hwid(setup, tmp_path,
+                                                  monkeypatch):
+    _console_reads(monkeypatch, "WL134Q00042", hwid="NewHwid")
+    seen = {}
+
+    class _FakeAdd:
+        def __init__(self, registry, key, parent=None, *, value="", **_):
+            seen.update(key=key, value=value)
+            self.value = value
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(gui, "_AddItemDialog", _FakeAdd)
+    dlg = _launcher(setup, tmp_path, "--add-items", hardware_ok=False)
+    _plug_console(dlg)
+    assert dlg._console.missing
+    _scan(dlg, dlg.console_edit, "WL134Q00042")
+    assert seen == {"key": "WL134Q00042", "value": "NewHwid"}
+    assert setup.lookup(CONSOLES, "WL134Q00042") == (True, {"HWID": "NewHwid"})
+    assert dlg._console.valid
+
+
+# ----------------------------------------------------------------------
+# --dry-run: simulated hardware
+# ----------------------------------------------------------------------
+@pytest.fixture
+def real_hardware_calls(monkeypatch) -> list:
+    """Records any attempt to reach real hardware: the hardware probe
+    (PicoSDK enumeration, serial ports) or a real ``LIFUInterface``.
+    Console reads go through the real :func:`read_console_identity`,
+    as the launcher makes them."""
+    import openlifu_sdk.io
+    import serial.tools.list_ports
+
+    from openlifu_verification import device_info, hardware_status
+
+    calls = []
+
+    def _recorder(name):
+        def _call(*_a, **_k):
+            calls.append(name)
+            raise RuntimeError(f"{name} called in a dry run")
+        return _call
+
+    monkeypatch.setattr(gui, "probe_hardware", _recorder("probe_hardware"))
+    monkeypatch.setattr(hardware_status, "picoscope_present",
+                        _recorder("picoscope_present"))
+    monkeypatch.setattr(serial.tools.list_ports, "comports",
+                        _recorder("comports"))
+    monkeypatch.setattr(openlifu_sdk.io, "LIFUInterface",
+                        _recorder("LIFUInterface"))
+    monkeypatch.setattr(gui, "read_console_identity",
+                        device_info.read_console_identity)
+    return calls
+
+
+def _sim_console_hwid() -> str:
+    from openlifu_verification.simulated_hardware import (
+        simulated_console_identity)
+    return simulated_console_identity()[1]
+
+
+def _click(widget) -> None:
+    QTest.mouseClick(widget, Qt.MouseButton.LeftButton)
+
+
+@pytest.mark.parametrize("flags, hv", [((), "Console"),
+                                       (("--ext-power",), "HV supply")])
+def test_dry_run_shows_simulated_lights(setup, tmp_path, real_hardware_calls,
+                                        flags, hv):
+    dlg = _launcher(setup, tmp_path, "--dry-run", *flags, hardware_ok=False)
+    assert list(dlg.hw_leds) == ["Scope", "Transducer", hv]
+    assert set(_states(dlg).values()) == {"checking"}
     dlg.show()
-    assert dlg.hw_leds == {}
-    assert dlg._hw_poller is None
+    assert _wait_until(lambda: set(_states(dlg).values()) == {"ok"})
+    assert dlg.hw_leds["Scope"].toolTip().startswith("Scope: simulated")
     dlg.reject()
+    assert not dlg._hw_poller.isRunning()
+    assert real_hardware_calls == []
+
+
+def test_dry_run_detects_simulated_console(setup, tmp_path,
+                                           real_hardware_calls):
+    from openlifu_verification.simulated_hardware import SIMULATED_CONSOLE_SN
+
+    dlg = _launcher(setup, tmp_path, "--dry-run", hardware_ok=False)
+    dlg.show()
+    assert _wait_until(
+        lambda: dlg.console_edit.text() == SIMULATED_CONSOLE_SN)
+    assert dlg._console.missing  # not registered: Enter offers to add it
+    assert dlg._detected_console_hwid == _sim_console_hwid()
+    dlg.reject()
+
+    setup.add(CONSOLES, SIMULATED_CONSOLE_SN, _sim_console_hwid())
+    dlg = _launcher(setup, tmp_path, "--dry-run")
+    assert dlg.console_edit.text() == SIMULATED_CONSOLE_SN
+    assert dlg._console.valid
+    assert dlg._console.detail.toolTip() == _sim_console_hwid()
+    assert real_hardware_calls == []
+
+
+def test_dry_run_add_console_reads_simulated_hwid(setup, tmp_path,
+                                                  real_hardware_calls):
+    dlg = _launcher(setup, tmp_path, "--dry-run", "--add-items")
+    add = gui._AddItemDialog(CONSOLES, "WL134Q00001", dlg,
+                             read_console_hwid=dlg._read_console_hwid)
+    add._read_console_hwid()  # the "Read from console" button
+    assert add.value == _sim_console_hwid()
+    assert real_hardware_calls == []
+
+
+def test_dry_run_unplugging_blocks_start(setup, tmp_path,
+                                         real_hardware_calls):
+    from openlifu_verification.simulated_hardware import (
+        SIMULATED_CONSOLE_SN, SimulatedHardware)
+
+    setup.add(CONSOLES, SIMULATED_CONSOLE_SN, _sim_console_hwid())
+    sim = SimulatedHardware()
+    args = gui.build_gui_parser().parse_args(
+        ["--reports-root", str(tmp_path / "reports"), "--dry-run"])
+    dlg = gui.LauncherDialog(args, app_version="9.9", setup_root=setup.root,
+                             simulated_hardware=sim)
+    reads = []
+    real_read = dlg._read_console_identity
+    dlg._read_console_identity = lambda: reads.append(1) or real_read()
+    dlg.show()
+    assert _wait_until(lambda: dlg._console.valid)
+    _scan(dlg, dlg.txm_edit, "WLM44Q00012")
+    _scan(dlg, dlg.tester_edit, "T1")
+    _scan(dlg, dlg.hydrophone_edit, "HYDRO2246")
+    assert dlg.start_button.isEnabled()
+    assert reads == [1]
+
+    _click(dlg.hw_leds["Transducer"])
+    assert _wait_until(lambda: _states(dlg)["Transducer"] == "missing")
+    assert not sim.is_present("Transducer")
+    assert not dlg.start_button.isEnabled()
+    assert dlg.start_button.toolTip().startswith("Not detected: Transducer.")
+    _click(dlg.hw_leds["Transducer"])
+    assert _wait_until(lambda: dlg.start_button.isEnabled())
+
+    # Unplugging and replugging the console reads it again.
+    _click(dlg.hw_leds["Console"])
+    assert _wait_until(lambda: _states(dlg)["Console"] == "missing")
+    assert not dlg.start_button.isEnabled()
+    _click(dlg.hw_leds["Console"])
+    assert _wait_until(lambda: len(reads) == 2)
+    assert _wait_until(lambda: dlg.start_button.isEnabled())
+    assert dlg.console_edit.text() == SIMULATED_CONSOLE_SN
+    dlg.reject()
+    assert real_hardware_calls == []
+
+
+def test_dry_run_console_matches_dry_run_device_info():
+    from openlifu_verification.device_info import DeviceInfo
+    from openlifu_verification.dry_run import DryRunTank
+    info = DeviceInfo.collect(DryRunTank(rng_seed=0))
+    assert info.console_hwid == _sim_console_hwid()
 
 
 # ----------------------------------------------------------------------
@@ -403,3 +662,217 @@ def test_saved_calibration_updates_launcher(setup, tmp_path, monkeypatch):
     assert dlg._hydrophone.valid
     assert dlg._hydrophone.detail.toolTip().startswith(new.name)
     assert dlg.selected_hydrophone_calibration.name == new.name
+
+
+# ----------------------------------------------------------------------
+# --add-items default from the setup data's gui_settings.json
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize("setting, flags, expected", [
+    (None, [], False),                  # template default
+    (True, [], True),
+    (True, ["--no-add-items"], False),
+    (False, ["--add-items"], True),
+])
+def test_add_items_default_from_setup_data(setup, tmp_path, monkeypatch,
+                                           setting, flags, expected):
+    import json
+    if setting is not None:
+        setup.gui_settings_path.write_text(json.dumps({"add_items": setting}))
+    seen = []
+
+    class _FakeLauncher:
+        def __init__(self, args, **_kw):
+            seen.append(args.add_items)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(gui, "LauncherDialog", _FakeLauncher)
+    monkeypatch.setattr(gui, "apply_theme", lambda *a: None)
+    gui.main(["--reports-root", str(tmp_path / "reports"),
+              "--setup-data", str(setup.root), *flags])
+    assert seen == [expected]
+
+
+def test_add_items_follows_setup_folder_change(setup, tmp_path, monkeypatch):
+    """Switching setup data folders in the launcher applies the new
+    folder's default to the next launcher."""
+    other = SetupData(tmp_path / "other")
+    other.initialize()
+    other.gui_settings_path.write_text('{"add_items": true}')
+    seen = []
+
+    class _FakeLauncher:
+        def __init__(self, args, **_kw):
+            seen.append(args.add_items)
+
+        def exec(self):
+            return (QDialog.DialogCode.Accepted if len(seen) == 1
+                    else QDialog.DialogCode.Rejected)
+
+        collected_prefs = None
+        carried_ids: dict = {}
+        selected_frequency_kHz = 400.0
+        selected_reports_root = tmp_path / "reports"
+        selected_setup_root = other.root
+        selected_hydrophone_calibration = tmp_path / "cal.txt"
+        selected_console_hwid = None
+
+    class _Settings:
+        def value(self, *_a, **_k):
+            return ""
+
+        def setValue(self, *_a):
+            pass
+
+    monkeypatch.setattr(gui, "LauncherDialog", _FakeLauncher)
+    monkeypatch.setattr(gui, "_run_once", lambda *a: ("another", 0))
+    monkeypatch.setattr(gui, "apply_theme", lambda *a: None)
+    monkeypatch.setattr(gui, "QSettings", lambda *a: _Settings())
+    gui.main(["--reports-root", str(tmp_path / "reports"),
+              "--setup-data", str(setup.root)])
+    assert seen == [False, True]
+
+
+# ----------------------------------------------------------------------
+# "Scan Another" keeps the tester and hydrophone
+# ----------------------------------------------------------------------
+def test_prefill_fills_and_validates(setup, tmp_path):
+    args = gui.build_gui_parser().parse_args(
+        ["--reports-root", str(tmp_path / "reports")])
+    dlg = gui.LauncherDialog(args, app_version="9.9", setup_root=setup.root,
+                             prefill={"tester": "T1",
+                                      "hydrophone": "HYDRO2246"})
+    assert dlg.tester_edit.text() == "T1"
+    assert dlg.hydrophone_edit.text() == "HYDRO2246"
+    assert dlg._tester.valid and dlg._hydrophone.valid
+    assert dlg.console_edit.text() == ""
+    assert dlg.txm_edit.text() == ""
+    assert dlg.carried_ids == {"tester": "T1", "hydrophone": "HYDRO2246"}
+
+
+def test_prefill_overrides_last_setup(setup, tmp_path):
+    setup.add(TESTERS, "T2", "John Roe")
+    setup.save_last_setup({"tester": "T1", "console": "WL134Q00007",
+                           "hydrophone": "HYDRO2246"})
+    args = gui.build_gui_parser().parse_args(
+        ["--reports-root", str(tmp_path / "reports"), "--use-last-setup"])
+    dlg = gui.LauncherDialog(args, app_version="9.9", setup_root=setup.root,
+                             prefill={"tester": "T2",
+                                      "hydrophone": "HYDRO2538"})
+    assert dlg.tester_edit.text() == "T2"
+    assert dlg.console_edit.text() == "WL134Q00007"
+    assert dlg.hydrophone_edit.text() == "HYDRO2538"
+
+
+def test_scan_another_prefills_previous_tester_and_hydrophone(
+        setup, tmp_path, monkeypatch):
+    prefills = []
+
+    class _FakeLauncher:
+        def __init__(self, args, *, prefill, **_kw):
+            prefills.append(dict(prefill))
+            self._first = len(prefills) == 1
+
+        def exec(self):
+            return (QDialog.DialogCode.Accepted if self._first
+                    else QDialog.DialogCode.Rejected)
+
+        collected_prefs = None
+        carried_ids = {"tester": "T1", "hydrophone": "HYDRO2246"}
+        selected_frequency_kHz = 400.0
+        selected_reports_root = tmp_path / "reports"
+        selected_setup_root = setup.root
+        selected_hydrophone_calibration = tmp_path / "cal.txt"
+        selected_console_hwid = "4ZGd1kX"
+
+    monkeypatch.setattr(gui, "LauncherDialog", _FakeLauncher)
+    monkeypatch.setattr(gui, "_run_once", lambda *a: ("another", 0))
+    monkeypatch.setattr(gui, "apply_theme", lambda *a: None)
+    monkeypatch.setattr(gui, "QSettings", lambda *a: _FakeSettings())
+    gui.main(["--reports-root", str(tmp_path / "reports"),
+              "--setup-data", str(setup.root)])
+    assert prefills == [{}, {"tester": "T1", "hydrophone": "HYDRO2246"}]
+
+
+class _FakeSettings:
+    def value(self, *_a, **_k):
+        return ""
+
+    def setValue(self, *_a):
+        pass
+
+
+# ----------------------------------------------------------------------
+# Registered-ID dropdowns (tester, hydrophone)
+# ----------------------------------------------------------------------
+def _menu_entries(menu) -> list[tuple[str, bool, bool]]:
+    return [(a.text(), a.isEnabled(), a.isChecked()) for a in menu.actions()]
+
+
+def test_dropdowns_only_on_tester_and_hydrophone(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path)
+    assert len(dlg.tester_edit.actions()) == 1
+    assert len(dlg.hydrophone_edit.actions()) == 1
+    assert dlg.console_edit.actions() == []
+    assert dlg.txm_edit.actions() == []
+    assert not dlg.tester_edit.isReadOnly()
+
+
+def test_tester_menu_lists_registered_testers(setup, tmp_path):
+    setup.add(TESTERS, "A0", "Al Bee")
+    dlg = _launcher(setup, tmp_path)
+    dlg.tester_edit.setText("T1")
+    assert _menu_entries(dlg._registry_menu(dlg._tester)) == [
+        ("A0\tAl Bee", True, False), ("T1\tJane Doe", True, True)]
+
+
+def test_hydrophone_menu_lists_calibrations(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path)
+    entries = _menu_entries(dlg._registry_menu(dlg._hydrophone))
+    keys = [text.split("\t")[0] for text, _e, _c in entries]
+    assert keys == sorted(setup.load(HYDROPHONES))
+    assert entries[0][0] == ("HYDRO2246\t"
+                             + setup.load(HYDROPHONES)["HYDRO2246"]["Calibration"])
+
+
+def test_empty_registry_menu_is_disabled(tmp_path):
+    empty = SetupData(tmp_path / "empty")
+    empty.initialize()
+    dlg = _launcher(empty, tmp_path)
+    assert _menu_entries(dlg._registry_menu(dlg._tester)) == [
+        ("No testers registered", False, False)]
+
+
+def test_picking_from_menu_validates_and_advances(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path)
+    _scan(dlg, dlg.txm_edit, "WLM44Q00012")
+    menu = dlg._registry_menu(dlg._tester)
+    next(a for a in menu.actions() if a.text().startswith("T1")).trigger()
+    assert dlg.tester_edit.text() == "T1"
+    assert dlg._tester.valid
+    assert dlg.focusWidget() is dlg.console_edit
+
+    _scan(dlg, dlg.console_edit, "WL134Q00007")
+    menu = dlg._registry_menu(dlg._hydrophone)
+    next(a for a in menu.actions()
+         if a.text().startswith("HYDRO2246")).trigger()
+    assert dlg._hydrophone.valid
+    assert dlg.start_button.isEnabled()
+
+
+def test_menu_shows_items_added_later(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path)
+    setup.add(TESTERS, "T9", "New Person")
+    texts = [t for t, _e, _c in _menu_entries(dlg._registry_menu(dlg._tester))]
+    assert "T9\tNew Person" in texts
+
+
+def test_dropdown_arrow_pops_up_menu(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path)
+    dlg.show()
+    dlg.tester_edit.actions()[0].trigger()
+    menu = dlg._menus[dlg.tester_edit]
+    assert menu.isVisible()
+    menu.close()
+    dlg.reject()

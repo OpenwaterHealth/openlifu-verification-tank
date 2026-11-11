@@ -86,13 +86,13 @@ def test_console_hwid_match_runs():
 
 def test_console_registered_with_legacy_hwid_runs_with_warning(caplog):
     # Consoles registered from older reports carry base58 of the first
-    # 6 UID bytes ("2naX97Jp7" for the dry-run console) instead of the
-    # full form ("4vfAkNk3axRSP1x4R").
+    # 6 UID bytes ("2ezGGCzTN" for the dry-run console) instead of the
+    # full form ("4dyWcpSyLJHurUomU").
     chz = _chz(DryRunTank(rng_seed=0))
-    chz.expected_console_hwid = "2naX97Jp7"
+    chz.expected_console_hwid = "2ezGGCzTN"
     chz.run(skip_2d=True, skip_frequency=True, skip_voltage=True)
-    assert "legacy 6-byte hardware ID 2naX97Jp7" in caplog.text
-    assert "full ID 4vfAkNk3axRSP1x4R" in caplog.text
+    assert "legacy 6-byte hardware ID 2ezGGCzTN" in caplog.text
+    assert "full ID 4dyWcpSyLJHurUomU" in caplog.text
 
 
 # ----------------------------------------------------------------------

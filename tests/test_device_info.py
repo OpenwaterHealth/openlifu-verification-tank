@@ -9,7 +9,12 @@ from openlifu_sdk.io.LIFUHVController import HVController
 from openlifu_sdk.io.LIFUTXDevice import TxDevice
 from openlifu_sdk.util.hwid import encode_hwid
 
-from openlifu_verification.device_info import DeviceInfo, _read_hwid
+from openlifu_verification.device_info import (
+    DeviceInfo,
+    _read_config_sn,
+    _read_hwid,
+    read_console_identity,
+)
 from openlifu_verification.dry_run import DryRunTank
 
 UID = bytes(range(12))
@@ -55,9 +60,55 @@ def test_read_hwid_unreadable_device_gives_empty_strings():
     assert _read_hwid(_Broken(), 0, "TXM") == ("", "")
 
 
-def test_dry_run_device_info_carries_full_form():
+def test_dry_run_device_info_comes_from_the_sdk_simulation():
     info = DeviceInfo.collect(DryRunTank(rng_seed=0))
+    # The SDK simulation's MCU UIDs; FW versions the acceptance gate takes.
     assert (info.txm_hwid_hex, info.txm_hwid) == (
-        "d00000000000000000000001", "4vfAkNk3axRSP1x4Q")
+        "a0a1a2a3a4a5a6a7b0b1b2b3", "42p8mJivqN6tpZqe2")
     assert (info.console_hwid_hex, info.console_hwid) == (
-        "d00000000000000000000002", "4vfAkNk3axRSP1x4R")
+        "c0c1c2c3c4c5c6c7d0d1d2d3", "4dyWcpSyLJHurUomU")
+    assert (info.txm_fw_version, info.console_fw_version) == ("2.0.8", "1.2.7")
+
+
+def test_simulated_lifu_firmware_versions():
+    from openlifu_verification.simulated_hardware import SimulatedLifu
+    with SimulatedLifu(txm_fw_version="2.0.8",
+                       console_fw_version="1.2.7") as lifu:
+        assert lifu.txdevice.get_version() == "2.0.8"
+        assert lifu.hvcontroller.get_version() == "1.2.7"
+    with SimulatedLifu(fw_version="3.0.0", console_fw_version="") as lifu:
+        assert lifu.txdevice.get_version() == "3.0.0"
+        assert lifu.hvcontroller.get_version() == ""
+
+
+def test_read_console_identity_from_simulated_console():
+    from openlifu_verification.simulated_hardware import (
+        SIMULATED_CONSOLE_SN,
+        SimulatedLifu,
+    )
+    assert read_console_identity(SimulatedLifu) == (
+        SIMULATED_CONSOLE_SN, "4dyWcpSyLJHurUomU")
+    with pytest.raises(RuntimeError, match="not connected"):
+        read_console_identity(
+            lambda: SimulatedLifu(console_connected=False))
+
+
+class _ConfigDevice:
+    def __init__(self, config):
+        self._config = config
+
+    def read_config(self):
+        if isinstance(self._config, Exception):
+            raise self._config
+        from openlifu_sdk.io.LIFUUserConfig import LifuUserConfig
+        return LifuUserConfig(json_data=self._config)
+
+
+@pytest.mark.parametrize("config, sn", [
+    ({"sn": " WL134Q00007 "}, "WL134Q00007"),
+    ({"hwid": "abc"}, ""),
+    ({"sn": 7}, ""),
+    (RuntimeError("timeout"), ""),
+])
+def test_read_config_sn(config, sn):
+    assert _read_config_sn(_ConfigDevice(config), "console") == sn

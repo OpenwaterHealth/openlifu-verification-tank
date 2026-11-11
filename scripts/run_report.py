@@ -218,7 +218,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Prompt before writing config to hardware (default: prompt).")
     # --- Misc ---
     p.add_argument("--dry-run", action="store_true",
-                   help="Use DryRunTank instead of real hardware.")
+                   help="Simulate all hardware: synthetic measurements "
+                        "(DryRunTank) and the SDK's simulated console and "
+                        "TXM. No real device is touched.")
     p.add_argument("--plot-peak", action="store_true",
                    help="Open a live matplotlib figure during the find_peak "
                         "stage so the operator can visually verify the "
