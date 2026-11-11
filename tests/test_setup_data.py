@@ -169,3 +169,20 @@ def test_last_setup_round_trip(setup):
     ids = {"tester": "T1", "console": "WL134Q00007", "hydrophone": "HYDRO2246"}
     setup.save_last_setup(ids)
     assert setup.load_last_setup() == ids
+
+
+def test_replace_hydrophone_calibration(setup, tmp_path):
+    old = setup.calibration_path("HYDRO2246")
+    src = tmp_path / "HNR0500-2246_new_20261101.txt"
+    src.write_bytes(old.read_bytes())
+    setup.replace_hydrophone_calibration("HYDRO2246", src)
+    assert setup.calibration_path("HYDRO2246") == setup.calibrations_dir / src.name
+    assert (setup.calibrations_dir / src.name).read_bytes() == src.read_bytes()
+    assert old.is_file()  # earlier reports still name it
+
+
+def test_replace_calibration_requires_registered_hydrophone(setup, tmp_path):
+    src = next(paths.BUNDLED_CALIBRATIONS_DIR.glob("HNR0500-2246*.txt"))
+    with pytest.raises(KeyError, match="HYDRO9999"):
+        setup.replace_hydrophone_calibration("HYDRO9999", src)
+    assert setup.lookup(HYDROPHONES, "HYDRO9999") == (False, None)
