@@ -86,3 +86,15 @@ def test_nonstandard_run_is_marked_and_cannot_write(tmp_path):
     assert json.loads(snapshot.read_text(encoding="utf-8"))["scope"]["n_averages"] == 1
     assert ("Configuration", NONSTANDARD_BANNER) in rows
     assert ("Non-standard setting", "scope.n_averages = 1 (standard 3)") in rows
+
+
+def test_outdated_firmware_result_is_marked(tmp_path, monkeypatch):
+    real = run_report.DryRunTank
+
+    def old_firmware(**kw):
+        return real(txm_fw_version="2.0.0", **kw)
+    monkeypatch.setattr(run_report, "DryRunTank", old_firmware)
+    result = run_report.run(_args(tmp_path))
+    assert result.halted_kind == "firmware"
+    assert result.exit_code == 1 and result.run_dir is None
+    assert "TXM firmware: version 2.0.0" in result.halted_reason

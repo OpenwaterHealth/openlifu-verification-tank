@@ -42,6 +42,7 @@ from typing import Callable, Optional
 from openlifu_verification import (
     Characterization,
     DryRunTank,
+    FirmwareOutOfDate,
     Hydrophone,
     OperatorPrefs,
     RunAborted,
@@ -243,7 +244,9 @@ class RunResult:
     pass, 1 on fail, 130 on user abort, 2 on unexpected error.
     ``aborted`` is set when the run was stopped via ``abort_event``.
     ``halted_reason`` is set (exit code 1, no report) when the depth
-    calibration or peak search failed and the run was stopped.
+    calibration or peak search failed and the run was stopped;
+    ``halted_kind`` is ``"firmware"`` when it stopped because the TXM
+    or console firmware is too old, else ``"setup"``.
     ``nonstandard_reasons`` is non-empty when the run deviated from
     the standard configuration (see :func:`nonstandard_reasons`).
     ``graded_rows`` are the report rows with a PASS/FAIL verdict, in
@@ -257,6 +260,7 @@ class RunResult:
     device_write_ok: Optional[bool] = None
     aborted: bool = False
     halted_reason: Optional[str] = None
+    halted_kind: Optional[str] = None
     nonstandard_reasons: list[str] = field(default_factory=list)
     graded_rows: list[characterization.ReportRow] = field(default_factory=list)
     elapsed_s: Optional[float] = None
@@ -473,9 +477,12 @@ def _run(args: argparse.Namespace,
             result.aborted = True
             return result
         except RunHalted as e:
-            logger.error("Run halted: %s No report written.", e)
+            logger.error("Run halted: %s No report written.",
+                         str(e).replace("\n", " "))
             result.exit_code = 1
             result.halted_reason = str(e)
+            result.halted_kind = ("firmware" if isinstance(e, FirmwareOutOfDate)
+                                  else "setup")
             return result
         except KeyboardInterrupt:
             print("\nInterrupted during characterization.", file=sys.stderr)

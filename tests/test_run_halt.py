@@ -93,3 +93,50 @@ def test_console_registered_with_legacy_hwid_runs_with_warning(caplog):
     chz.run(skip_2d=True, skip_frequency=True, skip_voltage=True)
     assert "legacy 6-byte hardware ID 2naX97Jp7" in caplog.text
     assert "full ID 4vfAkNk3axRSP1x4R" in caplog.text
+
+
+# ----------------------------------------------------------------------
+# Firmware older than the acceptance minimum stops the run up front
+# ----------------------------------------------------------------------
+def test_minimum_firmware_versions():
+    fw = AcceptanceCriteria().firmware
+    assert (fw.min_txm_version, fw.min_console_version) == ("2.0.8", "1.2.7")
+
+
+@pytest.mark.parametrize("txm, console, outdated", [
+    ("2.0.7", "1.2.7", [("TXM firmware", "2.0.7", "2.0.8")]),
+    ("v2.0.8", "1.2.6", [("Console firmware", "1.2.6", "1.2.7")]),
+    ("1.9.9", "", [("TXM firmware", "1.9.9", "2.0.8"),
+                   ("Console firmware", "", "1.2.7")]),
+])
+def test_outdated_firmware_halts_before_measuring(txm, console, outdated):
+    from openlifu_verification import FirmwareOutOfDate
+    tank = DryRunTank(rng_seed=0, txm_fw_version=txm,
+                      console_fw_version=console)
+    tank.calibrate_hydrophone_depth = _fail_if_called
+    with pytest.raises(FirmwareOutOfDate) as info:
+        _run(_chz(tank))
+    assert info.value.devices == outdated
+    assert isinstance(info.value, RunHalted)
+    message = str(info.value)
+    assert message.startswith("Firmware update required.\n")
+    for label, reported, minimum in outdated:
+        assert f"{label}: " in message
+        assert f"(required: {minimum} or newer)" in message
+    if not console:
+        assert "Console firmware: version could not be read" in message
+
+
+@pytest.mark.parametrize("txm, console", [
+    ("2.0.8", "1.2.7"), ("v2.1.0", "1.3.0"), ("2.0.10", "1.2.7-rc1")])
+def test_current_firmware_runs(txm, console):
+    tank = DryRunTank(rng_seed=0, txm_fw_version=txm,
+                      console_fw_version=console)
+    _chz(tank).run(skip_2d=True, skip_frequency=True, skip_voltage=True)
+
+
+def test_firmware_check_disabled_by_empty_minimum():
+    tank = DryRunTank(rng_seed=0, txm_fw_version="0.0.1")
+    chz = _chz(tank)
+    chz.criteria.firmware.min_txm_version = ""
+    chz.run(skip_2d=True, skip_frequency=True, skip_voltage=True)
