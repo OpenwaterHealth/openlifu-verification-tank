@@ -64,10 +64,12 @@ from typing import Callable, Optional
 import run_report
 
 from PySide6.QtCore import (
+    QPointF,
     Qt, QEvent, QObject, QSettings, QThread, QTimer, QUrl, Signal,
 )
 from PySide6.QtGui import (
-    QDesktopServices, QFont, QFontMetrics, QIcon, QPixmap, QTextCursor,
+    QAction, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QPainter,
+    QPen, QPixmap, QPolygonF, QTextCursor,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -82,6 +84,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -300,6 +303,23 @@ def _build_qss(p: Palette) -> str:
         selection-background-color: {p.accent};
         selection-color: {p.panel_bg};
         outline: 0;
+    }}
+
+    QMenu {{
+        background-color: {p.panel_bg};
+        color: {p.text};
+        border: 1px solid {p.border};
+        padding: 4px 0;
+    }}
+    QMenu::item {{
+        padding: 4px 16px 4px 24px;
+    }}
+    QMenu::item:selected {{
+        background-color: {p.accent};
+        color: {p.panel_bg};
+    }}
+    QMenu::item:disabled {{
+        color: {p.muted};
     }}
 
     /* --- Checkbox --- */
@@ -854,6 +874,22 @@ class _IdField:
     meta: Optional[dict] = None          # registry entry when valid
 
 
+def _chevron_icon(color: str, size: int = 16) -> QIcon:
+    """Small down-pointing triangle, drawn so it follows the theme."""
+    pixmap = QPixmap(size * 2, size * 2)
+    pixmap.setDevicePixelRatio(2.0)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(Qt.PenStyle.NoPen))
+    painter.setBrush(QColor(color))
+    c, w, h = size / 2, size * 0.28, size * 0.16
+    painter.drawPolygon(QPolygonF([QPointF(c - w, c - h), QPointF(c + w, c - h),
+                                   QPointF(c, c + h)]))
+    painter.end()
+    return QIcon(pixmap)
+
+
 def _form_layout(group: QGroupBox) -> QFormLayout:
     form = QFormLayout(group)
     form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -1178,7 +1214,8 @@ class LauncherDialog(QDialog):
     Fields are filled in order (TXM S/N, frequency, tester, console,
     hydrophone), typically with a barcode reader: Enter validates the
     field and moves focus to the next unfilled one, ending on Start.
-    Each ID must match its format and, except the TXM S/N, be
+    The tester and hydrophone can also be picked from the registered
+    IDs with the arrow at the right of the field. Each ID must match its format and, except the TXM S/N, be
     registered in the setup data; valid fields turn green and show the
     registered name / HWID / calibration file. The frequency is set
     from the TXM S/N's model code. With ``--add-items``, Enter on a
@@ -1294,6 +1331,10 @@ class LauncherDialog(QDialog):
         self._hydrophone = self._add_id_row(
             info_form, "Hydrophone:", self.hydrophone_edit,
             HYDROPHONES.id_format, HYDROPHONES)
+        # Tester and hydrophone: type / scan, or pick a registered ID.
+        self._menus: dict[QLineEdit, QMenu] = {}
+        for f in (self._tester, self._hydrophone):
+            self._add_registry_dropdown(f)
         self._hydrophone.detail.setTextInteractionFlags(
             Qt.TextInteractionFlag.LinksAccessibleByMouse)
         self._hydrophone.detail.linkActivated.connect(
@@ -1449,6 +1490,52 @@ class LauncherDialog(QDialog):
         edit.textChanged.connect(lambda _text: self._show(f, None))
         edit.editingFinished.connect(lambda: self._validate(f))
         return f
+
+    def _add_registry_dropdown(self, f: _IdField) -> None:
+        """Add a dropdown arrow inside ``f``'s field that lists the
+        registered IDs; picking one fills the field as if scanned. The
+        field stays editable, so typing and barcode scans still work."""
+        action = QAction(_chevron_icon(current_palette().subtle_text),
+                         f"Choose a registered {f.registry.kind}", f.edit)
+        action.setToolTip(action.text())
+        action.triggered.connect(lambda: self._popup_registry_menu(f))
+        f.edit.addAction(action, QLineEdit.ActionPosition.TrailingPosition)
+
+    def _registry_menu(self, f: _IdField) -> QMenu:
+        """Menu of ``f``'s registered IDs (re-read from the setup data
+        each time, so newly added items appear)."""
+        menu = QMenu(self)
+        try:
+            entries = self._setup.load(f.registry)
+        except (OSError, ValueError) as e:
+            menu.addAction(f"Could not read {f.registry.filename}").setEnabled(False)
+            logger.warning("Could not read %s: %s",
+                           self._setup.registry_path(f.registry), e)
+            return menu
+        if not entries:
+            menu.addAction(f"No {f.registry.kind}s registered").setEnabled(False)
+            return menu
+        current = f.edit.text().strip()
+        for key in sorted(entries):
+            detail = str(entries[key].get(f.registry.field) or "")
+            action = menu.addAction(f"{key}\t{detail}" if detail else key)
+            action.setCheckable(True)
+            action.setChecked(key == current)
+            action.triggered.connect(
+                lambda _checked=False, key=key: self._pick_registered(f, key))
+        return menu
+
+    def _popup_registry_menu(self, f: _IdField) -> None:
+        menu = self._registry_menu(f)
+        menu.setMinimumWidth(f.edit.width())
+        self._menus[f.edit] = menu  # keep it alive while shown
+        menu.popup(f.edit.mapToGlobal(f.edit.rect().bottomLeft()))
+
+    def _pick_registered(self, f: _IdField, key: str) -> None:
+        """Fill ``f`` with ``key`` and validate / advance as Enter does."""
+        f.edit.setText(key)
+        f.edit.setFocus()
+        self._on_enter(f.edit)
 
     def _link_row(self, label: QLabel, tooltip: str, on_open,
                   on_browse) -> QHBoxLayout:

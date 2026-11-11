@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton  # noqa
 
 from openlifu_verification.setup_data import (  # noqa: E402
     CONSOLES,
+    HYDROPHONES,
     TESTERS,
     SetupData,
 )
@@ -800,3 +801,78 @@ class _FakeSettings:
 
     def setValue(self, *_a):
         pass
+
+
+# ----------------------------------------------------------------------
+# Registered-ID dropdowns (tester, hydrophone)
+# ----------------------------------------------------------------------
+def _menu_entries(menu) -> list[tuple[str, bool, bool]]:
+    return [(a.text(), a.isEnabled(), a.isChecked()) for a in menu.actions()]
+
+
+def test_dropdowns_only_on_tester_and_hydrophone(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path)
+    assert len(dlg.tester_edit.actions()) == 1
+    assert len(dlg.hydrophone_edit.actions()) == 1
+    assert dlg.console_edit.actions() == []
+    assert dlg.txm_edit.actions() == []
+    assert not dlg.tester_edit.isReadOnly()
+
+
+def test_tester_menu_lists_registered_testers(setup, tmp_path):
+    setup.add(TESTERS, "A0", "Al Bee")
+    dlg = _launcher(setup, tmp_path)
+    dlg.tester_edit.setText("T1")
+    assert _menu_entries(dlg._registry_menu(dlg._tester)) == [
+        ("A0\tAl Bee", True, False), ("T1\tJane Doe", True, True)]
+
+
+def test_hydrophone_menu_lists_calibrations(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path)
+    entries = _menu_entries(dlg._registry_menu(dlg._hydrophone))
+    keys = [text.split("\t")[0] for text, _e, _c in entries]
+    assert keys == sorted(setup.load(HYDROPHONES))
+    assert entries[0][0] == ("HYDRO2246\t"
+                             + setup.load(HYDROPHONES)["HYDRO2246"]["Calibration"])
+
+
+def test_empty_registry_menu_is_disabled(tmp_path):
+    empty = SetupData(tmp_path / "empty")
+    empty.initialize()
+    dlg = _launcher(empty, tmp_path)
+    assert _menu_entries(dlg._registry_menu(dlg._tester)) == [
+        ("No testers registered", False, False)]
+
+
+def test_picking_from_menu_validates_and_advances(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path)
+    _scan(dlg, dlg.txm_edit, "WLM44Q00012")
+    menu = dlg._registry_menu(dlg._tester)
+    next(a for a in menu.actions() if a.text().startswith("T1")).trigger()
+    assert dlg.tester_edit.text() == "T1"
+    assert dlg._tester.valid
+    assert dlg.focusWidget() is dlg.console_edit
+
+    _scan(dlg, dlg.console_edit, "WL134Q00007")
+    menu = dlg._registry_menu(dlg._hydrophone)
+    next(a for a in menu.actions()
+         if a.text().startswith("HYDRO2246")).trigger()
+    assert dlg._hydrophone.valid
+    assert dlg.start_button.isEnabled()
+
+
+def test_menu_shows_items_added_later(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path)
+    setup.add(TESTERS, "T9", "New Person")
+    texts = [t for t, _e, _c in _menu_entries(dlg._registry_menu(dlg._tester))]
+    assert "T9\tNew Person" in texts
+
+
+def test_dropdown_arrow_pops_up_menu(setup, tmp_path):
+    dlg = _launcher(setup, tmp_path)
+    dlg.show()
+    dlg.tester_edit.actions()[0].trigger()
+    menu = dlg._menus[dlg.tester_edit]
+    assert menu.isVisible()
+    menu.close()
+    dlg.reject()
