@@ -60,3 +60,59 @@ def test_unwritten_prompt_names_the_action(monkeypatch, choice, action):
     dlg = gui.ResultDialog(run_report.RunResult(passed=True), can_write=True)
     dlg._finish_with(choice)
     assert shown and shown[0].endswith(f"Are you sure you want to {action}?")
+
+
+# ----------------------------------------------------------------------
+# Hydrophone depth calibration failure: Continue / Abort
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize("button, expected", [
+    ("Continue at 50 mm", True), ("Abort Scan", False)])
+def test_depth_failure_modal(monkeypatch, button, expected):
+    seen = {}
+
+    def _exec(box):
+        seen.update(title=box.windowTitle(), text=box.text(),
+                    info=box.informativeText(),
+                    default=box.defaultButton().text())
+        chosen = next(b for b in box.buttons() if b.text() == button)
+        monkeypatch.setattr(box, "clickedButton", lambda: chosen)
+        return 0
+    monkeypatch.setattr(QMessageBox, "exec", _exec)
+    assert gui._ask_continue_after_depth_failure(
+        None, "Plane-wave depth calibration failed: no arrival", 50.0) is expected
+    assert seen["title"] == "Hydrophone depth calibration failed"
+    assert seen["text"] == "Plane-wave depth calibration failed: no arrival."
+    assert "free of bubbles" in seen["info"]
+    assert "nominal depth of 50.0 mm" in seen["info"]
+    assert seen["default"] == "Abort Scan"
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_worker_waits_for_depth_answer(answer):
+    import threading
+    signals = gui._RunSignals()
+    worker = gui._WorkerThread(None, None, signals)
+    asked = []
+    signals.depth_failed.connect(lambda p, n: asked.append((p, n)))
+    got = []
+    t = threading.Thread(
+        target=lambda: got.append(worker._on_depth_failure("bad", 50.0)))
+    t.start()
+    t.join(0.2)
+    assert t.is_alive()          # blocked until the operator answers
+    worker.answer_depth_failure(answer)
+    t.join(2)
+    QApplication.processEvents()  # deliver the cross-thread signal
+    assert got == [answer] and asked == [("bad", 50.0)]
+
+
+@pytest.mark.parametrize("acknowledged", [True, False])
+def test_worker_forwards_acknowledged_abort(monkeypatch, acknowledged):
+    result = run_report.RunResult(aborted=True,
+                                  abort_acknowledged=acknowledged)
+    monkeypatch.setattr(run_report, "run", lambda *a, **k: result)
+    signals = gui._RunSignals()
+    seen = []
+    signals.aborted.connect(seen.append)
+    gui._WorkerThread(None, None, signals).run()
+    assert seen == [acknowledged]

@@ -9,7 +9,14 @@ from .operator_prefs import OperatorPrefs
 from .acceptance import AcceptanceCriteria
 from .device_info import DeviceInfo
 from .scan_config import ScanConfig
-from .characterization import Characterization, RunAborted, RunHalted, TestReport, ReportRow
+from .characterization import (
+    Characterization,
+    OperatorStoppedRun,
+    ReportRow,
+    RunAborted,
+    RunHalted,
+    TestReport,
+)
 from .dry_run import DryRunTank
 from .pulse_align import align_pulse_traces
 from . import apodization, characterization, paths, pulse_align, report_io, setup_data
@@ -56,6 +63,7 @@ __all__ = [
     "Characterization",
     "RunAborted",
     "RunHalted",
+    "OperatorStoppedRun",
     "TestReport",
     "ReportRow",
     "DryRunTank",

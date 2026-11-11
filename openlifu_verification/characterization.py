@@ -29,7 +29,7 @@ import threading
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 from scipy.signal import hilbert
@@ -51,9 +51,22 @@ class RunAborted(Exception):
     always completes before the run stops."""
 
 
+class OperatorStoppedRun(RunAborted):
+    """Raised by :meth:`Characterization.run` when the operator chose
+    to stop the run when asked (e.g. after the hydrophone depth
+    calibration failed). The operator already knows why, so callers
+    need not report it again."""
+
+
+#: ``on_depth_failure(problem, nominal_mm) -> continue?`` -- asked
+#: when the plane-wave depth calibration fails or is out of range.
+DepthFailureHandler = Callable[[str, float], bool]
+
+
 class RunHalted(Exception):
     """Raised by :meth:`Characterization.run` when the hydrophone depth
-    calibration or the peak search fails or lands out of tolerance.
+    calibration (with no ``on_depth_failure`` handler) or the peak
+    search fails or lands out of tolerance.
     Every later measurement depends on those, so the run stops. The
     message is operator-facing."""
 
@@ -1562,16 +1575,32 @@ class Characterization:
         (or ``None`` if plane-wave depth calibration hasn't landed
         yet)."""
         row = self.report.rows.get(ROW["plane_wave_depth_mm"])
-        if row is None or row.value is None:
-            return None
-        depth = float(row.value)
+        fallback = getattr(self, "_depth_fallback", None)
         crit = self.criteria.peak_depth
         nominal = float(crit.nominal_for(self.frequency_kHz))
         tol_mm = float(crit.hydrophone_tol_mm)
-        passed = abs(depth - nominal) <= tol_mm
         threshold = f"{nominal:.1f} \u00b1 {tol_mm:.2f} mm"
+        if row is None or row.value is None:
+            if fallback is None:
+                return None
+            # The calibration produced no depth: record the failure.
+            if row is None:
+                self.report.set_row(ROW["plane_wave_depth_mm"],
+                                    "Plane-Wave Hydrophone Depth", None,
+                                    unit="mm")
+            note = (f"{fallback[0]}; continued at nominal "
+                    f"{fallback[1]:.1f} mm")
+            self.report.grade_row(ROW["plane_wave_depth_mm"], passed=False,
+                                  threshold=threshold, note=note)
+            logger.info("[grade] Hydrophone depth \u2192 FAIL (%s)", note)
+            return False
+        depth = float(row.value)
+        passed = abs(depth - nominal) <= tol_mm
         note = (f"depth = {depth:.3f} mm (nominal {nominal:.1f} @ "
                 f"{self.frequency_kHz:g} kHz)")
+        if fallback is not None:
+            passed = False
+            note += f"; continued at nominal {fallback[1]:.1f} mm"
         self.report.grade_row(ROW["plane_wave_depth_mm"], passed=passed,
                               threshold=threshold, note=note)
         logger.info("[grade] Hydrophone depth \u2192 %s (%s)",
@@ -1697,11 +1726,36 @@ class Characterization:
         logger.error("%s: %s. Stopping the run.", problem, details)
         raise RunHalted(f"{problem}: {details}.")
 
+    def _continue_after_depth_failure(self, problem: str,
+                                      ask: DepthFailureHandler) -> None:
+        """Ask whether to go on after a failed / out-of-range depth
+        calibration; if so, put the hydrophone at the nominal depth and
+        grade D.3 FAIL, else raise :class:`OperatorStoppedRun`."""
+        nominal = float(self.criteria.peak_depth.nominal_for(self.frequency_kHz))
+        logger.error("%s.", problem)
+        if not ask(problem, nominal):
+            logger.warning("Run stopped by the operator after the hydrophone "
+                           "depth calibration failed; no report written.")
+            raise OperatorStoppedRun(
+                "Stopped by the operator after the hydrophone depth "
+                "calibration failed.")
+        self._depth_fallback = (problem, nominal)
+        self.ver.hydrophone_position[2] = nominal
+        logger.warning(
+            "Continuing at the nominal hydrophone depth %.1f mm for "
+            "diagnosis; the hydrophone depth is graded FAIL.", nominal)
+        self._grade_hydrophone_depth()
+        # A failed calibration may leave the plane-wave pulse armed;
+        # re-arm the acceptance pulse and steer to the nominal depth.
+        self._apply_baseline_pulse()
+
     def run(self, *,
             skip_2d: bool = False,
             skip_frequency: bool = False,
             skip_voltage: bool = False,
-            abort_event: Optional[threading.Event] = None) -> TestReport:
+            abort_event: Optional[threading.Event] = None,
+            on_depth_failure: Optional[DepthFailureHandler] = None,
+            ) -> TestReport:
         """Run every phase in order and grade.
 
         If ``abort_event`` is given, it is checked between phases (and
@@ -1709,9 +1763,17 @@ class Characterization:
         phase finishes and :class:`RunAborted` is raised.
 
         Raises :class:`RunHalted` if the connected console's hardware
-        ID doesn't match ``expected_console_hwid``, or if the
-        plane-wave depth calibration or the peak search fails or is
-        out of tolerance, since every later measurement depends on them.
+        ID doesn't match ``expected_console_hwid``, or if the peak
+        search fails or is out of tolerance, since every later
+        measurement depends on them.
+
+        If the plane-wave depth calibration fails or is out of range,
+        ``on_depth_failure(problem, nominal_mm)`` is asked whether to
+        go on. ``True`` continues with the hydrophone at the nominal
+        depth and D.3 graded FAIL, so the rest of the measurements are
+        still recorded for diagnosis; ``False`` raises
+        :class:`OperatorStoppedRun`. Without a handler the run halts
+        (:class:`RunHalted`).
         """
         self._abort_event = abort_event
         self._check_abort()
@@ -1744,13 +1806,25 @@ class Characterization:
         # peak search so find_peak fires focused pulses at the true
         # array-to-hydrophone distance rather than the operator's
         # rough initial estimate.
+        self._depth_fallback = None
         try:
             self.calibrate_depth_plane_wave()
         except Exception as e:  # noqa: BLE001 - surfaced to operator
             logger.exception("Plane-wave depth calibration failed")
-            raise RunHalted(f"Plane-wave depth calibration failed: {e}") from e
-        self._require_pass([ROW["plane_wave_depth_mm"]],
-                           "Hydrophone depth is out of range")
+            problem = f"Plane-wave depth calibration failed: {e}"
+            if on_depth_failure is None:
+                raise RunHalted(problem) from e
+            self._continue_after_depth_failure(problem, on_depth_failure)
+        else:
+            if on_depth_failure is None:
+                self._require_pass([ROW["plane_wave_depth_mm"]],
+                                   "Hydrophone depth is out of range")
+            else:
+                row = self.report.rows.get(ROW["plane_wave_depth_mm"])
+                if getattr(row, "status", None) != "PASS":
+                    self._continue_after_depth_failure(
+                        f"Hydrophone depth is out of range: {row.note} "
+                        f"(allowed {row.threshold})", on_depth_failure)
         self._check_abort()
         # Wipe any XY drift from a prior calibration / leftover run
         # so the peak search is guaranteed to start from a known,
