@@ -14,6 +14,10 @@ centered on ``nominal_frequency_kHz``. Traces are 20-cycle tone
 bursts (one-cycle cosine ramps) arriving at ``z / 1.5`` µs in the
 emission-relative time frame that :class:`VerificationTank` also
 exposes.
+
+``lifu`` is a :class:`~openlifu_verification.simulated_hardware.SimulatedLifu`
+(the SDK's simulated interface), so device IDs and firmware versions
+come from the same simulated console the GUI launcher detects.
 """
 from __future__ import annotations
 
@@ -52,9 +56,12 @@ class DryRunTank:
         self.system_transmit_delay_us = float(system_transmit_delay_us)
         self.hv_voltage: Optional[float] = None
         self.hydrophone_channel = "A"
-        # SDK-shaped stub so DeviceInfo can read FW versions / HW IDs
-        # (an empty FW version fails the firmware acceptance gate).
-        self.lifu = _DryLifu(fw_version)
+        # The SDK's simulated interface, so DeviceInfo reads the same
+        # simulated console the launcher detects (an empty FW version
+        # would fail the firmware acceptance gate). Imported here so
+        # importing the package loads no Qt binding.
+        from .simulated_hardware import SimulatedLifu
+        self.lifu = SimulatedLifu(fw_version=fw_version)
         # Ground truth used for signal synthesis.
         self._peak_xy = tuple(peak_xy)
         self._peak_sigma = tuple(peak_sigma)
@@ -82,6 +89,7 @@ class DryRunTank:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         logger.info("DryRunTank: context exited")
+        self.lifu.close()
         return False
 
     # --- SDK / configure API stubs -------------------------------------
@@ -496,31 +504,6 @@ class DryRunTank:
                 "hydrophone_position_mm": self.hydrophone_position.copy(),
             },
         )
-
-
-class _DryDevice:
-    """Stub TXM / HV controller exposing what :class:`DeviceInfo` reads."""
-
-    def __init__(self, fw_version: str, hwid_hex: str):
-        self._fw_version = fw_version
-        self._hwid_hex = hwid_hex
-
-    def get_version(self, *_):
-        return self._fw_version
-
-    def get_hardware_id(self, *_, raw_hex=False, base58=False,
-                        legacy_6byte=False):
-        from openlifu_sdk.util.hwid import encode_hwid
-        return encode_hwid(bytes.fromhex(self._hwid_hex), raw_hex, base58,
-                           legacy_6byte)
-
-
-class _DryLifu:
-    """Stub ``LIFUInterface`` holding a dry TXM and console."""
-
-    def __init__(self, fw_version: str):
-        self.txdevice = _DryDevice(fw_version, "d00000000000000000000001")
-        self.hvcontroller = _DryDevice(fw_version, "d00000000000000000000002")
 
 
 class _DryHydrophone:
