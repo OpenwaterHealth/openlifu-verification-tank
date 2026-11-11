@@ -42,6 +42,7 @@ from typing import Callable, Optional
 from openlifu_verification import (
     Characterization,
     DryRunTank,
+    FirmwareOutOfDate,
     Hydrophone,
     OperatorPrefs,
     OperatorStoppedRun,
@@ -233,7 +234,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Prompt before writing config to hardware (default: prompt).")
     # --- Misc ---
     p.add_argument("--dry-run", action="store_true",
-                   help="Use DryRunTank instead of real hardware.")
+                   help="Simulate all hardware: synthetic measurements "
+                        "(DryRunTank) and the SDK's simulated console and "
+                        "TXM. No real device is touched.")
     p.add_argument("--plot-peak", action="store_true",
                    help="Open a live matplotlib figure during the find_peak "
                         "stage so the operator can visually verify the "
@@ -262,7 +265,9 @@ class RunResult:
     calibration (then ``abort_acknowledged`` is set too: the operator
     already knows why).
     ``halted_reason`` is set (exit code 1, no report) when the depth
-    calibration or peak search failed and the run was stopped.
+    calibration or peak search failed and the run was stopped;
+    ``halted_kind`` is ``"firmware"`` when it stopped because the TXM
+    or console firmware is too old, else ``"setup"``.
     ``nonstandard_reasons`` is non-empty when the run deviated from
     the standard configuration (see :func:`nonstandard_reasons`).
     ``graded_rows`` are the report rows with a PASS/FAIL verdict, in
@@ -277,6 +282,7 @@ class RunResult:
     aborted: bool = False
     abort_acknowledged: bool = False
     halted_reason: Optional[str] = None
+    halted_kind: Optional[str] = None
     nonstandard_reasons: list[str] = field(default_factory=list)
     graded_rows: list[characterization.ReportRow] = field(default_factory=list)
     elapsed_s: Optional[float] = None
@@ -508,9 +514,12 @@ def _run(args: argparse.Namespace,
             result.abort_acknowledged = isinstance(e, OperatorStoppedRun)
             return result
         except RunHalted as e:
-            logger.error("Run halted: %s No report written.", e)
+            logger.error("Run halted: %s No report written.",
+                         str(e).replace("\n", " "))
             result.exit_code = 1
             result.halted_reason = str(e)
+            result.halted_kind = ("firmware" if isinstance(e, FirmwareOutOfDate)
+                                  else "setup")
             return result
         except KeyboardInterrupt:
             print("\nInterrupted during characterization.", file=sys.stderr)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -136,19 +136,50 @@ def _read_hwid(dev, module: int, label: str) -> tuple[str, str]:
     return hex_hwid, b58
 
 
-def read_console_hwid() -> str:
-    """Briefly connect to the console and return its base58 hardware ID
-    (the form shown in the report). Raises ``RuntimeError`` if the
-    console isn't connected or the ID can't be read."""
-    from openlifu_sdk.io import LIFUInterface
+def read_console_identity(open_interface: Optional[Callable] = None
+                          ) -> tuple[str, str]:
+    """Briefly connect to the console and return ``(sn, hwid)``.
 
-    with LIFUInterface() as lifu:
+    ``sn`` is the serial number stored in the console's user config
+    (``"sn"``; ``""`` if the config has none or can't be read) and
+    ``hwid`` its base58 hardware ID (the form shown in the report).
+    Raises ``RuntimeError`` if the console isn't connected or the
+    hardware ID can't be read.
+
+    ``open_interface`` returns the interface to read, as a context
+    manager; default: a new ``LIFUInterface`` (the dry run passes
+    :meth:`SimulatedHardware.open_lifu
+    <openlifu_verification.simulated_hardware.SimulatedHardware.open_lifu>`)."""
+    if open_interface is None:
+        from openlifu_sdk.io import LIFUInterface as open_interface
+
+    with open_interface() as lifu:
         if not lifu.is_device_connected()[1]:
             raise RuntimeError("Console is not connected.")
-        _hex, b58 = _read_hwid(lifu.hvcontroller, 0, "console")
+        hv = lifu.hvcontroller
+        _hex, b58 = _read_hwid(hv, 0, "console")
+        sn = _read_config_sn(hv, "console")
     if not b58:
         raise RuntimeError("Could not read the console hardware ID.")
-    return b58
+    return sn, b58
+
+
+def read_console_hwid(open_interface: Optional[Callable] = None) -> str:
+    """Briefly connect to the console and return its base58 hardware ID
+    (the form shown in the report). Raises ``RuntimeError`` if the
+    console isn't connected or the ID can't be read. ``open_interface``
+    as in :func:`read_console_identity`."""
+    return read_console_identity(open_interface)[1]
+
+
+def _read_config_sn(dev, label: str) -> str:
+    """Serial number (``"sn"``) from ``dev``'s user config, or ``""``."""
+    try:
+        sn = dev.read_config().get("sn")
+    except Exception as e:
+        logger.warning("Could not read %s user config: %s", label, e)
+        return ""
+    return sn.strip() if isinstance(sn, str) else ""
 
 
 def _read_version(dev, module: int, label: str) -> str:

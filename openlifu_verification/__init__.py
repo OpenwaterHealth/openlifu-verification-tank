@@ -11,6 +11,7 @@ from .device_info import DeviceInfo
 from .scan_config import ScanConfig
 from .characterization import (
     Characterization,
+    FirmwareOutOfDate,
     OperatorStoppedRun,
     ReportRow,
     RunAborted,
@@ -64,6 +65,7 @@ __all__ = [
     "Characterization",
     "RunAborted",
     "RunHalted",
+    "FirmwareOutOfDate",
     "OperatorStoppedRun",
     "SetupFailure",
     "TestReport",

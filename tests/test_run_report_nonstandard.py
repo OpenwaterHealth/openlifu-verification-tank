@@ -161,3 +161,15 @@ def test_peak_failure_continue_writes_failing_report(tmp_path, monkeypatch):
     peak = [r for r in result.graded_rows
             if r.label in ("Hydrophone X Position", "Hydrophone Y Position")]
     assert [r.status for r in peak] == ["FAIL", "FAIL"]
+
+
+def test_outdated_firmware_result_is_marked(tmp_path, monkeypatch):
+    real = run_report.DryRunTank
+
+    def old_firmware(**kw):
+        return real(txm_fw_version="2.0.0", **kw)
+    monkeypatch.setattr(run_report, "DryRunTank", old_firmware)
+    result = run_report.run(_args(tmp_path))
+    assert result.halted_kind == "firmware"
+    assert result.exit_code == 1 and result.run_dir is None
+    assert "TXM firmware: version 2.0.0" in result.halted_reason
