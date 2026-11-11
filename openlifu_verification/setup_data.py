@@ -183,6 +183,16 @@ class SetupData:
             shutil.copy2(src, dest)
         self.add(HYDROPHONES, key, src.name)
 
+    def replace_hydrophone_calibration(self, key: str,
+                                       calibration_file: Path) -> None:
+        """Point registered hydrophone ``key`` at a new calibration
+        file, copied in as by :meth:`add_hydrophone`. The previous
+        file is kept (earlier reports name it)."""
+        found, _meta = self.lookup(HYDROPHONES, key)
+        if not found:
+            raise KeyError(f"Hydrophone {key} is not in {self.registry_path(HYDROPHONES)}")
+        self.add_hydrophone(key, calibration_file)
+
     def calibration_path(self, hydrophone_id: str) -> Optional[Path]:
         """Path of the calibration file registered for
         ``hydrophone_id`` (``None`` if not registered)."""
