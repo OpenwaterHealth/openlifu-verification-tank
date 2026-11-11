@@ -78,8 +78,12 @@ def test_depth_failure_modal(monkeypatch, button, expected):
         monkeypatch.setattr(box, "clickedButton", lambda: chosen)
         return 0
     monkeypatch.setattr(QMessageBox, "exec", _exec)
-    assert gui._ask_continue_after_depth_failure(
-        None, "Plane-wave depth calibration failed: no arrival", 50.0) is expected
+    failure = gui.SetupFailure(
+        step="depth", title="Hydrophone depth calibration failed",
+        problem="Plane-wave depth calibration failed: no arrival",
+        fallback="the nominal depth of 50.0 mm",
+        continue_label="Continue at 50 mm", graded="hydrophone depth")
+    assert gui._ask_continue_after_setup_failure(None, failure) is expected
     assert seen["title"] == "Hydrophone depth calibration failed"
     assert seen["text"] == "Plane-wave depth calibration failed: no arrival."
     assert "free of bubbles" in seen["info"]
@@ -93,17 +97,17 @@ def test_worker_waits_for_depth_answer(answer):
     signals = gui._RunSignals()
     worker = gui._WorkerThread(None, None, signals)
     asked = []
-    signals.depth_failed.connect(lambda p, n: asked.append((p, n)))
+    signals.setup_failed.connect(asked.append)
     got = []
     t = threading.Thread(
-        target=lambda: got.append(worker._on_depth_failure("bad", 50.0)))
+        target=lambda: got.append(worker._on_setup_failure("bad")))
     t.start()
     t.join(0.2)
     assert t.is_alive()          # blocked until the operator answers
-    worker.answer_depth_failure(answer)
+    worker.answer_setup_failure(answer)
     t.join(2)
     QApplication.processEvents()  # deliver the cross-thread signal
-    assert got == [answer] and asked == [("bad", 50.0)]
+    assert got == [answer] and asked == ["bad"]
 
 
 @pytest.mark.parametrize("acknowledged", [True, False])

@@ -15,6 +15,7 @@ from .characterization import (
     ReportRow,
     RunAborted,
     RunHalted,
+    SetupFailure,
     TestReport,
 )
 from .dry_run import DryRunTank
@@ -64,6 +65,7 @@ __all__ = [
     "RunAborted",
     "RunHalted",
     "OperatorStoppedRun",
+    "SetupFailure",
     "TestReport",
     "ReportRow",
     "DryRunTank",

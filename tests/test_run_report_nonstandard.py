@@ -106,8 +106,8 @@ def test_depth_failure_continue_writes_failing_report(tmp_path, monkeypatch):
     asked = []
     result = run_report.run(
         _args(tmp_path),
-        on_depth_failure=lambda problem, nominal: asked.append(nominal) or True)
-    assert asked == [50.0]
+        on_setup_failure=lambda failure: asked.append(failure.step) or True)
+    assert asked == ["depth"]
     assert result.run_dir is not None and not result.passed
     assert result.files.get("xlsx") and result.files.get("pdf")
     depth = next(r for r in result.graded_rows
@@ -118,7 +118,7 @@ def test_depth_failure_continue_writes_failing_report(tmp_path, monkeypatch):
 def test_depth_failure_stop_is_acknowledged_abort(tmp_path, monkeypatch):
     _failing_depth_tank(monkeypatch)
     result = run_report.run(_args(tmp_path),
-                            on_depth_failure=lambda *_a: False)
+                            on_setup_failure=lambda _failure: False)
     assert result.aborted and result.abort_acknowledged
     assert result.exit_code == 130 and result.run_dir is None
 
@@ -141,3 +141,23 @@ def test_depth_failure_cli_prompt(tmp_path, monkeypatch):
         tester_name="t", test_app_version="t", hydrophone_sn="t",
         txm_sn="WLM44Q00001", console_sn="t"))
     assert result.aborted and result.abort_acknowledged
+
+
+def test_peak_failure_continue_writes_failing_report(tmp_path, monkeypatch):
+    real = run_report.DryRunTank
+
+    def tank(**kw):
+        t = real(**kw)
+
+        def boom(**_k):
+            raise RuntimeError("no signal above noise")
+        t.find_peak = boom
+        return t
+    monkeypatch.setattr(run_report, "DryRunTank", tank)
+    result = run_report.run(_args(tmp_path),
+                            on_setup_failure=lambda failure: True)
+    assert result.run_dir is not None and not result.passed
+    assert result.files.get("xlsx") and result.files.get("pdf")
+    peak = [r for r in result.graded_rows
+            if r.label in ("Hydrophone X Position", "Hydrophone Y Position")]
+    assert [r.status for r in peak] == ["FAIL", "FAIL"]

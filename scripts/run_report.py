@@ -140,16 +140,17 @@ def _write_config_to_device(ver, config_path: Path, *, module: int = 0) -> bool:
     return False
 
 
-def _ask_continue_after_depth_failure(problem: str, nominal_mm: float) -> bool:
-    """Terminal version of the GUI's depth-failure question."""
-    print(f"\n{problem}.\n"
+def _ask_continue_after_setup_failure(
+        failure: characterization.SetupFailure) -> bool:
+    """Terminal version of the GUI's setup-failure question."""
+    print(f"\n{failure.title}: {failure.problem}.\n"
           "Check the hydrophone and transducer connections and that the "
           "acoustic path is clear and free of bubbles.\n"
-          f"Continuing runs the remaining measurements at the nominal "
-          f"depth of {nominal_mm:.1f} mm for diagnosis; the hydrophone "
-          "depth is graded FAIL, so the device will fail.", file=sys.stderr)
+          f"Continuing runs the remaining measurements at "
+          f"{failure.fallback} for diagnosis; the {failure.graded} is "
+          "graded FAIL, so the device will fail.", file=sys.stderr)
     try:
-        return _prompt_yes_no("Continue at the nominal depth?")
+        return _prompt_yes_no(f"Continue at {failure.fallback}?")
     except (KeyboardInterrupt, EOFError):
         return False
 
@@ -311,7 +312,7 @@ def run(args: argparse.Namespace, *,
         abort_event: Optional[threading.Event] = None,
         on_complete: Optional[OnComplete] = None,
         prefs: Optional[OperatorPrefs] = None,
-        on_depth_failure: Optional[characterization.DepthFailureHandler] = None,
+        on_setup_failure: Optional[characterization.SetupFailureHandler] = None,
         ) -> RunResult:
     """Execute the report pipeline with parsed ``args``.
 
@@ -332,9 +333,9 @@ def run(args: argparse.Namespace, *,
         prefs: Operator / serial-number inputs collected by the
             caller. When ``None``, they are loaded from ``--prefs``
             and (unless ``--no-prompt``) confirmed interactively.
-        on_depth_failure: Asked whether to continue at the nominal
-            hydrophone depth when the plane-wave depth calibration
-            fails (see :meth:`Characterization.run`). When ``None``,
+        on_setup_failure: Asked whether to continue at the nominal
+            position when the plane-wave depth calibration or the peak
+            search fails (see :meth:`Characterization.run`). When ``None``,
             the operator is asked in the terminal unless
             ``--no-prompt`` / ``--no-start-prompt`` is set, in which
             case the run halts.
@@ -350,7 +351,7 @@ def run(args: argparse.Namespace, *,
     root = logging.getLogger()
     root.addHandler(console_log)
     try:
-        return _run(args, abort_event, on_complete, on_depth_failure,
+        return _run(args, abort_event, on_complete, on_setup_failure,
                     console_log, prefs)
     finally:
         root.removeHandler(console_log)
@@ -363,7 +364,7 @@ def run(args: argparse.Namespace, *,
 def _run(args: argparse.Namespace,
          abort_event: Optional[threading.Event],
          on_complete: Optional[OnComplete],
-         on_depth_failure: Optional[characterization.DepthFailureHandler],
+         on_setup_failure: Optional[characterization.SetupFailureHandler],
          console_log: logging.handlers.MemoryHandler,
          prefs: Optional[OperatorPrefs]) -> RunResult:
     _configure_root_logger(args.log_file)
@@ -488,9 +489,9 @@ def _run(args: argparse.Namespace,
             expected_console_hwid=None if args.dry_run else args.console_hwid,
         )
         chz.report.nonstandard_reasons = list(result.nonstandard_reasons)
-        if (on_depth_failure is None
+        if (on_setup_failure is None
                 and not (args.no_prompt or args.no_start_prompt)):
-            on_depth_failure = _ask_continue_after_depth_failure
+            on_setup_failure = _ask_continue_after_setup_failure
         t_start = time.perf_counter()
         try:
             report = chz.run(
@@ -498,7 +499,7 @@ def _run(args: argparse.Namespace,
                 skip_frequency=args.skip_frequency,
                 skip_voltage=args.skip_voltage,
                 abort_event=abort_event,
-                on_depth_failure=on_depth_failure,
+                on_setup_failure=on_setup_failure,
             )
         except RunAborted as e:
             logger.warning("Run aborted by operator; no report written.")

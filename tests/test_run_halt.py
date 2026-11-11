@@ -107,8 +107,8 @@ class _Ask:
         self.answer = answer
         self.calls = []
 
-    def __call__(self, problem, nominal_mm):
-        self.calls.append((problem, nominal_mm))
+    def __call__(self, failure):
+        self.calls.append(failure)
         return self.answer
 
 
@@ -118,9 +118,12 @@ def test_depth_error_continue_runs_at_nominal_and_fails_depth():
     chz = _chz(tank)
     ask = _Ask(True)
     report = chz.run(skip_2d=True, skip_frequency=True, skip_voltage=True,
-                     on_depth_failure=ask)
-    assert ask.calls == [
-        ("Plane-wave depth calibration failed: no arrival found", 50.0)]
+                     on_setup_failure=ask)
+    (failure,) = ask.calls
+    assert failure.step == "depth"
+    assert failure.problem == "Plane-wave depth calibration failed: no arrival found"
+    assert failure.fallback == "the nominal depth of 50.0 mm"
+    assert failure.continue_label == "Continue at 50 mm"
     from openlifu_verification.characterization import ROW
     row = report.rows[ROW["plane_wave_depth_mm"]]
     assert row.status == "FAIL"
@@ -137,10 +140,9 @@ def test_depth_out_of_range_continue_moves_to_nominal():
     chz = _chz(tank)
     ask = _Ask(True)
     report = chz.run(skip_2d=True, skip_frequency=True, skip_voltage=True,
-                     on_depth_failure=ask)
-    (problem, nominal), = ask.calls
-    assert problem.startswith("Hydrophone depth is out of range: depth = ")
-    assert nominal == 50.0
+                     on_setup_failure=ask)
+    (failure,) = ask.calls
+    assert failure.problem.startswith("Hydrophone depth is out of range: depth = ")
     from openlifu_verification.characterization import ROW
     row = report.rows[ROW["plane_wave_depth_mm"]]
     assert row.status == "FAIL"
@@ -157,7 +159,7 @@ def test_depth_failure_stop_raises_operator_stopped():
     tank.find_peak = _fail_if_called
     with pytest.raises(OperatorStoppedRun) as info:
         _chz(tank).run(skip_2d=True, skip_frequency=True, skip_voltage=True,
-                       on_depth_failure=_Ask(False))
+                       on_setup_failure=_Ask(False))
     assert isinstance(info.value, RunAborted)
 
 
@@ -165,5 +167,67 @@ def test_good_depth_does_not_ask():
     ask = _Ask(False)
     _chz(DryRunTank(rng_seed=0)).run(
         skip_2d=True, skip_frequency=True, skip_voltage=True,
-        on_depth_failure=ask)
+        on_setup_failure=ask)
     assert ask.calls == []
+
+
+def test_peak_error_continue_runs_at_center_and_fails_peak():
+    from openlifu_verification.characterization import ROW
+    tank = DryRunTank(rng_seed=0)
+
+    def boom(**_k):
+        raise RuntimeError("no signal above noise")
+    tank.find_peak = boom
+    ask = _Ask(True)
+    report = _chz(tank).run(skip_2d=True, skip_frequency=True,
+                            skip_voltage=True, on_setup_failure=ask)
+    (failure,) = ask.calls
+    assert failure.step == "peak"
+    assert failure.title == "Peak search failed"
+    assert failure.problem == "Peak search (find_peak) failed: no signal above noise"
+    assert failure.continue_label == "Continue at center"
+    for key in ("peak_x_mm", "peak_y_mm"):
+        row = report.rows[ROW[key]]
+        assert row.status == "FAIL" and row.value is None
+        assert row.note.endswith("; continued at (0, 0)")
+    assert tuple(tank.hydrophone_position[:2]) == (0.0, 0.0)
+    assert report.overall_pass is False
+    assert report.waveform_at_peak  # the rest of the run went ahead
+
+
+def test_off_center_peak_continue_keeps_measured_peak():
+    from openlifu_verification.characterization import ROW
+    tank = DryRunTank(rng_seed=0, peak_xy=(2.5, 0.0))
+    ask = _Ask(True)
+    report = _chz(tank).run(skip_2d=True, skip_frequency=True,
+                            skip_voltage=True, on_setup_failure=ask)
+    (failure,) = ask.calls
+    assert failure.problem.startswith(
+        "Hydrophone is not centered on the focus: |x| = ")
+    x_row = report.rows[ROW["peak_x_mm"]]
+    assert x_row.status == "FAIL" and abs(x_row.value - 2.5) < 0.5
+    assert x_row.note.endswith("; continued at (0, 0)")
+    assert tuple(tank.hydrophone_position[:2]) == (0.0, 0.0)
+    assert report.overall_pass is False
+
+
+def test_peak_failure_stop_raises_operator_stopped():
+    from openlifu_verification import OperatorStoppedRun
+    tank = DryRunTank(rng_seed=0, peak_xy=(2.5, 0.0))
+    chz = _chz(tank)
+    chz.run_beam_scans = _fail_if_called
+    chz.measure_waveform_at_peak = _fail_if_called
+    with pytest.raises(OperatorStoppedRun, match="peak search failed"):
+        chz.run(skip_frequency=True, skip_voltage=True,
+                on_setup_failure=_Ask(False))
+
+
+def test_depth_and_peak_both_fail_asks_twice():
+    tank = DryRunTank(rng_seed=0)
+    tank.calibrate_hydrophone_depth = _boom
+    tank.find_peak = _boom
+    ask = _Ask(True)
+    report = _chz(tank).run(skip_2d=True, skip_frequency=True,
+                            skip_voltage=True, on_setup_failure=ask)
+    assert [f.step for f in ask.calls] == ["depth", "peak"]
+    assert report.overall_pass is False
