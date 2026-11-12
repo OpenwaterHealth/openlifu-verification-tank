@@ -173,3 +173,29 @@ def test_outdated_firmware_result_is_marked(tmp_path, monkeypatch):
     assert result.halted_kind == "firmware"
     assert result.exit_code == 1 and result.run_dir is None
     assert "TXM firmware: version 2.0.0" in result.halted_reason
+
+
+def test_focused_fallback_report_marks_d3_warn(tmp_path, monkeypatch):
+    from openlifu_verification import DepthNotFound
+    from openpyxl import load_workbook
+    real = run_report.DryRunTank
+
+    def tank(**kw):
+        t = real(**kw)
+        calibrate = t.calibrate_hydrophone_depth
+
+        def weak_plane_wave(**k):
+            if k.get("z_focus_mm") is None:
+                raise DepthNotFound("No hydrophone signal above the noise")
+            return calibrate(**k)
+        t.calibrate_hydrophone_depth = weak_plane_wave
+        return t
+    monkeypatch.setattr(run_report, "DryRunTank", tank)
+    result = run_report.run(_args(tmp_path))
+    assert result.passed and result.run_dir is not None
+    d3 = next(r for r in result.graded_rows if r.id == "D.3")
+    assert d3.status == "WARN"
+    ws = load_workbook(result.files["xlsx"])["Grading"]
+    cell = next(row[4] for row in ws.iter_rows(min_row=2) if row[0].value == "D.3")
+    assert cell.value == "WARN"
+    assert cell.fill.start_color.rgb.endswith("FFEB9C")

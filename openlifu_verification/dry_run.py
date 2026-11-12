@@ -240,6 +240,9 @@ class DryRunTank:
                                     z_focus_mm=None,
                                     store: bool = True,
                                     save: bool = False,
+                                    expected_mm=None,
+                                    search_half_width_mm: float = 10.0,
+                                    min_snr=None,
                                     ) -> dict:
         """Synthetic stand-in for the real depth calibration.
 
@@ -300,6 +303,10 @@ class DryRunTank:
             "n_pulses_used": int(n_pulses),
             "skip_us": float(skip_us),
             "baseline_window_us": 4.0,
+            # Synthetic burst amplitude 1 vs. 0.05 noise per pulse.
+            "snr": 20.0 if (min_snr is not None or expected_mm is not None) else None,
+            "noise_rms_mv": 0.05,
+            "search_window_us": (float(skip_us), float(time_stop_us)),
         }
 
     # --- scan APIs -----------------------------------------------------

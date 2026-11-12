@@ -284,3 +284,98 @@ def test_depth_and_peak_both_fail_asks_twice():
                             skip_voltage=True, on_setup_failure=ask)
     assert [f.step for f in ask.calls] == ["depth", "peak"]
     assert report.overall_pass is False
+
+
+# ----------------------------------------------------------------------
+# Plane wave not detected -> focused-pulse fallback, D.3 WARN
+# ----------------------------------------------------------------------
+def _weak_plane_wave(tank, *, focused_ok=True, focused_depth=None):
+    """Plane-wave calls raise DepthNotFound; focused calls run the
+    dry-run calibration (optionally at a different true depth) or raise
+    DepthNotFound too. Records each call's kwargs."""
+    from openlifu_verification import DepthNotFound
+    real = tank.calibrate_hydrophone_depth
+    calls = []
+
+    def cal(**kw):
+        calls.append(kw)
+        if kw.get("z_focus_mm") is None:
+            raise DepthNotFound("No hydrophone signal above the noise near 50 mm "
+                                "(signal-to-noise 2.1, need 6)")
+        if not focused_ok:
+            raise DepthNotFound("Could not locate a first-arrival RF peak")
+        if focused_depth is not None:
+            tank.hydrophone_position[2] = focused_depth
+        return real(**kw)
+    tank.calibrate_hydrophone_depth = cal
+    return calls
+
+
+def test_weak_plane_wave_falls_back_to_focused_and_warns():
+    from openlifu_verification.characterization import ROW
+    tank = DryRunTank(rng_seed=0)
+    calls = _weak_plane_wave(tank)
+    ask = _Ask(False)
+    report = _chz(tank).run(skip_2d=True, skip_frequency=True,
+                            skip_voltage=True, on_setup_failure=ask)
+    assert ask.calls == []                        # no operator prompt
+    plane, focused = calls[0], calls[1]
+    assert plane["z_focus_mm"] is None and focused["z_focus_mm"] == 50.0
+    for kw in (plane, focused):                   # detection is on
+        assert kw["expected_mm"] == 50.0 and kw["min_snr"] == 6.0
+    d3 = report.rows[ROW["plane_wave_depth_mm"]]
+    assert d3.status == "WARN"
+    assert abs(d3.value - 50.0) < 1.0
+    assert "focused at 50 mm" in d3.note and "signal-to-noise 2.1" in d3.note
+    assert report.rows[ROW["plane_wave_arrival_us"]].value is None
+    assert report.depth_cal_plane_wave["z_focus_mm"] == 50.0
+    assert report.overall_pass is True            # WARN doesn't fail
+
+
+def test_focused_fallback_out_of_range_still_fails():
+    from openlifu_verification.characterization import ROW
+    tank = DryRunTank(rng_seed=0)
+    _weak_plane_wave(tank, focused_depth=44.0)
+    ask = _Ask(True)
+    report = _chz(tank).run(skip_2d=True, skip_frequency=True,
+                            skip_voltage=True, on_setup_failure=ask)
+    (failure,) = ask.calls
+    assert failure.problem.startswith("Hydrophone depth is out of range")
+    assert report.rows[ROW["plane_wave_depth_mm"]].status == "FAIL"
+    assert report.overall_pass is False
+
+
+def test_plane_and_focused_not_found_asks_operator():
+    tank = DryRunTank(rng_seed=0)
+    _weak_plane_wave(tank, focused_ok=False)
+    tank.find_peak = _fail_if_called
+    ask = _Ask(False)
+    from openlifu_verification import OperatorStoppedRun
+    with pytest.raises(OperatorStoppedRun):
+        _chz(tank).run(skip_2d=True, skip_frequency=True, skip_voltage=True,
+                       on_setup_failure=ask)
+    (failure,) = ask.calls
+    assert "plane wave and a pulse focused at 50 mm both failed" in failure.problem
+
+
+def test_plane_and_focused_not_found_halts_without_handler():
+    tank = DryRunTank(rng_seed=0)
+    _weak_plane_wave(tank, focused_ok=False)
+    tank.find_peak = _fail_if_called
+    with pytest.raises(RunHalted, match="both failed to detect"):
+        _run(_chz(tank))
+
+
+def test_other_errors_do_not_try_the_fallback():
+    """A hardware / capture error is not "no signal": no focused retry."""
+    tank = DryRunTank(rng_seed=0)
+    calls = []
+
+    def boom(**kw):
+        calls.append(kw)
+        raise RuntimeError("Rapid-block capture timed out")
+    tank.calibrate_hydrophone_depth = boom
+    tank.find_peak = _fail_if_called
+    with pytest.raises(RunHalted, match="timed out"):
+        _run(_chz(tank))
+    assert len(calls) == 1

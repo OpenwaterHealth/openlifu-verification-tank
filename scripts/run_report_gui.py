@@ -424,6 +424,9 @@ def _build_qss(p: Palette) -> str:
     QLabel#gateGlyph[state="fail"] {{
         color: {p.danger};
     }}
+    QLabel#gateGlyph[state="warn"] {{
+        color: {p.warning};
+    }}
     QLabel#gateGlyph[state="skip"] {{
         color: {p.muted};
     }}
@@ -444,6 +447,9 @@ def _build_qss(p: Palette) -> str:
     }}
     QLabel#gateLabel[state="fail"] {{
         color: {p.danger};
+    }}
+    QLabel#gateLabel[state="warn"] {{
+        color: {p.text};
     }}
     QLabel#gateLabel[state="skip"] {{
         color: {p.muted};
@@ -474,6 +480,9 @@ def _build_qss(p: Palette) -> str:
     }}
     QLabel#gradeSquare[status="FAIL"] {{
         background-color: {p.danger};
+    }}
+    QLabel#gradeSquare[status="WARN"] {{
+        background-color: {p.warning};
     }}
     """
 
@@ -2043,7 +2052,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mK]")
 # the three focused-pulse gates) are graded from the same measurement
 # and resolve together.
 _GATE_VERDICT_RE_TEMPLATE = (
-    r"\[grade\]\s+{name}\s+(?:->|\u2192)\s+(PASS|FAIL|SKIP)"
+    r"\[grade\]\s+{name}\s+(?:->|\u2192)\s+(PASS|WARN|FAIL|SKIP)"
 )
 
 
@@ -2166,6 +2175,7 @@ class _GateRow(QWidget):
     PASS = "pass"
     FAIL = "fail"
     SKIP = "skip"
+    WARN = "warn"
 
     _CHECK_FRAMES = ("\u25d0", "\u25d3", "\u25d1", "\u25d2")
 
@@ -2212,7 +2222,7 @@ class _GateRow(QWidget):
         PASS -> PENDING) are ignored so a late-arriving log line
         can't undo a verdict."""
         rank = {self.PENDING: 0, self.CHECKING: 1,
-                self.PASS: 2, self.FAIL: 2, self.SKIP: 2}
+                self.PASS: 2, self.FAIL: 2, self.SKIP: 2, self.WARN: 2}
         if rank[state] < rank[self._state]:
             return
         self._state = state
@@ -2224,7 +2234,7 @@ class _GateRow(QWidget):
             self._frame = 0
             self.glyph.setText(self._CHECK_FRAMES[0])
             self._timer.start()
-        elif state in (self.PASS, self.FAIL):
+        elif state in (self.PASS, self.FAIL, self.WARN):
             self._timer.stop()
             self.glyph.setText("\u25cf")
         elif state == self.SKIP:
@@ -2297,6 +2307,9 @@ class AcceptanceTracker(QWidget):
                 if gate["combine"] == "first":
                     if verdict == "SKIP":
                         row.set_state(_GateRow.SKIP)
+                    elif verdict == "WARN":
+                        # Passed, but by a fallback: amber, not red.
+                        row.set_state(_GateRow.WARN)
                     else:
                         row.set_state(
                             _GateRow.PASS if as_bool else _GateRow.FAIL
@@ -2548,8 +2561,12 @@ class ResultDialog(QDialog):
             square.setToolTip(self._row_tooltip(row))
             squares_row.addWidget(square)
         squares_row.addStretch(1)
-        n_pass = sum(r.status == "PASS" for r in result.graded_rows)
+        n_warn = sum(r.status == "WARN" for r in result.graded_rows)
+        n_pass = sum(r.status == "PASS" for r in result.graded_rows) + n_warn
         summary = f"{n_pass}/{len(result.graded_rows)} tests passed"
+        if n_warn:
+            summary += (f" ({n_warn} with a warning)" if n_warn == 1
+                        else f" ({n_warn} with warnings)")
         if result.elapsed_s is not None:
             summary += f" in {_fmt_duration(result.elapsed_s)}"
         summary_label = QLabel(summary)
