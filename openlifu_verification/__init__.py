@@ -12,9 +12,11 @@ from .scan_config import ScanConfig
 from .characterization import (
     Characterization,
     FirmwareOutOfDate,
+    OperatorStoppedRun,
     ReportRow,
     RunAborted,
     RunHalted,
+    SetupFailure,
     TestReport,
 )
 from .dry_run import DryRunTank
@@ -64,6 +66,8 @@ __all__ = [
     "RunAborted",
     "RunHalted",
     "FirmwareOutOfDate",
+    "OperatorStoppedRun",
+    "SetupFailure",
     "TestReport",
     "ReportRow",
     "DryRunTank",
