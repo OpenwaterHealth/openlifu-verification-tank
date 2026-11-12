@@ -330,7 +330,7 @@ module passes only if every graded check passes.
 | Lateral / elevation 1-D peak offset (D.8, D.10) | 1-D peak within 1.0 mm (155 kHz) or 0.5 mm (400 kHz) of the 2-D peak |
 | Axial 1-D peak offset (D.12) | Axial peak between −5 and +10 mm of the hydrophone depth |
 | Focused pulse PNP (D.14) | PNP at the peak ≥ 0.41 MPa (155 kHz) or 0.66 MPa (400 kHz) at 50 V (scaled to the drive voltage) |
-| Focused hydrophone depth (D.16) | Focused-pulse depth within 50 mm ± 5 % |
+| Focused hydrophone depth (D.16) | Focused-pulse depth within 50 mm ± 5 % (fails if the focused arrival can't be found) |
 | Frequency response (E.13) | PNP at the nominal frequency within 40 % (155 kHz) or 15 % (400 kHz) of the sweep's peak |
 | Voltage linearity (F.8) | Linear fit of PNP vs. voltage with R² ≥ 0.99 |
 

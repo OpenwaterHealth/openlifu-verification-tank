@@ -798,14 +798,20 @@ class Characterization:
                 z_focus_mm=z_focus_mm,
                 store=False,  # keep the plane-wave depth as the truth
                 save=False,
+                # Same detection as the plane wave: near the expected
+                # depth, clearly above the noise (else DepthNotFound).
+                expected_mm=z_focus_mm,
+                min_snr=float(self.DEPTH_CAL_MIN_SNR),
             )
             self.report.depth_cal_focused = depth_result
             arrival_us = float(depth_result["arrival_us"])
             axial_depth_mm = float(depth_result["distance_mm"])
             max_delay_us = float(depth_result["max_delay_us"])
-        except Exception as e:  # noqa: BLE001 - dry-run safety
+            focused_depth_error = None
+        except Exception as e:  # noqa: BLE001 - graded as a D.16 failure
             # The long-pulse PNP capture overlaps transmit RF pickup, so it
-            # can't stand in for the focused-arrival transmit.
+            # can't stand in for the focused-arrival transmit. The run
+            # goes on; D.16 is graded FAIL (see _grade_peak_depth).
             logger.warning(
                 "Focused depth calibration failed (%s); focused arrival "
                 "and depth are unavailable.", e,
@@ -813,6 +819,7 @@ class Characterization:
             arrival_us = None
             axial_depth_mm = float("nan")
             max_delay_us = 0.0
+            focused_depth_error = str(e).rstrip(".")
         finally:
             # calibrate_hydrophone_depth leaves the LIFU armed with the
             # short-burst / high-voltage / 32-pulse settings. Restore
@@ -841,6 +848,7 @@ class Characterization:
             "peak_z_focus_mm": z_focus_mm,
             "focused_depth_mm": axial_depth_mm,
             "focused_arrival_us": arrival_us,
+            "focused_depth_error": focused_depth_error,
             # Legacy aliases kept so any external consumer (or older
             # notebook / script) that reads the ``waveform_at_peak``
             # dict still finds the same values under their previous
@@ -1527,19 +1535,29 @@ class Characterization:
 
         Passes when
         ``|depth - nominal_mm(freq)| <= focused_tol_pct% * nominal_mm(freq)``.
-        Returns the boolean verdict (or ``None`` if
-        ``measure_waveform_at_peak`` has not been called yet or the
-        arrival could not be picked).
+        Returns the boolean verdict, or ``None`` if
+        ``measure_waveform_at_peak`` has not been called yet. A focused
+        arrival that could not be found grades FAIL: the depth was not
+        verified, so the check must not drop out of the verdict.
         """
         wf = self.report.waveform_at_peak
         if not wf:
             return None
-        depth = wf.get("focused_depth_mm", wf.get("axial_depth_mm"))
-        if depth is None or not np.isfinite(depth):
-            return None
         crit = self.criteria.peak_depth
         nominal = float(crit.nominal_for(self.frequency_kHz))
         tol_mm = nominal * float(crit.focused_tol_pct) / 100.0
+        depth = wf.get("focused_depth_mm", wf.get("axial_depth_mm"))
+        if depth is None or not np.isfinite(depth):
+            error = wf.get("focused_depth_error")
+            if not error:
+                return None
+            note = f"focused arrival not found: {error}"
+            if ROW["focused_depth_mm"] in self.report.rows:
+                self.report.grade_row(ROW["focused_depth_mm"], passed=False,
+                                      threshold=f"{nominal:.1f} \u00b1 {tol_mm:.2f} mm",
+                                      note=note)
+            logger.info("[grade] Peak depth \u2192 FAIL (%s)", note)
+            return False
         passed = abs(float(depth) - nominal) <= tol_mm
         threshold = f"{nominal:.1f} \u00b1 {tol_mm:.2f} mm"
         note = (f"depth = {float(depth):.3f} mm "

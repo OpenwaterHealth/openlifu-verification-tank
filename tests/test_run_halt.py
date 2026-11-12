@@ -379,3 +379,49 @@ def test_other_errors_do_not_try_the_fallback():
     with pytest.raises(RunHalted, match="timed out"):
         _run(_chz(tank))
     assert len(calls) == 1
+
+
+# ----------------------------------------------------------------------
+# D.16: the focused-depth measurement uses the same detection and an
+# unmeasured focused depth fails instead of dropping out of the verdict
+# ----------------------------------------------------------------------
+def _focused_depth_calls(tank, *, found=True):
+    """Plane wave runs normally; the focused-depth measurement (store=False,
+    at the peak) raises DepthNotFound unless ``found``."""
+    from openlifu_verification import DepthNotFound
+    real = tank.calibrate_hydrophone_depth
+    calls = []
+
+    def cal(**kw):
+        calls.append(kw)
+        if kw.get("z_focus_mm") is not None and not found:
+            raise DepthNotFound("No hydrophone signal above the noise near 50 mm "
+                                "(signal-to-noise 3.0, need 6)")
+        return real(**kw)
+    tank.calibrate_hydrophone_depth = cal
+    return calls
+
+
+def test_focused_depth_measurement_uses_detection():
+    tank = DryRunTank(rng_seed=0)
+    calls = _focused_depth_calls(tank)
+    report = _chz(tank).run(skip_2d=True, skip_frequency=True, skip_voltage=True)
+    focused = [kw for kw in calls if kw.get("z_focus_mm") is not None]
+    assert len(focused) == 1
+    assert focused[0]["store"] is False
+    assert focused[0]["min_snr"] == 6.0
+    assert focused[0]["expected_mm"] == focused[0]["z_focus_mm"]
+    from openlifu_verification.characterization import ROW
+    assert report.rows[ROW["focused_depth_mm"]].status == "PASS"
+
+
+def test_focused_depth_not_found_fails_d16():
+    from openlifu_verification.characterization import ROW
+    tank = DryRunTank(rng_seed=0)
+    _focused_depth_calls(tank, found=False)
+    report = _chz(tank).run(skip_2d=True, skip_frequency=True, skip_voltage=True)
+    d16 = report.rows[ROW["focused_depth_mm"]]
+    assert d16.status == "FAIL"
+    assert d16.note.startswith("focused arrival not found: No hydrophone signal")
+    assert report.overall_pass is False            # no longer drops out
+    assert report.rows[ROW["plane_wave_depth_mm"]].status == "PASS"
