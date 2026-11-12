@@ -126,6 +126,10 @@ The `scripts/` directory contains ready-to-use measurement scripts:
 - **`find_peak.py`**: Automated focus optimization
 - **`plot_*.py`**: Visualization utilities for measurement data
 
+## User Manual
+
+Operators running transmit-module tests: see the **[User Manual](docs/user_manual.md)** (installation, station setup, running a test, results, error messages, troubleshooting).
+
 ## API Documentation
 
 Comprehensive API documentation is available in the `docs/` directory:
