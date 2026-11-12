@@ -16,7 +16,10 @@ same pipeline as :mod:`run_report` on a background thread while a
 Running dialog shows a live progress bar, the current phase label,
 and a mini terminal that mirrors the INFO log stream. The Running
 dialog's Abort button stops the run after the step in progress and
-returns to the launcher.
+returns to the launcher. If the plane-wave hydrophone depth
+calibration or the peak search fails, a dialog offers to continue at
+the nominal depth / focus (that step graded FAIL, the rest measured
+for diagnosis) or to abort back to the launcher.
 
 When the run completes, the result dialog offers "Write Data to
 Device" (PASS only), "Scan Another" (back to the launcher, with the
@@ -97,6 +100,7 @@ from openlifu_verification import (
     HardwareNotConnectedError,
     OperatorPrefs,
     ScanConfig,
+    SetupFailure,
     VerificationTank,
 )
 from openlifu_verification.acceptance import SUPPORTED_FREQUENCIES_KHZ
@@ -701,11 +705,16 @@ class _RunSignals(QObject):
 
     finished = Signal(object, bool)  # (RunResult, can_write)
     failed = Signal(str)       # emits traceback string
-    #: Emitted when the run stopped because the operator pressed Abort.
-    aborted = Signal()
-    #: Emitted when the run stopped before the report: depth
-    #: calibration / peak search failed, or the firmware is too old.
-    #: Payload is (operator-facing reason, RunResult.halted_kind).
+    #: Emitted when the run stopped because the operator pressed Abort
+    #: (False) or chose to stop when asked (True: no further notice).
+    aborted = Signal(bool)
+    #: Emitted when the depth calibration or peak search failed; the
+    #: worker waits for :meth:`_WorkerThread.answer_setup_failure`.
+    #: Payload is the :class:`SetupFailure`.
+    setup_failed = Signal(object)
+    #: Emitted when the run stopped before the report (firmware too
+    #: old, console HWID mismatch, ...). Payload is (operator-facing
+    #: reason, RunResult.halted_kind).
     halted = Signal(str, str)
     #: Emitted after a device write requested from the result dialog.
     write_done = Signal(bool)
@@ -733,6 +742,7 @@ class _WorkerThread(QThread):
         self._signals = signals
         self._abort_event = threading.Event()
         self._commands: queue.Queue[str] = queue.Queue()
+        self._setup_answers: queue.Queue[bool] = queue.Queue()
         self._completed = False
 
     # --- Called from the GUI thread ---
@@ -745,7 +755,15 @@ class _WorkerThread(QThread):
     def release(self) -> None:
         self._commands.put("close")
 
+    def answer_setup_failure(self, continue_run: bool) -> None:
+        self._setup_answers.put(bool(continue_run))
+
     # --- Worker thread ---
+    def _on_setup_failure(self, failure) -> bool:
+        """Ask the operator (on the GUI thread) whether to continue."""
+        self._signals.setup_failed.emit(failure)
+        return self._setup_answers.get()
+
     def _on_complete(self, result, write_fn) -> None:
         self._completed = True
         self._signals.finished.emit(result, write_fn is not None)
@@ -768,9 +786,10 @@ class _WorkerThread(QThread):
                 abort_event=self._abort_event,
                 on_complete=self._on_complete,
                 prefs=self._prefs,
+                on_setup_failure=self._on_setup_failure,
             )
             if result.aborted:
-                self._signals.aborted.emit()
+                self._signals.aborted.emit(result.abort_acknowledged)
             elif result.halted_reason:
                 self._signals.halted.emit(result.halted_reason,
                                           result.halted_kind or "setup")
@@ -2869,6 +2888,32 @@ def main(argv=None) -> int:
             return exit_code
 
 
+def _ask_continue_after_setup_failure(parent: Optional[QWidget],
+                                      failure: SetupFailure) -> bool:
+    """Modal: the depth calibration or peak search failed. Returns
+    True to continue at the nominal position, False to stop and go
+    back to the launcher."""
+    box = QMessageBox(QMessageBox.Icon.Warning, failure.title,
+                      failure.problem.rstrip(".") + ".", parent=parent)
+    box.setInformativeText(
+        "Check the hydrophone and transducer connections, and make sure "
+        "the acoustic path between the transducer and the hydrophone is "
+        "clear and free of bubbles.\n\n"
+        f"Continue: run the remaining measurements with the hydrophone at "
+        f"{failure.fallback}. The {failure.graded} is graded FAIL, so the "
+        "device will fail, but the report keeps the other measurements "
+        "for diagnosis.\n\n"
+        "Abort: stop now and return to the start screen (no report).")
+    continue_button = box.addButton(failure.continue_label,
+                                    QMessageBox.ButtonRole.AcceptRole)
+    abort_button = box.addButton("Abort Scan",
+                                 QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(abort_button)
+    box.setEscapeButton(abort_button)
+    box.exec()
+    return box.clickedButton() is continue_button
+
+
 def _show_firmware_out_of_date(reason: str) -> None:
     """Explain that the device firmware must be updated before the
     test can run. ``reason`` is :class:`FirmwareOutOfDate`'s message:
@@ -2917,16 +2962,20 @@ def _run_once(args: argparse.Namespace, scan_config: ScanConfig,
     signals = _RunSignals()
     outcome: dict = {"kind": None, "result": None, "can_write": False,
                      "tb": None, "hw": None, "reason": None,
-                     "halted_kind": None}
+                     "acknowledged": False, "halted_kind": None}
     done = QDialog.DialogCode.Accepted
 
     def _on_finished(res, can_write):
         outcome.update(kind="finished", result=res, can_write=can_write)
         running.done(done)
 
-    def _on_aborted():
-        outcome["kind"] = "aborted"
+    def _on_aborted(acknowledged):
+        outcome.update(kind="aborted", acknowledged=acknowledged)
         running.done(done)
+
+    def _on_setup_failed(failure):
+        worker.answer_setup_failure(
+            _ask_continue_after_setup_failure(running, failure))
 
     def _on_halted(reason, halted_kind):
         outcome.update(kind="halted", reason=reason, halted_kind=halted_kind)
@@ -2943,6 +2992,7 @@ def _run_once(args: argparse.Namespace, scan_config: ScanConfig,
     queued = Qt.ConnectionType.QueuedConnection
     signals.finished.connect(_on_finished, queued)
     signals.aborted.connect(_on_aborted, queued)
+    signals.setup_failed.connect(_on_setup_failed, queued)
     signals.halted.connect(_on_halted, queued)
     signals.failed.connect(_on_failed, queued)
     signals.hardware_disconnected.connect(_on_hardware_disconnected, queued)
@@ -2965,6 +3015,9 @@ def _run_once(args: argparse.Namespace, scan_config: ScanConfig,
             return dlg.choice, result.exit_code
 
         worker.wait()
+
+        if outcome["kind"] == "aborted" and outcome["acknowledged"]:
+            return "another", 130  # the operator chose to stop
 
         if outcome["kind"] == "aborted":
             QMessageBox.information(

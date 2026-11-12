@@ -88,6 +88,81 @@ def test_nonstandard_run_is_marked_and_cannot_write(tmp_path):
     assert ("Non-standard setting", "scope.n_averages = 1 (standard 3)") in rows
 
 
+def _failing_depth_tank(monkeypatch):
+    real = run_report.DryRunTank
+
+    def tank(**kw):
+        t = real(**kw)
+
+        def boom(**_k):
+            raise RuntimeError("no arrival found")
+        t.calibrate_hydrophone_depth = boom
+        return t
+    monkeypatch.setattr(run_report, "DryRunTank", tank)
+
+
+def test_depth_failure_continue_writes_failing_report(tmp_path, monkeypatch):
+    _failing_depth_tank(monkeypatch)
+    asked = []
+    result = run_report.run(
+        _args(tmp_path),
+        on_setup_failure=lambda failure: asked.append(failure.step) or True)
+    assert asked == ["depth"]
+    assert result.run_dir is not None and not result.passed
+    assert result.files.get("xlsx") and result.files.get("pdf")
+    depth = next(r for r in result.graded_rows
+                 if r.label == "Plane-Wave Hydrophone Depth")
+    assert depth.status == "FAIL"
+
+
+def test_depth_failure_stop_is_acknowledged_abort(tmp_path, monkeypatch):
+    _failing_depth_tank(monkeypatch)
+    result = run_report.run(_args(tmp_path),
+                            on_setup_failure=lambda _failure: False)
+    assert result.aborted and result.abort_acknowledged
+    assert result.exit_code == 130 and result.run_dir is None
+
+
+def test_depth_failure_without_prompt_still_halts(tmp_path, monkeypatch):
+    _failing_depth_tank(monkeypatch)
+    result = run_report.run(_args(tmp_path))  # --no-prompt: no handler
+    assert result.halted_reason.startswith(
+        "Plane-wave depth calibration failed")
+
+
+def test_depth_failure_cli_prompt(tmp_path, monkeypatch):
+    _failing_depth_tank(monkeypatch)
+    args = _args(tmp_path)
+    args.no_prompt = False
+    args.no_start_prompt = False  # --dry-run skips the start prompt anyway
+    answers = iter(["n"])
+    monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
+    result = run_report.run(args, prefs=run_report.OperatorPrefs(
+        tester_name="t", test_app_version="t", hydrophone_sn="t",
+        txm_sn="WLM44Q00001", console_sn="t"))
+    assert result.aborted and result.abort_acknowledged
+
+
+def test_peak_failure_continue_writes_failing_report(tmp_path, monkeypatch):
+    real = run_report.DryRunTank
+
+    def tank(**kw):
+        t = real(**kw)
+
+        def boom(**_k):
+            raise RuntimeError("no signal above noise")
+        t.find_peak = boom
+        return t
+    monkeypatch.setattr(run_report, "DryRunTank", tank)
+    result = run_report.run(_args(tmp_path),
+                            on_setup_failure=lambda failure: True)
+    assert result.run_dir is not None and not result.passed
+    assert result.files.get("xlsx") and result.files.get("pdf")
+    peak = [r for r in result.graded_rows
+            if r.label in ("Hydrophone X Position", "Hydrophone Y Position")]
+    assert [r.status for r in peak] == ["FAIL", "FAIL"]
+
+
 def test_outdated_firmware_result_is_marked(tmp_path, monkeypatch):
     real = run_report.DryRunTank
 

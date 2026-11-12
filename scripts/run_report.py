@@ -45,6 +45,7 @@ from openlifu_verification import (
     FirmwareOutOfDate,
     Hydrophone,
     OperatorPrefs,
+    OperatorStoppedRun,
     RunAborted,
     RunHalted,
     ScanConfig,
@@ -138,6 +139,21 @@ def _write_config_to_device(ver, config_path: Path, *, module: int = 0) -> bool:
 
     logger.error("TX device has no write_config/write_config_json method.")
     return False
+
+
+def _ask_continue_after_setup_failure(
+        failure: characterization.SetupFailure) -> bool:
+    """Terminal version of the GUI's setup-failure question."""
+    print(f"\n{failure.title}: {failure.problem}.\n"
+          "Check the hydrophone and transducer connections and that the "
+          "acoustic path is clear and free of bubbles.\n"
+          f"Continuing runs the remaining measurements at "
+          f"{failure.fallback} for diagnosis; the {failure.graded} is "
+          "graded FAIL, so the device will fail.", file=sys.stderr)
+    try:
+        return _prompt_yes_no(f"Continue at {failure.fallback}?")
+    except (KeyboardInterrupt, EOFError):
+        return False
 
 
 def _prompt_yes_no(prompt: str, *, default: bool = False) -> bool:
@@ -244,7 +260,10 @@ class RunResult:
     (``"xlsx"``, ``"pdf"``, ``"device_config"``) to the corresponding
     Paths. ``exit_code`` is what ``main`` returns to the OS: 0 on
     pass, 1 on fail, 130 on user abort, 2 on unexpected error.
-    ``aborted`` is set when the run was stopped via ``abort_event``.
+    ``aborted`` is set when the run was stopped via ``abort_event``,
+    or when the operator chose to stop after a failed hydrophone depth
+    calibration (then ``abort_acknowledged`` is set too: the operator
+    already knows why).
     ``halted_reason`` is set (exit code 1, no report) when the depth
     calibration or peak search failed and the run was stopped;
     ``halted_kind`` is ``"firmware"`` when it stopped because the TXM
@@ -261,6 +280,7 @@ class RunResult:
     exit_code: int = 1
     device_write_ok: Optional[bool] = None
     aborted: bool = False
+    abort_acknowledged: bool = False
     halted_reason: Optional[str] = None
     halted_kind: Optional[str] = None
     nonstandard_reasons: list[str] = field(default_factory=list)
@@ -297,7 +317,9 @@ OnComplete = Callable[["RunResult", Optional[Callable[[], bool]]], None]
 def run(args: argparse.Namespace, *,
         abort_event: Optional[threading.Event] = None,
         on_complete: Optional[OnComplete] = None,
-        prefs: Optional[OperatorPrefs] = None) -> RunResult:
+        prefs: Optional[OperatorPrefs] = None,
+        on_setup_failure: Optional[characterization.SetupFailureHandler] = None,
+        ) -> RunResult:
     """Execute the report pipeline with parsed ``args``.
 
     Split out of :func:`main` so a GUI launcher can call the same
@@ -317,6 +339,12 @@ def run(args: argparse.Namespace, *,
         prefs: Operator / serial-number inputs collected by the
             caller. When ``None``, they are loaded from ``--prefs``
             and (unless ``--no-prompt``) confirmed interactively.
+        on_setup_failure: Asked whether to continue at the nominal
+            position when the plane-wave depth calibration or the peak
+            search fails (see :meth:`Characterization.run`). When ``None``,
+            the operator is asked in the terminal unless
+            ``--no-prompt`` / ``--no-start-prompt`` is set, in which
+            case the run halts.
 
     Every log record emitted during the run is also saved to
     ``<run_dir>/<stem>_console.log`` (buffered in memory until the
@@ -329,7 +357,8 @@ def run(args: argparse.Namespace, *,
     root = logging.getLogger()
     root.addHandler(console_log)
     try:
-        return _run(args, abort_event, on_complete, console_log, prefs)
+        return _run(args, abort_event, on_complete, on_setup_failure,
+                    console_log, prefs)
     finally:
         root.removeHandler(console_log)
         target = console_log.target
@@ -341,6 +370,7 @@ def run(args: argparse.Namespace, *,
 def _run(args: argparse.Namespace,
          abort_event: Optional[threading.Event],
          on_complete: Optional[OnComplete],
+         on_setup_failure: Optional[characterization.SetupFailureHandler],
          console_log: logging.handlers.MemoryHandler,
          prefs: Optional[OperatorPrefs]) -> RunResult:
     _configure_root_logger(args.log_file)
@@ -465,6 +495,9 @@ def _run(args: argparse.Namespace,
             expected_console_hwid=None if args.dry_run else args.console_hwid,
         )
         chz.report.nonstandard_reasons = list(result.nonstandard_reasons)
+        if (on_setup_failure is None
+                and not (args.no_prompt or args.no_start_prompt)):
+            on_setup_failure = _ask_continue_after_setup_failure
         t_start = time.perf_counter()
         try:
             report = chz.run(
@@ -472,11 +505,13 @@ def _run(args: argparse.Namespace,
                 skip_frequency=args.skip_frequency,
                 skip_voltage=args.skip_voltage,
                 abort_event=abort_event,
+                on_setup_failure=on_setup_failure,
             )
-        except RunAborted:
+        except RunAborted as e:
             logger.warning("Run aborted by operator; no report written.")
             result.exit_code = 130
             result.aborted = True
+            result.abort_acknowledged = isinstance(e, OperatorStoppedRun)
             return result
         except RunHalted as e:
             logger.error("Run halted: %s No report written.",
