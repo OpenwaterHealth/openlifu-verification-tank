@@ -414,6 +414,10 @@ class Characterization:
         self.prefs = prefs
         self.criteria = criteria or AcceptanceCriteria()
         self.scan_config = scan_config or ScanConfig()
+        # The tank owns the mV -> Pa conversion; tell it which frequency
+        # convention this run's config asks for.
+        self.ver.hydrophone_cal_at_realized_frequency = bool(
+            self.scan_config.hydrophone_cal_at_realized_frequency)
         self.output_dir = Path(output_dir) if output_dir is not None else None
         self.frequency_kHz = float(frequency_kHz)
         if voltage_V is None:
@@ -908,6 +912,23 @@ class Characterization:
             "pnp_std_MPa": pnp_std,
             "voltage_V": self.voltage_V,
         }
+        meta = getattr(result, "metadata", None) or {}
+        if "realized_freq_kHz" in meta and np.size(meta["realized_freq_kHz"]) == len(freqs):
+            # Drive tone actually emitted per point (TX period quantized
+            # to whole clock samples), and the frequency the hydrophone
+            # calibration was read at. Informational: device_config is
+            # still keyed by the commanded frequency.
+            self.report.freq_response["realized_frequencies_kHz"] = np.asarray(
+                meta["realized_freq_kHz"], dtype=float)
+            self.report.freq_response["measured_frequencies_kHz"] = np.asarray(
+                meta.get("measured_freq_kHz", np.full(len(freqs), np.nan)), dtype=float)
+            logger.info(
+                "Frequency sweep drive tones (commanded -> realized kHz): %s; "
+                "hydrophone cal read at the %s frequency",
+                ", ".join(f"{c:g}->{r:.2f}" for c, r in
+                          zip(freqs, meta["realized_freq_kHz"])),
+                "realized" if meta.get("hydrophone_cal_at_realized_frequency")
+                else "commanded")
         self.report.set_row("E.1", "Voltage Rail Setting", self.voltage_V, unit="V (+/-)")
         # E.2.. : informational per-frequency PNP values (no grading).
         for i, (f, p) in enumerate(zip(freqs, pnp), start=2):
@@ -1240,6 +1261,17 @@ class Characterization:
                     float(pos[0]), float(pos[1]), float(pos[2]), e,
                 )
 
+    def _hydrophone_cal_hz(self) -> float:
+        """Frequency (Hz) the tank reads the hydrophone calibration at
+        for the nominal pulse (commanded, or realized when configured)."""
+        fn = getattr(self.ver, "hydrophone_cal_frequency_hz", None)
+        if callable(fn):
+            try:
+                return float(fn(self.frequency_kHz))
+            except Exception:
+                pass
+        return self.frequency_kHz * 1e3
+
     def _trace_peak_mV(self, meas: dict) -> Optional[float]:
         """Single-sided peak of a capture in scope mV, or ``None`` if a
         Pa trace can't be converted back (no hydrophone calibration)."""
@@ -1250,7 +1282,7 @@ class Characterization:
         if hyd is None:
             return None
         try:
-            pa_per_v = float(hyd.get_frequency_response(self.frequency_kHz * 1e3))
+            pa_per_v = float(hyd.get_frequency_response(self._hydrophone_cal_hz()))
         except Exception:
             return None
         if pa_per_v <= 0:
@@ -1308,7 +1340,7 @@ class Characterization:
         if hyd is not None:
             try:
                 pa_per_v = float(hyd.get_frequency_response(
-                    self.frequency_kHz * 1e3))
+                    self._hydrophone_cal_hz()))
                 if pa_per_v <= 0:
                     pa_per_v = None
             except Exception:

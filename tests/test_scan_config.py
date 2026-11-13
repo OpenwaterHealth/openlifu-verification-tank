@@ -41,6 +41,7 @@ def test_standard_configuration_is_pinned():
     }
     assert d["by_freq_kHz"] == {"155": _STANDARD_PLAN, "400": _STANDARD_PLAN}
     assert d["sos_water_m_per_s"] == 1500.0
+    assert d["hydrophone_cal_at_realized_frequency"] is False
     assert d["acceptance"] == asdict(AcceptanceCriteria())
     assert ScanConfig().differences_from_standard() == []
 
