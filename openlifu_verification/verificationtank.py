@@ -14,6 +14,8 @@ from .scan_results import ScanResult
 from .hydrophone import Hydrophone
 from .setup_data import SetupData
 from .pulse_align import align_pulse_traces
+from .drive_frequency import (DEFAULT_BF_CLK_HZ, estimate_tone_frequency,
+                              realized_frequency_hz)
 from .pnp import clean_pnp_window_us, emitted_duration_us, windowed_pnp
 
 from openlifu_sdk.io import LIFUInterface
@@ -225,6 +227,7 @@ class VerificationTank:
                  hydrophone_position=(0.0, 0.0, 50.0),
                  calibration_path=SETUP_DATA_CALIBRATION,
                  use_calibration=True,
+                 hydrophone_cal_at_realized_frequency=False,
                  system_transmit_delay_us=None,
                  setup_data=None):
         # Setup data folder (transducer pinmaps, hydrophone state and
@@ -270,6 +273,12 @@ class VerificationTank:
         # scope volts. Useful when the operator wants to see the raw
         # signal even though a calibration is available.
         self.use_calibration = bool(use_calibration)
+        # EXPERIMENTAL: when True, the mV -> Pa conversion reads the
+        # hydrophone calibration at the drive frequency the TX hardware
+        # actually emits (period quantized to whole clock samples) rather
+        # than the commanded one. See hydrophone_cal_frequency_hz().
+        self.hydrophone_cal_at_realized_frequency = bool(
+            hydrophone_cal_at_realized_frequency)
         # Electrical delay between trigger and ultrasound emission is
         # looked up per active TX frequency (see the
         # ``system_transmit_delay_us`` property) unless overridden here.
@@ -290,6 +299,35 @@ class VerificationTank:
         nearest = min(SYSTEM_TRANSMIT_DELAY_US_BY_FREQ_KHZ,
                       key=lambda f: abs(f - self._tx_frequency_khz))
         return SYSTEM_TRANSMIT_DELAY_US_BY_FREQ_KHZ[nearest]
+
+    def realized_frequency_hz(self, frequency_kHz):
+        """Drive tone (Hz) the TX emits for a commanded ``frequency_kHz``.
+
+        Scalar or array. Uses the connected TX registers' beamformer
+        clock when available, else the SDK default (10 MHz).
+        """
+        bf_clk = DEFAULT_BF_CLK_HZ
+        try:
+            bf_clk = float(self.lifu.txdevice.tx_registers.bf_clk)
+        except Exception:
+            pass
+        if not np.isfinite(bf_clk) or bf_clk <= 0:
+            bf_clk = DEFAULT_BF_CLK_HZ
+        return realized_frequency_hz(np.asarray(frequency_kHz, dtype=float) * 1e3,
+                                     bf_clk_hz=bf_clk)
+
+    def hydrophone_cal_frequency_hz(self, frequency_kHz):
+        """Frequency (Hz) at which to read the hydrophone calibration for
+        a pulse commanded at ``frequency_kHz`` (scalar or array).
+
+        The commanded frequency by default (historical / ONDA
+        convention); the realized drive tone when
+        :attr:`hydrophone_cal_at_realized_frequency` is set.
+        """
+        if self.hydrophone_cal_at_realized_frequency:
+            return self.realized_frequency_hz(frequency_kHz)
+        f = np.asarray(frequency_kHz, dtype=float) * 1e3
+        return float(f) if f.ndim == 0 else f
 
     def __enter__(self):
         """
@@ -1922,7 +1960,7 @@ class VerificationTank:
         if traces is None:
             raise RuntimeError(f"No points captured in scan_1d(dim={dim!r}).")
 
-        traces, units = self._convert_to_pressure(traces, self.frequency * 1e3)
+        traces, units = self._convert_to_pressure(traces, self.hydrophone_cal_frequency_hz(self.frequency))
         traces = traces.reshape(num, -1)
         # Per-repeat traces (NaN-padded where a repeat wasn't captured)
         # so per-point PNP can be the median over repeats, with spread.
@@ -1931,7 +1969,7 @@ class VerificationTank:
             rep = a.pop("repeats", None)
             if rep is not None:
                 repeats[i, :rep.shape[0]] = rep
-        repeats, _ = self._convert_to_pressure(repeats, self.frequency * 1e3)
+        repeats, _ = self._convert_to_pressure(repeats, self.hydrophone_cal_frequency_hz(self.frequency))
 
         return ScanResult(
             scan_type="1d",
@@ -2069,7 +2107,7 @@ class VerificationTank:
         if traces is None:
             raise RuntimeError("No points captured in scan_lateral.")
 
-        traces, units = self._convert_to_pressure(traces, self.frequency * 1e3)
+        traces, units = self._convert_to_pressure(traces, self.hydrophone_cal_frequency_hz(self.frequency))
 
         if num_y > 1:
             traces = traces.reshape(num_y, num_x, -1)
@@ -2290,7 +2328,22 @@ class VerificationTank:
             raise RuntimeError("No points captured in scan_frequency.")
         # Per-point frequency lookup for pressure conversion.
         good_freqs_kHz = freqs[ok_mask] if not ok_mask.all() else freqs
-        traces, units = self._convert_to_pressure(traces, good_freqs_kHz * 1e3)
+        cal_freqs_hz = np.atleast_1d(self.hydrophone_cal_frequency_hz(good_freqs_kHz))
+        traces_mv = traces
+        traces, units = self._convert_to_pressure(traces, cal_freqs_hz)
+        realized_kHz = np.atleast_1d(self.realized_frequency_hz(good_freqs_kHz)) / 1e3
+        # Tone actually seen by the hydrophone, recorded for bench
+        # validation of the realized-frequency prediction (not used for
+        # the conversion: unreliable on short off-resonance bursts).
+        try:
+            measured_kHz = np.array([
+                estimate_tone_frequency(np.asarray(t_axis, dtype=float) * 1e-6, row,
+                                        float(fr) * 1e3, span=0.1,
+                                        burst_s=float(duration_usec) * 1e-6) / 1e3
+                for row, fr in zip(np.atleast_2d(traces_mv), realized_kHz)])
+        except Exception:  # diagnostic only; never fail the sweep
+            logger.exception("scan_frequency: tone-frequency estimate failed")
+            measured_kHz = np.full(realized_kHz.shape, np.nan)
         return ScanResult(
             scan_type="frequency",
             t=t_axis,
@@ -2308,6 +2361,11 @@ class VerificationTank:
                 "n_averages": int(n_averages),
                 "align": bool(align),
                 "averaging": averaging,
+                "realized_freq_kHz": realized_kHz,
+                "measured_freq_kHz": measured_kHz,
+                "hydrophone_cal_freq_kHz": cal_freqs_hz / 1e3,
+                "hydrophone_cal_at_realized_frequency": bool(
+                    self.hydrophone_cal_at_realized_frequency),
             },
         )
 
@@ -2372,7 +2430,7 @@ class VerificationTank:
         traces, t_axis, ok_mask = self._stack_hydrophone_traces(outputs)
         if traces is None:
             raise RuntimeError("No points captured in scan_voltage.")
-        traces, units = self._convert_to_pressure(traces, self.frequency * 1e3)
+        traces, units = self._convert_to_pressure(traces, self.hydrophone_cal_frequency_hz(self.frequency))
         return ScanResult(
             scan_type="voltage",
             t=t_axis,
@@ -2531,11 +2589,11 @@ class VerificationTank:
 
         if self.hydrophone is not None and self.use_calibration:
             trace = np.asarray(
-                self.hydrophone.mv_to_pa(trace_mv, self.frequency * 1e3),
+                self.hydrophone.mv_to_pa(trace_mv, self.hydrophone_cal_frequency_hz(self.frequency)),
                 dtype=float,
             )
             pulse_traces = np.asarray(
-                self.hydrophone.mv_to_pa(aligned, self.frequency * 1e3),
+                self.hydrophone.mv_to_pa(aligned, self.hydrophone_cal_frequency_hz(self.frequency)),
                 dtype=float,
             )
             units = "Pa"

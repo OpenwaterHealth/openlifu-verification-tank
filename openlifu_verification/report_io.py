@@ -991,6 +991,17 @@ def build_device_config(report: TestReport,
     module = dict(LIFU_MODULES[nominal])  # shallow copy
 
     # Compute sensitivity matrix.
+    #
+    # Keys (and the focal-gain lookup) stay at the *commanded* sweep
+    # frequency even though the TX emits a quantized tone (see
+    # drive_frequency.realized_frequency_hz). The table's consumer,
+    # openlifu.xdc.Element.get_sensitivity(f), interpolates it at the
+    # commanded pulse frequency and simulates the field at that
+    # frequency, so an entry keyed by commanded f with
+    # PNP / (gain(f) * V) reproduces the measured pressure for that
+    # command. The realized frequency matters only for reading the
+    # hydrophone calibration, which happens upstream in the tank
+    # (ScanConfig.hydrophone_cal_at_realized_frequency).
     sensitivity: list[tuple[int, int]] = []
     crosstalk = float(module["crosstalk_frac"])
     for f_kHz, pnp in zip(freqs_kHz, pnp_MPa):

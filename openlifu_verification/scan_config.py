@@ -157,6 +157,14 @@ class ScanConfig:
     #: ~22 \u00b0C; tweak here if the tank is at a different temperature
     #: or the medium changes.
     sos_water_m_per_s: float = 1500.0
+    #: EXPERIMENTAL. Look up the hydrophone calibration (V/Pa -> Pa) at
+    #: the drive frequency the TX hardware actually emits
+    #: (:func:`~openlifu_verification.drive_frequency.realized_frequency_hz`)
+    #: instead of the commanded one. ``False`` (standard) keeps the
+    #: historical convention shared with ONDA / openlifu-test-app
+    #: calibrations. Turning it on via an override file marks the run
+    #: non-standard, so it cannot write to the device.
+    hydrophone_cal_at_realized_frequency: bool = False
 
     # ------------------------------------------------------------------
     # Validation / overrides
@@ -251,7 +259,8 @@ def _apply_overrides(obj: Any, data: Any, where: str) -> None:
     """Recursively apply the partial dict ``data`` onto ``obj`` in place.
 
     ``obj`` is a dataclass or the ``by_freq_kHz`` dict. Leaves must be
-    numbers (or lists of numbers) matching the type of the default.
+    numbers (or lists of numbers), or booleans, matching the type of the
+    default.
     """
     if not isinstance(data, dict):
         raise ValueError(f"'{where}' must be a JSON object")
@@ -272,6 +281,10 @@ def _apply_overrides(obj: Any, data: Any, where: str) -> None:
         cur = getattr(obj, k)
         if is_dataclass(cur) or isinstance(cur, dict):
             _apply_overrides(cur, v, path)
+        elif isinstance(cur, bool):
+            if not isinstance(v, bool):
+                raise ValueError(f"'{path}' must be true or false")
+            setattr(obj, k, v)
         elif isinstance(cur, list):
             if not isinstance(v, list) or not v or not all(map(_is_number, v)):
                 raise ValueError(f"'{path}' must be a non-empty list of numbers")
