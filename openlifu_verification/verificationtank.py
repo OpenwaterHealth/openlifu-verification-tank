@@ -2955,11 +2955,19 @@ class VerificationTank:
         # times a hydrophone near ``expected_mm`` can be reached
         # (arrival = distance / SoS + max_delay).
         mm_per_us = SPEED_OF_SOUND * 1e-3
+        # An arrival within one carrier period of the window start is
+        # rejected below (an edge pick), and the picker needs the first
+        # crest (a quarter period after the onset) inside the window: pad
+        # the window by one period on both sides so neither margin eats
+        # into expected_mm +/- half (at 155 kHz a period is ~9.6 mm).
+        edge_us = 1000.0 / float(self.frequency)
         win_lo, win_hi = search_start_us, float(t_us[-1])
         if expected_mm is not None:
             half = float(search_half_width_mm)
-            win_lo = max(win_lo, (float(expected_mm) - half) / mm_per_us + max_delay_us)
-            win_hi = min(win_hi, (float(expected_mm) + half) / mm_per_us + max_delay_us)
+            win_lo = max(win_lo, (float(expected_mm) - half) / mm_per_us
+                         + max_delay_us - edge_us)
+            win_hi = min(win_hi, (float(expected_mm) + half) / mm_per_us
+                         + max_delay_us + edge_us)
         in_win = (t_us >= win_lo) & (t_us <= win_hi)
         # Noise: robust (MAD) RMS of the two pre-arrival quiet regions,
         # the baseline window and the stretch before the search window.
@@ -2967,8 +2975,10 @@ class VerificationTank:
         # transmit pickup) doesn't inflate the noise and hide a real
         # arrival.
         def _mad_rms(mask):
+            # Too few samples and the MAD estimate is noisy - and the
+            # lower of two noisy estimates is biased low.
             x = mean_trace[mask]
-            if x.size < 16:
+            if x.size < 32:
                 return None
             return float(1.4826 * np.median(np.abs(x - np.median(x))))
         estimates = [e for e in (_mad_rms(base_mask),
@@ -2993,6 +3003,11 @@ class VerificationTank:
         # noise too (DEPTH_CAL_PICK_NOISE_K x noise RMS), so a noise
         # crest before the arrival isn't taken for its onset.
         prominence = 0.05
+        walk_back_k = 4.0          # find_first_arrival_us default
+        if min_snr is not None:
+            # ...and walk back only over earlier lobes that clear the same
+            # margin, so the onset can't be extended into noise.
+            walk_back_k = max(walk_back_k, DEPTH_CAL_PICK_NOISE_K)
         if min_snr is not None and noise_rms_mv > 0:
             pos_peak = float(np.max(mean_trace[in_win], initial=0.0))
             if pos_peak > 0:
@@ -3003,6 +3018,7 @@ class VerificationTank:
             frequency_kHz=float(self.frequency),
             skip_us=win_lo,
             min_prominence_frac=prominence,
+            noise_k=walk_back_k,
         )
         if arr is None:
             raise DepthNotFound(
@@ -3013,8 +3029,9 @@ class VerificationTank:
                 snr=snr, peak_mv=win_peak_mv, noise_rms_mv=noise_rms_mv,
             )
         # An "onset" within one carrier period of the window start is
-        # the window edge cutting into noise, not an arrival.
-        if min_snr is not None and arr.arrival_us - win_lo < 1000.0 / float(self.frequency):
+        # the window edge cutting into noise (or into a signal that was
+        # already ringing), not an arrival.
+        if min_snr is not None and arr.arrival_us - win_lo < edge_us:
             raise DepthNotFound(
                 f"The only arrival found is at the start of the search window "
                 f"({arr.arrival_us:.1f} us); no clear onset.",

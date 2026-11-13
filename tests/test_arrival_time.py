@@ -324,3 +324,16 @@ def test_detection_never_reports_noise_as_a_depth():
         assert abs(res["arrival_us"] - 34.0) < 1.0, seed
         with pytest.raises(DepthNotFound):
             _cal(_noisy_tank(noise_mv=6.0, seed=seed), **DETECT)
+
+
+@pytest.mark.parametrize("freq_kHz", [155.0, 400.0])
+@pytest.mark.parametrize("depth_mm", [41.0, 44.0, 47.0, 48.5, 49.5, 50.0, 52.0, 55.0, 58.0, 59.0])
+def test_depths_across_the_search_window_are_found(freq_kHz, depth_mm):
+    """Regression (v1.0.2-rc): the edge-pick margin is one carrier period,
+    ~9.6 mm at 155 kHz, and it used to sit inside the 50 +/- 10 mm window,
+    so every 155 kHz depth below ~49.6 mm (typical focused D.16 values)
+    was rejected as "at the start of the search window"."""
+    tank = _noisy_tank(bursts=[(depth_mm / 1.49, 8.0, 3)], noise_mv=0.5,
+                       freq_kHz=freq_kHz)
+    res = _cal(tank, **DETECT)
+    assert abs(res["distance_mm"] - depth_mm) < 1.0
