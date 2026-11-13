@@ -46,15 +46,38 @@ NONSTANDARD_BANNER = "NON-STANDARD CONFIGURATION - not valid for release"
 
 
 # ----------------------------------------------------------------------
-# Vendored FOCAL_GAIN_LUT from openlifu-test-app so we don't need to
-# import that package. Values / axes verbatim from
-# ``openlifu-test-app/test_reports/test_reports.py``.
+# Focal-gain LUT for the verification-tank measurement geometry.
+#
+# ``focal_gain`` is the steady-state focal pressure amplitude (Pa) that an
+# 8x8 TXM (5 mm pitch, 0.3 mm kerf) produces when every element has a
+# surface-pressure sensitivity of 1 Pa/V, so that
+# ``sensitivity = PNP / (focal_gain * V)``. It depends on where the
+# pressure is measured, so it must match the tank: the frequency sweep
+# (``Characterization.sweep_frequency``) fires with the focus commanded
+# *at* the hydrophone, which sits on axis at the plane-wave depth
+# (nominally 50 mm). The values below are k-Wave simulations of exactly
+# that geometry (OpenLIFU-Python sim helpers, water, c = 1500 m/s,
+# dx = 0.5 mm, 60 us bursts, median negative peak in the steady-state
+# window, nearest-neighbour crosstalk within 5.05 mm), generated with
+# ``scripts/derive_focal_gain_lut.py --depth-mm 50``.
+#
+# This replaces a LUT vendored from openlifu-test-app, which corresponds
+# to the test app's shallower empirical focus. At 12 % crosstalk it was
+# 18-22 % too high for 50 mm in the 155 kHz band and 4-5 % too high in the
+# 400 kHz band. It also stopped at 165 / 410 kHz, so the top three sweep
+# frequencies were extrapolated (415-425 kHz) or interpolated across the
+# gap toward the 375 kHz row (170-180 kHz).
+#
+# Rows: frequency (Hz); columns: crosstalk fraction.
 # ----------------------------------------------------------------------
+#: Depth (mm) of the hydrophone / commanded focus the LUT was simulated at.
+FOCAL_GAIN_DEPTH_MM = 50.0
+
 _FOCAL_GAIN_F0_HZ = np.array([
-    130000.0, 135000.0, 140000.0, 145000.0, 150000.0,
-    155000.0, 160000.0, 165000.0,
-    375000.0, 380000.0, 385000.0, 390000.0, 395000.0,
-    400000.0, 405000.0, 410000.0,
+    130000.0, 135000.0, 140000.0, 145000.0, 150000.0, 155000.0,
+    160000.0, 165000.0, 170000.0, 175000.0, 180000.0,
+    375000.0, 380000.0, 385000.0, 390000.0, 395000.0, 400000.0,
+    405000.0, 410000.0, 415000.0, 420000.0, 425000.0,
 ])
 
 _FOCAL_GAIN_CROSSTALK = np.array([
@@ -62,59 +85,75 @@ _FOCAL_GAIN_CROSSTALK = np.array([
 ])
 
 _FOCAL_GAIN_DATA = np.array([
-    [2.807589054, 3.228639126, 3.649686813, 3.818109274, 4.070739746, 4.491786957,
-     4.912837505, 5.333885670, 5.754938126, 6.175983429, 6.597033501, 7.018085003],
-    [2.904339314, 3.332431316, 3.760524273, 3.931760550, 4.188616753, 4.616710663,
-     5.044803143, 5.472893715, 5.900986671, 6.329079151, 6.757172108, 7.185482502],
-    [2.990927696, 3.428293467, 3.865659714, 4.040605068, 4.303024292, 4.740390778,
-     5.177754402, 5.615119934, 6.052487373, 6.489851952, 6.927217484, 7.364583969],
-    [3.077177286, 3.520135403, 3.964356184, 4.142045498, 4.408576965, 4.852799416,
-     5.297021866, 5.741242409, 6.185462475, 6.629685879, 7.073910713, 7.518129349],
-    [3.170368195, 3.617199183, 4.064029694, 4.242762566, 4.511042118, 4.961826801,
-     5.412615299, 5.863399506, 6.314184666, 6.764969826, 7.215755463, 7.666543961],
-    [3.242729664, 3.697956562, 4.153182507, 4.335274696, 4.608408928, 5.064931870,
-     5.521984100, 5.979033947, 6.436083317, 6.893132687, 7.350184441, 7.807235718],
-    [3.327850103, 3.783803701, 4.245124340, 4.429731846, 4.706640720, 5.168155193,
-     5.629670620, 6.091186047, 6.552703381, 7.014214993, 7.475728989, 7.937244415],
-    [3.415055990, 3.878386736, 4.341715336, 4.527048111, 4.805045605, 5.268375397,
-     5.731706142, 6.195037842, 6.658364296, 7.121839523, 7.587955475, 8.054073334],
-    [5.705652714, 5.966911793, 6.233223438, 6.343565941, 6.509076118, 6.784928799,
-     7.060781479, 7.336633682, 7.612486362, 7.888339520, 8.164192200, 8.447998047],
-    [5.738934040, 5.998416424, 6.260423183, 6.365228653, 6.522432327, 6.784440994,
-     7.046449184, 7.310236931, 7.583878517, 7.857521534, 8.131163597, 8.404805183],
-    [5.780664921, 6.028132915, 6.275601387, 6.374588013, 6.523068905, 6.777853966,
-     7.039001465, 7.300150394, 7.561298370, 7.822445869, 8.083595276, 8.350235939],
-    [5.814091206, 6.046409130, 6.284290314, 6.383488178, 6.532283306, 6.780277252,
-     7.028269291, 7.276263714, 7.524255753, 7.772250175, 8.040055275, 8.318523407],
-    [5.836524487, 6.067535400, 6.301788807, 6.395490170, 6.536042213, 6.770293713,
-     7.004545689, 7.238796711, 7.482921600, 7.740076542, 8.005291939, 8.270505905],
-    [5.868018150, 6.088025570, 6.308032990, 6.396038055, 6.528041840, 6.749823093,
-     6.984026432, 7.218224049, 7.452858448, 7.704096317, 7.955334663, 8.206572533],
-    [5.892360210, 6.097702980, 6.303044319, 6.390904903, 6.523708344, 6.745048046,
-     6.966385841, 7.187726021, 7.417387962, 7.661881924, 7.913189411, 8.164498329],
-    [5.906170368, 6.104805946, 6.312875748, 6.396102428, 6.520944595, 6.729012966,
-     6.937082291, 7.157343388, 7.395428181, 7.633512974, 7.871599674, 8.109683037],
+    [2.2786, 2.6312, 2.9839, 3.1249, 3.3365, 3.6892,  # 130 kHz
+     4.0418, 4.3944, 4.7471, 5.0997, 5.4524, 5.8050],
+    [2.3618, 2.7232, 3.0846, 3.2292, 3.4460, 3.8074,  # 135 kHz
+     4.1688, 4.5304, 4.8919, 5.2534, 5.6150, 5.9765],
+    [2.4449, 2.8152, 3.1855, 3.3336, 3.5558, 3.9260,  # 140 kHz
+     4.2963, 4.6666, 5.0368, 5.4071, 5.7774, 6.1476],
+    [2.5241, 2.9022, 3.2806, 3.4319, 3.6589, 4.0373,  # 145 kHz
+     4.4157, 4.7941, 5.1725, 5.5509, 5.9293, 6.3076],
+    [2.6087, 2.9950, 3.3813, 3.5358, 3.7675, 4.1538,  # 150 kHz
+     4.5401, 4.9264, 5.3127, 5.6989, 6.0852, 6.4715],
+    [2.6867, 3.0796, 3.4724, 3.6296, 3.8653, 4.2585,  # 155 kHz
+     4.6518, 5.0451, 5.4384, 5.8317, 6.2250, 6.6183],
+    [2.7686, 3.1687, 3.5688, 3.7289, 3.9689, 4.3690,  # 160 kHz
+     4.7691, 5.1693, 5.5694, 5.9695, 6.3696, 6.7697],
+    [2.8491, 3.2556, 3.6621, 3.8247, 4.0686, 4.4751,  # 165 kHz
+     4.8816, 5.2882, 5.6947, 6.1012, 6.5077, 6.9142],
+    [2.9259, 3.3379, 3.7498, 3.9146, 4.1618, 4.5737,  # 170 kHz
+     4.9857, 5.3976, 5.8095, 6.2214, 6.6334, 7.0453],
+    [3.0034, 3.4205, 3.8378, 4.0047, 4.2551, 4.6724,  # 175 kHz
+     5.0898, 5.5071, 5.9244, 6.3417, 6.7590, 7.1764],
+    [3.0831, 3.5050, 3.9269, 4.0957, 4.3489, 4.7709,  # 180 kHz
+     5.1929, 5.6150, 6.0370, 6.4591, 6.8811, 7.3032],
+    [5.4646, 5.7163, 5.9668, 6.0670, 6.2173, 6.4678,  # 375 kHz
+     6.7183, 6.9697, 7.2218, 7.4774, 7.7330, 7.9887],
+    [5.5016, 5.7428, 5.9826, 6.0785, 6.2234, 6.4667,  # 380 kHz
+     6.7115, 6.9545, 7.1974, 7.4407, 7.6843, 7.9279],
+    [5.5432, 5.7724, 6.0018, 6.0935, 6.2311, 6.4604,  # 385 kHz
+     6.6897, 6.9190, 7.1483, 7.3776, 7.6069, 7.8362],
+    [5.5828, 5.8042, 6.0227, 6.1101, 6.2440, 6.4663,  # 390 kHz
+     6.6870, 6.9083, 7.1284, 7.3529, 7.5773, 7.8018],
+    [5.6156, 5.8241, 6.0367, 6.1218, 6.2493, 6.4594,  # 395 kHz
+     6.6699, 6.8827, 7.0953, 7.3044, 7.5140, 7.7269],
+    [5.6449, 5.8392, 6.0336, 6.1113, 6.2279, 6.4222,  # 400 kHz
+     6.6166, 6.8160, 7.0201, 7.2243, 7.4284, 7.6325],
+    [5.6906, 5.8804, 6.0690, 6.1445, 6.2592, 6.4488,  # 405 kHz
+     6.6359, 6.8250, 7.0150, 7.2043, 7.3944, 7.5833],
+    [5.7303, 5.9078, 6.0853, 6.1563, 6.2620, 6.4403,  # 410 kHz
+     6.6188, 6.7998, 6.9791, 7.1570, 7.3368, 7.5159],
+    [5.7659, 5.9309, 6.0977, 6.1645, 6.2652, 6.4319,  # 415 kHz
+     6.5971, 6.7622, 6.9297, 7.0981, 7.2685, 7.4382],
+    [5.7954, 5.9539, 6.1092, 6.1730, 6.2688, 6.4251,  # 420 kHz
+     6.5795, 6.7339, 6.8936, 7.0534, 7.2086, 7.3637],
+    [5.8275, 5.9708, 6.1181, 6.1752, 6.2607, 6.4087,  # 425 kHz
+     6.5557, 6.6992, 6.8476, 6.9962, 7.1404, 7.2899],
 ])
 
 
 def _focal_gain(freq_kHz: float, crosstalk_frac: float) -> float:
-    """Bilinear-interpolate FOCAL_GAIN_LUT at (freq_Hz, crosstalk_frac)."""
+    """Bilinear-interpolate the focal-gain LUT at (freq_kHz, crosstalk_frac).
+
+    Interpolation is only done *within* a simulated band (130-180 kHz or
+    375-425 kHz); a frequency outside both bands returns ``nan`` rather
+    than extrapolating or bridging the gap between the bands. Crosstalk
+    is clamped to the simulated 0-50 % range.
+    """
     f_Hz = float(freq_kHz) * 1e3
     xs = _FOCAL_GAIN_F0_HZ
     ys = _FOCAL_GAIN_CROSSTALK
-    # bilinear interp
-    ix = int(np.clip(np.searchsorted(xs, f_Hz) - 1, 0, len(xs) - 2))
-    iy = int(np.clip(np.searchsorted(ys, crosstalk_frac) - 1, 0, len(ys) - 2))
-    x0, x1 = xs[ix], xs[ix + 1]
-    y0, y1 = ys[iy], ys[iy + 1]
-    tx = 0.0 if x1 == x0 else (f_Hz - x0) / (x1 - x0)
-    ty = 0.0 if y1 == y0 else (crosstalk_frac - y0) / (y1 - y0)
+    # Bands are contiguous runs of 5 kHz-spaced points.
+    breaks = np.flatnonzero(np.diff(xs) > 10e3) + 1
+    band = next((b for b in np.split(np.arange(len(xs)), breaks)
+                 if xs[b[0]] - 1e-6 <= f_Hz <= xs[b[-1]] + 1e-6), None)
+    if band is None:
+        return float("nan")
+    xt = float(np.clip(crosstalk_frac, ys[0], ys[-1]))
     q = _FOCAL_GAIN_DATA
-    v = ((1 - tx) * (1 - ty) * q[ix, iy]
-         + tx * (1 - ty) * q[ix + 1, iy]
-         + (1 - tx) * ty * q[ix, iy + 1]
-         + tx * ty * q[ix + 1, iy + 1])
-    return float(v)
+    along_f = np.array([np.interp(f_Hz, xs[band], q[band, j])
+                        for j in range(len(ys))])
+    return float(np.interp(xt, ys, along_f))
 
 
 # ----------------------------------------------------------------------
@@ -963,7 +1002,10 @@ def build_device_config(report: TestReport,
     crosstalk = float(module["crosstalk_frac"])
     for f_kHz, pnp in zip(freqs_kHz, pnp_MPa):
         gain = _focal_gain(float(f_kHz), crosstalk)
-        if gain <= 0:
+        if not np.isfinite(gain) or gain <= 0:
+            logger.warning(
+                "No focal gain for %g kHz (outside the simulated LUT "
+                "bands); omitting it from the sensitivity table.", f_kHz)
             continue
         sens = pnp * 1e6 / gain / voltage  # Pa per V
         sensitivity.append((int(round(f_kHz * 1e3)), int(round(sens))))
