@@ -120,3 +120,33 @@ def test_worker_forwards_acknowledged_abort(monkeypatch, acknowledged):
     signals.aborted.connect(seen.append)
     gui._WorkerThread(None, None, signals).run()
     assert seen == [acknowledged]
+
+
+# ----------------------------------------------------------------------
+# WARN status (D.3 from the focused-pulse fallback)
+# ----------------------------------------------------------------------
+def test_warn_square_and_summary():
+    result = run_report.RunResult(
+        passed=True,
+        graded_rows=[
+            ReportRow("D.3", "Plane-Wave Hydrophone Depth", 50.1, "mm", "WARN",
+                      "50.0 ± 2.00 mm", "from a pulse focused at 50 mm"),
+            ReportRow("D.14", "Focused Pulse PNP", 0.9, "MPa", "PASS", 0.66),
+        ],
+        elapsed_s=180.0,
+    )
+    dlg = gui.ResultDialog(result, can_write=True)
+    squares = dlg.findChildren(QLabel, "gradeSquare")
+    assert [s.property("status") for s in squares] == ["WARN", "PASS"]
+    texts = [lbl.text() for lbl in dlg.findChildren(QLabel)]
+    assert "2/2 tests passed (1 with a warning) in 3:00" in texts
+    assert dlg.write_button.isEnabled()          # WARN still allows writing
+
+
+def test_tracker_shows_warn_gate():
+    tracker = gui.AcceptanceTracker()
+    tracker.on_log("Plane-wave depth calibration: 32 pulses @ 40.0 V")
+    tracker.on_log("[grade] Hydrophone depth → WARN (depth = 50.1 mm; "
+                   "from a pulse focused at 50 mm)")
+    row = tracker._rows["hydrophone_depth"]
+    assert row.state == gui._GateRow.WARN

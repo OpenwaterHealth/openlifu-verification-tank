@@ -40,7 +40,7 @@ from .operator_prefs import OperatorPrefs
 from .pnp import clean_pnp_window_us, emitted_duration_us, scan_window_pnp, windowed_pnp
 from .scan_config import PICOSCOPE_RANGES_MV, ScanConfig, choose_range_mv
 from .scan_results import ScanResult
-from .verificationtank import VerificationTank
+from .verificationtank import DEPTH_CAL_MIN_SNR, DepthNotFound, VerificationTank
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +183,7 @@ class ReportRow:
     label: str
     value: Any = None
     unit: str = ""
-    status: str = "NA"           # "PASS" / "FAIL" / "NA"
+    status: str = "NA"           # "PASS" / "WARN" / "FAIL" / "NA"
     threshold: Any = None
     note: str = ""
 
@@ -474,13 +474,26 @@ class Characterization:
         self._grade_calibration_dates()
         return info
 
+    #: Detection margin required of the depth calibration's arrival
+    #: (window peak / noise RMS); see ``calibrate_hydrophone_depth``.
+    DEPTH_CAL_MIN_SNR = DEPTH_CAL_MIN_SNR
+
     def calibrate_depth_plane_wave(self, *,
                                     voltage_V: Optional[float] = None,
                                     n_pulses: int = 32,
                                     duration_usec: float = 8.0,
                                     skip_us: Optional[float] = None,
+                                    focused_fallback_reason: Optional[str] = None,
                                     ) -> dict:
-        """Run the plane-wave depth calibration.
+        """Run the plane-wave depth calibration (or its focused fallback).
+
+        The arrival is searched for near the nominal (laser-aligned)
+        hydrophone depth and must clear :attr:`DEPTH_CAL_MIN_SNR`;
+        otherwise :class:`DepthNotFound` is raised. With
+        ``focused_fallback_reason`` (why the plane wave failed), a
+        pulse focused at the nominal depth is used instead: its much
+        stronger signal at the hydrophone gives the depth, and D.3 is
+        graded WARN when that depth is in range.
 
         Fires ``n_pulses`` short plane-wave bursts through
         :meth:`VerificationTank.calibrate_hydrophone_depth`, records
@@ -506,9 +519,13 @@ class Characterization:
         v = float(self.voltage_V if voltage_V is None else voltage_V)
         cfg = self.scan_config
         scope_kw = cfg.scope_kwargs()
+        nominal = float(self.criteria.peak_depth.nominal_for(self.frequency_kHz))
+        focused = focused_fallback_reason is not None
+        self._depth_focused_reason = focused_fallback_reason
         logger.info(
-            "Plane-wave depth calibration: %d pulses @ %.1f V, %.1f us each, "
+            "%s depth calibration: %d pulses @ %.1f V, %.1f us each, "
             "skip_us=%s",
+            f"Focused-pulse (z={nominal:g} mm, fallback)" if focused else "Plane-wave",
             n_pulses, v, duration_usec,
             "auto" if skip_us is None else f"{float(skip_us):.1f}",
         )
@@ -524,15 +541,18 @@ class Characterization:
             sampling_interval_ns=float(scope_kw.get(
                 "sampling_interval_ns", 100.0)),
             hydrophone_range_mv=int(cfg.scope.hydrophone_range_mv),
-            z_focus_mm=None,  # plane wave
+            z_focus_mm=nominal if focused else None,
             store=True,
             save=False,
+            expected_mm=nominal,
+            min_snr=float(self.DEPTH_CAL_MIN_SNR),
         )
         self.report.depth_cal_plane_wave = result
+        # D.2 is the plane-wave arrival; the fallback has none.
         self.report.set_row(
             ROW["plane_wave_arrival_us"],
             "Plane-Wave Arrival Time",
-            float(result["arrival_us"]),
+            None if focused else float(result["arrival_us"]),
             unit="us",
         )
         self.report.set_row(
@@ -542,9 +562,11 @@ class Characterization:
             unit="mm",
         )
         logger.info(
-            "Plane-wave depth: arrival=%.3f us, distance=%.3f mm "
+            "%s depth: arrival=%.3f us, distance=%.3f mm, SNR=%s "
             "(hydrophone_position[2] updated)",
+            "Focused-pulse" if focused else "Plane-wave",
             float(result["arrival_us"]), float(result["distance_mm"]),
+            "n/a" if result.get("snr") is None else f"{float(result['snr']):.1f}",
         )
         # Grade D.3 inline so the operator sees the plane-wave depth
         # verdict alongside the raw measurement.
@@ -776,14 +798,20 @@ class Characterization:
                 z_focus_mm=z_focus_mm,
                 store=False,  # keep the plane-wave depth as the truth
                 save=False,
+                # Same detection as the plane wave: near the expected
+                # depth, clearly above the noise (else DepthNotFound).
+                expected_mm=z_focus_mm,
+                min_snr=float(self.DEPTH_CAL_MIN_SNR),
             )
             self.report.depth_cal_focused = depth_result
             arrival_us = float(depth_result["arrival_us"])
             axial_depth_mm = float(depth_result["distance_mm"])
             max_delay_us = float(depth_result["max_delay_us"])
-        except Exception as e:  # noqa: BLE001 - dry-run safety
+            focused_depth_error = None
+        except Exception as e:  # noqa: BLE001 - graded as a D.16 failure
             # The long-pulse PNP capture overlaps transmit RF pickup, so it
-            # can't stand in for the focused-arrival transmit.
+            # can't stand in for the focused-arrival transmit. The run
+            # goes on; D.16 is graded FAIL (see _grade_peak_depth).
             logger.warning(
                 "Focused depth calibration failed (%s); focused arrival "
                 "and depth are unavailable.", e,
@@ -791,6 +819,7 @@ class Characterization:
             arrival_us = None
             axial_depth_mm = float("nan")
             max_delay_us = 0.0
+            focused_depth_error = str(e).rstrip(".")
         finally:
             # calibrate_hydrophone_depth leaves the LIFU armed with the
             # short-burst / high-voltage / 32-pulse settings. Restore
@@ -819,6 +848,7 @@ class Characterization:
             "peak_z_focus_mm": z_focus_mm,
             "focused_depth_mm": axial_depth_mm,
             "focused_arrival_us": arrival_us,
+            "focused_depth_error": focused_depth_error,
             # Legacy aliases kept so any external consumer (or older
             # notebook / script) that reads the ``waveform_at_peak``
             # dict still finds the same values under their previous
@@ -1505,19 +1535,29 @@ class Characterization:
 
         Passes when
         ``|depth - nominal_mm(freq)| <= focused_tol_pct% * nominal_mm(freq)``.
-        Returns the boolean verdict (or ``None`` if
-        ``measure_waveform_at_peak`` has not been called yet or the
-        arrival could not be picked).
+        Returns the boolean verdict, or ``None`` if
+        ``measure_waveform_at_peak`` has not been called yet. A focused
+        arrival that could not be found grades FAIL: the depth was not
+        verified, so the check must not drop out of the verdict.
         """
         wf = self.report.waveform_at_peak
         if not wf:
             return None
-        depth = wf.get("focused_depth_mm", wf.get("axial_depth_mm"))
-        if depth is None or not np.isfinite(depth):
-            return None
         crit = self.criteria.peak_depth
         nominal = float(crit.nominal_for(self.frequency_kHz))
         tol_mm = nominal * float(crit.focused_tol_pct) / 100.0
+        depth = wf.get("focused_depth_mm", wf.get("axial_depth_mm"))
+        if depth is None or not np.isfinite(depth):
+            error = wf.get("focused_depth_error")
+            if not error:
+                return None
+            note = f"focused arrival not found: {error}"
+            if ROW["focused_depth_mm"] in self.report.rows:
+                self.report.grade_row(ROW["focused_depth_mm"], passed=False,
+                                      threshold=f"{nominal:.1f} \u00b1 {tol_mm:.2f} mm",
+                                      note=note)
+            logger.info("[grade] Peak depth \u2192 FAIL (%s)", note)
+            return False
         passed = abs(float(depth) - nominal) <= tol_mm
         threshold = f"{nominal:.1f} \u00b1 {tol_mm:.2f} mm"
         note = (f"depth = {float(depth):.3f} mm "
@@ -1647,13 +1687,21 @@ class Characterization:
         passed = abs(depth - nominal) <= tol_mm
         note = (f"depth = {depth:.3f} mm (nominal {nominal:.1f} @ "
                 f"{self.frequency_kHz:g} kHz)")
+        focused_reason = getattr(self, "_depth_focused_reason", None)
+        if focused_reason is not None:
+            note += (f"; from a pulse focused at {nominal:g} mm - plane wave "
+                     f"not detected: {focused_reason}")
         if fallback is not None:
             passed = False
             note += f"; continued at nominal {fallback[1]:.1f} mm"
         self.report.grade_row(ROW["plane_wave_depth_mm"], passed=passed,
                               threshold=threshold, note=note)
+        # In range, but only via the focused fallback: a warning, not a
+        # failure (the plane wave is weak; the depth itself is fine).
+        if passed and focused_reason is not None:
+            self.report.rows[ROW["plane_wave_depth_mm"]].status = "WARN"
         logger.info("[grade] Hydrophone depth \u2192 %s (%s)",
-                    "PASS" if passed else "FAIL", note)
+                    self.report.rows[ROW["plane_wave_depth_mm"]].status, note)
         return passed
 
     def _grade_1d_peak_offset(self, *, scan_key: str, axis: str,
@@ -1767,7 +1815,8 @@ class Characterization:
         """``"<problem>: <why>"`` if any row in ``row_ids`` didn't pass,
         else ``None``."""
         failed = [self.report.rows.get(r) for r in row_ids
-                  if getattr(self.report.rows.get(r), "status", None) != "PASS"]
+                  if getattr(self.report.rows.get(r), "status", None)
+                  not in ("PASS", "WARN")]
         if not failed:
             return None
         details = "; ".join(
@@ -1908,14 +1957,32 @@ class Characterization:
         # array-to-hydrophone distance rather than the operator's
         # rough initial estimate.
         self._depth_fallback = None
+        self._depth_focused_reason = None
         self._peak_fallback = None
+        failure = None
         try:
             self.calibrate_depth_plane_wave()
+        except DepthNotFound as e:
+            # Weak plane wave: retry with a pulse focused at the nominal
+            # depth, whose signal at the hydrophone is far stronger.
+            reason = str(e).rstrip(".")
+            nominal = float(self.criteria.peak_depth.nominal_for(self.frequency_kHz))
+            logger.warning("Plane-wave depth calibration: %s. Retrying with a "
+                           "pulse focused at %g mm.", reason, nominal)
+            try:
+                self.calibrate_depth_plane_wave(focused_fallback_reason=reason)
+            except Exception as e2:  # noqa: BLE001 - surfaced to operator
+                logger.exception("Focused-pulse depth calibration failed")
+                failure = (f"Hydrophone depth calibration failed: the plane "
+                           f"wave and a pulse focused at {nominal:g} mm both "
+                           f"failed to detect the hydrophone ({e2})", e2)
         except Exception as e:  # noqa: BLE001 - surfaced to operator
             logger.exception("Plane-wave depth calibration failed")
-            problem = f"Plane-wave depth calibration failed: {e}"
+            failure = (f"Plane-wave depth calibration failed: {e}", e)
+        if failure is not None:
+            problem, exc = failure
             if on_setup_failure is None:
-                raise RunHalted(problem) from e
+                raise RunHalted(problem) from exc
             self._continue_after_depth_failure(problem, on_setup_failure)
         else:
             if on_setup_failure is None:

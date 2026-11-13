@@ -37,6 +37,9 @@ A test takes a transmit module that is installed in the Mini Tank and:
 1. Checks the TXM and console firmware versions and the hydrophone /
    PicoScope calibration dates.
 2. Measures the hydrophone depth with a plane wave (*depth calibration*).
+   If the plane wave is too weak to detect the hydrophone reliably, it
+   measures the depth with a pulse focused at 50 mm instead (D.3 is then
+   marked **WARN**, see [section 5](#5-when-a-setup-step-fails-continue-or-abort)).
 3. Finds the focal peak and centers the hydrophone on it (*peak search*).
 4. Runs 1-D lateral, elevation and axial scans and a 2-D scan around
    the peak.
@@ -213,7 +216,7 @@ Click **Start**. The progress window shows:
 - the current phase, a progress bar, elapsed time and an estimate of
   the time remaining;
 - the **acceptance gates**: ○ not started, ◐ in progress,
-  ● green = pass, ● red = fail;
+  ● green = pass, ● amber = pass with a warning, ● red = fail;
 - the **log** of what the test is doing.
 
 <img src="images/manual/running.png" width="560" alt="Test in progress">
@@ -225,8 +228,10 @@ start screen; no report is written.
 ### 4.5 Results
 
 When the test finishes, the result window shows the overall verdict,
-one square per graded check (hover over a square for its value and
-limit), and links to the report folder, PDF and XLSX.
+one square per graded check (green = pass, amber = pass with a
+warning, red = fail; hover over a square for its value, limit and
+note), and links to the report folder, PDF and XLSX. A warning does not
+fail the module.
 
 <img src="images/manual/result_pass.png" width="460" alt="Result: PASS">
 
@@ -261,8 +266,21 @@ if needed and test again, or set the module aside.
 ## 5. When a setup step fails: Continue or Abort
 
 The **hydrophone depth calibration** and the **peak search** locate
-the hydrophone for every measurement that follows. If one of them
-fails or is out of tolerance, the test pauses and asks what to do:
+the hydrophone for every measurement that follows.
+
+**Weak plane wave.** The depth is first measured with a plane wave,
+whose signal at the hydrophone is small (especially at 155 kHz). The
+software only accepts an arrival near the aligned 50 mm depth that is
+clearly above the noise. If it finds none, it measures the depth again
+with a pulse focused at 50 mm, whose signal at the hydrophone is much
+stronger. If that depth is in range, the test continues and D.3 is
+graded **WARN** (amber): the module is not failed for it, and D.3's
+note gives the plane-wave signal level. A weak module still fails the
+pressure checks (e.g. D.14) if its output is out of specification.
+
+**Depth or peak not found.** If the focused pulse doesn't find the
+hydrophone either, if the depth is out of tolerance, or if the peak
+search fails, the test pauses and asks what to do:
 
 <img src="images/manual/depth_failure.png" width="400" alt="Hydrophone depth calibration failed">
 
@@ -307,12 +325,12 @@ module passes only if every graded check passes.
 |---|---|
 | Firmware versions (B.4, C.3) | TXM ≥ 2.0.8 and console ≥ 1.2.7 |
 | Calibration dates (A.7, A.11) | Hydrophone and PicoScope calibrations ≤ 5 years old |
-| Hydrophone depth (D.3) | Plane-wave depth within 50.0 ± 2.0 mm |
+| Hydrophone depth (D.3) | Plane-wave depth within 50.0 ± 2.0 mm. If the plane wave is too weak, the focused-pulse depth is used and an in-range result is **WARN** (does not fail) |
 | Peak X/Y position (D.5, D.6) | Peak within ±1.0 mm of center on each axis (offset from center ≤ 3 mm) |
 | Lateral / elevation 1-D peak offset (D.8, D.10) | 1-D peak within 1.0 mm (155 kHz) or 0.5 mm (400 kHz) of the 2-D peak |
 | Axial 1-D peak offset (D.12) | Axial peak between −5 and +10 mm of the hydrophone depth |
 | Focused pulse PNP (D.14) | PNP at the peak ≥ 0.41 MPa (155 kHz) or 0.66 MPa (400 kHz) at 50 V (scaled to the drive voltage) |
-| Focused hydrophone depth (D.16) | Focused-pulse depth within 50 mm ± 5 % |
+| Focused hydrophone depth (D.16) | Focused-pulse depth within 50 mm ± 5 % (fails if the focused arrival can't be found) |
 | Frequency response (E.13) | PNP at the nominal frequency within 40 % (155 kHz) or 15 % (400 kHz) of the sweep's peak |
 | Voltage linearity (F.8) | Linear fit of PNP vs. voltage with R² ≥ 0.99 |
 

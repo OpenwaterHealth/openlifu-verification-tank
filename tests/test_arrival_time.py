@@ -230,3 +230,97 @@ def test_plane_wave_depth_rejects_low_signal(amp_mv, ok):
         with pytest.raises(RuntimeError, match="plane wave signal is too low"
                            ".*Check for bubbles"):
             VerificationTank.calibrate_hydrophone_depth(tank, voltage_V=40.0)
+
+
+# ----------------------------------------------------------------------
+# Depth calibration detection: expected-depth window, SNR, edge picks
+# ----------------------------------------------------------------------
+def _noisy_tank(*, bursts=(), noise_mv=0.0, freq_kHz=155.0, seed=0):
+    """Like ``_plane_wave_tank`` but with Gaussian noise (independent per
+    pulse) and any number of ``(onset_us, amp_mv, n_cycles)`` bursts."""
+    tank = _plane_wave_tank(0.0, freq_kHz)
+    t_us = np.arange(0.0, 100.0, 0.1)
+    clean = np.zeros_like(t_us)
+    for onset, amp, cycles in bursts:
+        clean += _boxcar_burst(t_us=t_us, onset_us=onset, freq_kHz=freq_kHz,
+                               amp=amp, n_cycles=cycles)
+    rng = np.random.default_rng(seed)
+    traces = clean + rng.normal(0.0, noise_mv, size=(32, t_us.size))
+    tank.capture_pulse_train = lambda **kw: {"time": t_us, "B": traces}
+    return tank
+
+
+def _cal(tank, **kw):
+    from openlifu_verification.verificationtank import VerificationTank
+    return VerificationTank.calibrate_hydrophone_depth(
+        tank, voltage_V=40.0, align=False, **kw)
+
+
+DETECT = dict(expected_mm=50.0, min_snr=6.0)
+
+
+def test_noise_only_used_to_give_a_bogus_early_depth():
+    """The bench failure: noise above the amplitude gate and no real
+    arrival. Without the new checks the picker returns an "arrival"
+    near the start of its search window (a ~27 mm depth)."""
+    tank = _noisy_tank(noise_mv=6.0)
+    res = _cal(tank)                       # old behaviour (no DETECT)
+    assert res["distance_mm"] < 40.0
+
+
+def test_noise_only_is_not_found_with_detection():
+    from openlifu_verification.verificationtank import DepthNotFound
+    tank = _noisy_tank(noise_mv=6.0)
+    with pytest.raises(DepthNotFound) as info:
+        _cal(tank, **DETECT)
+    assert info.value.details["snr"] < 6.0
+
+
+def test_weak_but_clean_arrival_is_found():
+    """A real arrival at 34 us (50.7 mm) well above the noise is found,
+    and its signal-to-noise ratio is reported."""
+    tank = _noisy_tank(bursts=[(34.0, 8.0, 3)], noise_mv=0.5)
+    res = _cal(tank, **DETECT)
+    assert abs(res["arrival_us"] - 34.0) < 0.2
+    assert res["snr"] > 6.0
+    lo, hi = res["search_window_us"]
+    assert lo < 34.0 < hi
+
+
+def test_search_window_ignores_an_early_spike():
+    """A strong early transient at 18 us (~27 mm) is outside the
+    50 +/- 10 mm window, so the real arrival at 34 us is picked."""
+    tank = _noisy_tank(bursts=[(18.0, 20.0, 1), (34.0, 8.0, 3)], noise_mv=0.3)
+    assert _cal(tank)["arrival_us"] < 25.0          # old behaviour
+    assert abs(_cal(tank, **DETECT)["arrival_us"] - 34.0) < 0.2
+
+
+def test_arrival_at_the_window_edge_is_not_found():
+    """Signal already ringing when the search window opens (a burst from
+    26.5 us; the 50 +/- 10 mm window opens at 26.8 us) has no onset
+    inside the window: not found."""
+    from openlifu_verification.verificationtank import DepthNotFound
+    tank = _noisy_tank(bursts=[(26.5, 8.0, 6)], noise_mv=0.3)
+    with pytest.raises(DepthNotFound, match="start of the search window"):
+        _cal(tank, **DETECT)
+
+
+def test_low_amplitude_gate_raises_depth_not_found():
+    from openlifu_verification.verificationtank import DepthNotFound
+    tank = _plane_wave_tank(2.0)
+    with pytest.raises(DepthNotFound, match="plane wave signal is too low"):
+        _cal(tank)
+
+
+def test_detection_never_reports_noise_as_a_depth():
+    """Seeded sweep: a real 155 kHz arrival at signal-to-noise ~7 is
+    found within 1 us (1.5 mm) every time, and pure noise is never
+    reported as a depth - it is "not found" (which triggers the focused
+    fallback) instead."""
+    from openlifu_verification.verificationtank import DepthNotFound
+    for seed in range(40):
+        res = _cal(_noisy_tank(bursts=[(34.0, 8.0, 3)], noise_mv=5.0, seed=seed),
+                   **DETECT)
+        assert abs(res["arrival_us"] - 34.0) < 1.0, seed
+        with pytest.raises(DepthNotFound):
+            _cal(_noisy_tank(noise_mv=6.0, seed=seed), **DETECT)

@@ -214,13 +214,14 @@ def build_figures(report: TestReport) -> dict:
         statuses = [r.status for r in rows if r is not None]
         if "FAIL" in statuses:
             return "FAIL"
-        if statuses and all(s == "PASS" for s in statuses):
-            return "PASS"
+        if statuses and all(s in ("PASS", "WARN") for s in statuses):
+            return "WARN" if "WARN" in statuses else "PASS"
         return ""
 
     def _title(ax, text: str, status: str = "", detail: str = "") -> None:
         second = " \u2014 ".join(p for p in (status, detail) if p)
-        color = {"PASS": "darkgreen", "FAIL": "firebrick"}.get(status, "black")
+        color = {"PASS": "darkgreen", "WARN": "darkorange",
+                 "FAIL": "firebrick"}.get(status, "black")
         ax.set_title(f"{text}\n{second}" if second else text,
                      fontsize=9, color=color)
 
@@ -586,7 +587,9 @@ def build_figures(report: TestReport) -> dict:
     if report.depth_cal_plane_wave:
         figs["depth_cal_plane_wave"] = _depth_cal_fig(
             report.depth_cal_plane_wave,
-            "Figure 8: Plane-wave depth calibration", "plane_wave_depth_mm",
+            ("Figure 8: Depth calibration (focused-pulse fallback)"
+             if report.depth_cal_plane_wave.get("z_focus_mm") is not None
+             else "Figure 8: Plane-wave depth calibration"), "plane_wave_depth_mm",
             None if depth_crit is None else float(depth_crit.hydrophone_tol_mm))
     if report.depth_cal_focused:
         tol = None
@@ -697,10 +700,13 @@ def write_xlsx(report: TestReport, path: Path, figures: Optional[dict] = None) -
     green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
     red = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     grey = PatternFill(start_color="EEEEEE", end_color="EEEEEE", fill_type="solid")
+    amber = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
     for r_i in range(2, gws.max_row + 1):
         cell = gws.cell(row=r_i, column=status_col)
         if cell.value == "PASS":
             cell.fill = green
+        elif cell.value == "WARN":
+            cell.fill = amber
         elif cell.value == "FAIL":
             cell.fill = red
         elif cell.value == "NA":
@@ -807,7 +813,8 @@ def write_pdf(report: TestReport, path: Path,
             if isinstance(val, float):
                 val = f"{val:.4g}"
             unit_str = f" {row.unit}" if row.unit else ""
-            status = f"  [{row.status}]" if row.status in ("PASS", "FAIL") else ""
+            status = (f"  [{row.status}]" if row.status in ("PASS", "WARN", "FAIL")
+                      else "")
             lines.append(f"  {id_:<6} {row.label:<28} {val}{unit_str}{status}")
         # Draw as monospace.
         ax.text(0.02, 0.98, "\n".join(lines), family="monospace",

@@ -26,6 +26,14 @@ PICOSCOPE_RESOLUTION = "15BIT"
 SPEED_OF_SOUND = 1490  # m/s in water
 AUTO_SKIP_GUARD_US = 6.0  # us to add to the auto-calculated skip window
 ZERO_WINDOW_US = 4.0
+# Depth calibration detection (used when an expected depth is given):
+# search only +/- this many mm around the expected hydrophone depth...
+DEPTH_CAL_SEARCH_HALF_WIDTH_MM = 10.0
+# ...and require the window's peak to clear the pre-window noise RMS by
+# this factor. Provisional: tune from the SNR logged on every run.
+DEPTH_CAL_MIN_SNR = 6.0
+# The arrival's first crest must also clear this many noise RMS.
+DEPTH_CAL_PICK_NOISE_K = 6.0
 # Electrical delay (us) between the scope trigger's rising edge and the
 # first drive edge at the pulser output, per TX frequency (kHz). The
 # TX7332 datasheet predicts 8*TX_START_DEL+123 = 1147 BF_CLK periods
@@ -98,6 +106,17 @@ def _warn_hydrophone_baseline(owner, baseline_mV):
         "drifting offset usually means a leaky hydrophone or connector.",
         worst, HYDROPHONE_BASELINE_WARN_MV,
     )
+
+
+class DepthNotFound(RuntimeError):
+    """:meth:`VerificationTank.calibrate_hydrophone_depth` found no
+    trustworthy hydrophone arrival: the signal is below the amplitude
+    gate or the noise, or the only "arrival" is noise at the edge of the
+    search window. ``details`` holds the measured levels for logging."""
+
+    def __init__(self, message: str, **details):
+        super().__init__(message)
+        self.details = details
 
 
 class HardwareNotConnectedError(ConnectionError):
@@ -2667,6 +2686,9 @@ class VerificationTank:
                                     z_focus_mm: float | None = None,
                                     store: bool = True,
                                     save: bool = False,
+                                    expected_mm: float | None = None,
+                                    search_half_width_mm: float = DEPTH_CAL_SEARCH_HALF_WIDTH_MM,
+                                    min_snr: float | None = None,
                                     ) -> dict:
         """Estimate the array\u2192hydrophone axial distance from a plane-wave pulse.
 
@@ -2725,6 +2747,22 @@ class VerificationTank:
                 ``self.hydrophone_position[2]`` in place.
             save: If ``True``, also persist via
                 :meth:`save_calibration`.
+            expected_mm: Expected array-to-hydrophone distance (e.g.
+                the laser-aligned 50 mm). When given, the arrival is
+                searched for only within ``search_half_width_mm`` of it,
+                and the quiet stretch before that window gives the noise
+                level for ``min_snr``.
+            search_half_width_mm: Half-width of that search window (mm).
+            min_snr: If given, require the search window's peak to be at
+                least this many times the robust noise RMS, and reject an
+                arrival picked at the very start of the search window
+                (noise, not an onset). Failing either raises
+                :class:`DepthNotFound`.
+
+        Raises:
+            DepthNotFound: No trustworthy arrival (signal below the
+                plane-wave amplitude gate, below ``min_snr``, not found,
+                or only at the edge of the search window).
 
         Returns:
             Dict with:
@@ -2751,6 +2789,10 @@ class VerificationTank:
                 per-pulse traces that were aggregated.
               - ``n_pulses_used``: How many pulses were actually
                 aggregated.
+              - ``snr``, ``noise_rms_mv``, ``search_window_us``: The
+                detection margin and where the arrival was searched
+                for (``snr`` is ``None`` without ``expected_mm`` /
+                ``min_snr``).
         """
         from .arrival_time import find_first_arrival_us
         from .pulse_align import align_pulse_traces
@@ -2899,25 +2941,84 @@ class VerificationTank:
         if z_focus_mm is None and min_mv_per_v is not None:
             min_peak_mv = min_mv_per_v * float(voltage_V)
             if peak_mv < min_peak_mv:
-                raise RuntimeError(
+                raise DepthNotFound(
                     "The plane wave signal is too low and the arrival time "
                     "could not be estimated (peak "
                     f"{peak_mv:.2f} mV, need at least {min_peak_mv:.2f} mV "
                     f"at {float(voltage_V):g} V, {float(self.frequency):g} kHz). "
                     "Check for bubbles on the hydrophone tip and the "
                     "transducer face, and try again.",
+                    peak_mv=peak_mv, min_peak_mv=min_peak_mv,
                 )
+
+        # Search window: the whole post-baseline capture, or only the
+        # times a hydrophone near ``expected_mm`` can be reached
+        # (arrival = distance / SoS + max_delay).
+        mm_per_us = SPEED_OF_SOUND * 1e-3
+        win_lo, win_hi = search_start_us, float(t_us[-1])
+        if expected_mm is not None:
+            half = float(search_half_width_mm)
+            win_lo = max(win_lo, (float(expected_mm) - half) / mm_per_us + max_delay_us)
+            win_hi = min(win_hi, (float(expected_mm) + half) / mm_per_us + max_delay_us)
+        in_win = (t_us >= win_lo) & (t_us <= win_hi)
+        # Noise: robust (MAD) RMS of the two pre-arrival quiet regions,
+        # the baseline window and the stretch before the search window.
+        # Take the lower, so a transient in one of them (e.g. leftover
+        # transmit pickup) doesn't inflate the noise and hide a real
+        # arrival.
+        def _mad_rms(mask):
+            x = mean_trace[mask]
+            if x.size < 16:
+                return None
+            return float(1.4826 * np.median(np.abs(x - np.median(x))))
+        estimates = [e for e in (_mad_rms(base_mask),
+                                 _mad_rms((t_us >= search_start_us) & (t_us < win_lo)))
+                     if e is not None]
+        noise_rms_mv = min(estimates) if estimates else 0.0
+        win_peak_mv = float(np.max(np.abs(mean_trace[in_win]), initial=0.0))
+        snr = None
+        if min_snr is not None or expected_mm is not None:
+            snr = (win_peak_mv / noise_rms_mv if noise_rms_mv > 0
+                   else float("inf"))
+        if min_snr is not None and snr < float(min_snr):
+            raise DepthNotFound(
+                f"No hydrophone signal above the noise near {float(expected_mm or 0):g} mm "
+                f"(signal-to-noise {snr:.1f}, need {float(min_snr):g}; peak "
+                f"{win_peak_mv:.2f} mV, noise {noise_rms_mv:.3f} mV rms).",
+                snr=snr, peak_mv=win_peak_mv, noise_rms_mv=noise_rms_mv,
+            )
+        keep = t_us <= win_hi
+        # The picker's first-crest threshold is a fraction of the
+        # window's positive peak; with detection on, keep it above the
+        # noise too (DEPTH_CAL_PICK_NOISE_K x noise RMS), so a noise
+        # crest before the arrival isn't taken for its onset.
+        prominence = 0.05
+        if min_snr is not None and noise_rms_mv > 0:
+            pos_peak = float(np.max(mean_trace[in_win], initial=0.0))
+            if pos_peak > 0:
+                prominence = min(0.9, max(prominence,
+                                          DEPTH_CAL_PICK_NOISE_K * noise_rms_mv / pos_peak))
         arr = find_first_arrival_us(
-            t_us, mean_trace,
+            t_us[keep], mean_trace[keep],
             frequency_kHz=float(self.frequency),
-            skip_us=search_start_us,
+            skip_us=win_lo,
+            min_prominence_frac=prominence,
         )
         if arr is None:
-            raise RuntimeError(
+            raise DepthNotFound(
                 "Could not locate a first-arrival RF peak in "
-                f"[{search_start_us:.1f}, {t_us[-1]:.1f}] us. "
+                f"[{win_lo:.1f}, {win_hi:.1f}] us. "
                 "Increase --voltage or check that the hydrophone is "
                 "wetted and in front of the array.",
+                snr=snr, peak_mv=win_peak_mv, noise_rms_mv=noise_rms_mv,
+            )
+        # An "onset" within one carrier period of the window start is
+        # the window edge cutting into noise, not an arrival.
+        if min_snr is not None and arr.arrival_us - win_lo < 1000.0 / float(self.frequency):
+            raise DepthNotFound(
+                f"The only arrival found is at the start of the search window "
+                f"({arr.arrival_us:.1f} us); no clear onset.",
+                snr=snr, peak_mv=win_peak_mv, noise_rms_mv=noise_rms_mv,
             )
 
         distance_mm = (
@@ -2926,10 +3027,11 @@ class VerificationTank:
         logger.info(
             "calibrate_hydrophone_depth: first_peak=%.3f us, "
             "onset_to_peak=%.3f us, arrival=%.3f us, "
-            "max_delay=%.3f us, distance=%.3f mm, peak=%.2f mV "
+            "max_delay=%.3f us, distance=%.3f mm, peak=%.2f mV, SNR=%s "
             "(SoS=%d m/s, %d pulses, focus=%s)",
             arr.first_peak_us, arr.onset_to_peak_us, arr.arrival_us,
-            max_delay_us, distance_mm, peak_mv, SPEED_OF_SOUND, n_pulses,
+            max_delay_us, distance_mm, peak_mv,
+            "n/a" if snr is None else f"{snr:.1f}", SPEED_OF_SOUND, n_pulses,
             "plane wave" if z_focus_mm is None
             else f"z={float(z_focus_mm):.1f} mm",
         )
@@ -2962,6 +3064,9 @@ class VerificationTank:
             "baseline_mv": baseline_mv,
             "baseline_window_us": float(baseline_window_us),
             "skip_us": float(skip_us),
+            "snr": snr,
+            "noise_rms_mv": noise_rms_mv,
+            "search_window_us": (float(win_lo), float(win_hi)),
         }
 
     def find_peak(self, *,

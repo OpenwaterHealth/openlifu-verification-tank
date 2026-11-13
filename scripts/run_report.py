@@ -565,7 +565,7 @@ def _run(args: argparse.Namespace,
 
         result.passed = bool(report.overall_pass)
         result.graded_rows = [r for r in report.rows.values()
-                              if r.status in ("PASS", "FAIL")]
+                              if r.status in ("PASS", "WARN", "FAIL")]
         result.elapsed_s = time.perf_counter() - t_run_start
         result.run_dir = run_dir
         result.files["xlsx"] = xlsx_path
